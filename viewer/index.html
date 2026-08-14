@@ -86,8 +86,11 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
    box is arithmetic rather than layout, and a 26,000-photo library costs about
    forty tiles instead of 26,000. The date rail needs that anyway: it can only
    map a month to a scroll offset if the whole list has a height. */
-#gallery { overflow-y:auto; overflow-x:hidden;
-           --tile:130px; --gap:4px; --pad:8px; --rail:34px; }
+/* The padding is real rather than a custom property because the phone adds the
+   safe-area inset to the top of it, and a custom property holding a calc() is
+   never resolved - getComputedStyle hands back the text. A padding is. */
+#gallery { overflow-y:auto; overflow-x:hidden; padding:8px 42px 0 8px;
+           --tile:130px; --gap:4px; }
 #gsizer { position:relative; }
 #panel, #insights { overflow-y:auto; padding:12px; }
 
@@ -223,13 +226,20 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
   .tabbar { display:flex; }
 
   /* No top bar on a phone. The tabs are in the bottom bar and the title and
-     summary were already hidden, so the row was 46px of nothing. What is left
-     of it collapses to the notch inset, and the two things that can still
-     appear there float over the view instead of holding a row open. */
-  body { grid-template-rows:var(--top) 1fr auto auto; }
+     summary were already hidden, so the row was 46px of nothing. It collapses
+     to nothing at all - not to the notch inset, which is still a band of panel
+     colour where a phone reports one - and the map runs to the top edge of the
+     screen. Only what would then sit under the status bar is pushed clear of
+     it: the map's own controls, the date rail, and the scrolling views. */
+  body { grid-template-rows:0 1fr auto auto; }
   .bar { padding:0; border-bottom:0; }
   #chips { position:fixed; top:calc(var(--top) + 8px); left:50%;
            transform:translateX(-50%); z-index:1500; }
+  .controls { top:calc(10px + var(--top)); }
+  .leaflet-top, .maplibregl-ctrl-top-left { margin-top:var(--top); }
+  .rail { top:var(--top); }
+  #gallery { padding-top:calc(8px + var(--top)); }
+  #panel, #insights { padding-top:calc(12px + var(--top)); }
 
   /* Filters slide up over the map rather than taking the screen, so the map
      keeps redrawing behind them while the time range moves. */
@@ -996,19 +1006,21 @@ let tileColors = new Map(), tileAlbums = new Map();
  *  photo's box can be worked out without it being in the document. */
 function measure() {
   const cs = getComputedStyle($('gallery'));
-  const num = (name, fallback) => parseFloat(cs.getPropertyValue(name)) || fallback;
-  const pad = num('--pad', 8), gap = num('--gap', 4);
-  const inner = Math.max(0, $('gallery').clientWidth - pad * 2 - num('--rail', 0));
-  const cols = Math.max(1, Math.floor((inner + gap) / (num('--tile', 130) + gap)));
+  const num = (value, fallback) => parseFloat(value) || fallback;
+  const gap = num(cs.getPropertyValue('--gap'), 4);
+  const padT = num(cs.paddingTop, 8);
+  // #gsizer sits inside the padding, so only the width has to account for it.
+  const inner = Math.max(0, $('gallery').clientWidth - num(cs.paddingLeft, 8) - num(cs.paddingRight, 42));
+  const cols = Math.max(1, Math.floor((inner + gap) / (num(cs.getPropertyValue('--tile'), 130) + gap)));
   const tileW = (inner - (cols - 1) * gap) / cols;
-  geo = { cols, tileW, stride: tileW + gap, pad, gap };
+  geo = { cols, tileW, stride: tileW + gap, padT, gap };
 }
 
-const topOfRow = (row) => geo.pad + row * geo.stride;
+const topOfRow = (row) => geo.padT + row * geo.stride;
 
 function place(node, k) {
-  node.style.left = `${geo.pad + (k % geo.cols) * geo.stride}px`;
-  node.style.top = `${topOfRow(Math.floor(k / geo.cols))}px`;
+  node.style.left = `${(k % geo.cols) * geo.stride}px`;
+  node.style.top = `${Math.floor(k / geo.cols) * geo.stride}px`;
   node.style.width = `${geo.tileW}px`;
   node.style.height = `${geo.tileW}px`;
 }
@@ -1034,8 +1046,8 @@ function makeTile(k) {
 /** Bring the tiles around the viewport into the document and drop the rest. */
 function paintWindow() {
   const g = $('gallery');
-  const first = Math.max(0, Math.floor((g.scrollTop - geo.pad) / geo.stride) - OVERSCAN);
-  const last = Math.floor((g.scrollTop + g.clientHeight - geo.pad) / geo.stride) + OVERSCAN;
+  const first = Math.max(0, Math.floor((g.scrollTop - geo.padT) / geo.stride) - OVERSCAN);
+  const last = Math.floor((g.scrollTop + g.clientHeight - geo.padT) / geo.stride) + OVERSCAN;
   const from = first * geo.cols;
   const to = Math.max(from, Math.min(galleryIdx.length, (last + 1) * geo.cols));
   liveTiles.forEach((node, k) => {
@@ -1056,7 +1068,8 @@ function paintWindow() {
 function layoutGallery() {
   measure();
   const rows = Math.ceil(galleryIdx.length / geo.cols);
-  $('gsizer').style.height = `${rows ? geo.pad * 2 + rows * geo.stride - geo.gap : 0}px`;
+  // One stride, not one row: the trailing gap is the slack under the last row.
+  $('gsizer').style.height = `${rows * geo.stride}px`;
   liveTiles.forEach(place);
   paintWindow();
   drawRail();
@@ -1170,14 +1183,16 @@ function bubble(k) {
   const b = $('railBubble');
   const t = M.ts[galleryIdx[k]];
   b.textContent = t ? MY.format(new Date(t * 1000)) : 'No date';
-  b.style.top = `${RAIL_PAD + (k / (galleryIdx.length - 1)) * railRange()}px`;
+  // The bubble and the rail are both laid out against .view, but the rail is
+  // pushed clear of the status bar on a phone, so its own offset has to count.
+  b.style.top = `${$('rail').offsetTop + RAIL_PAD + (k / (galleryIdx.length - 1)) * railRange()}px`;
   b.classList.remove('hidden');
 }
 
 /** Where the gallery is now, mirrored onto the rail. */
 function railFollow() {
   if (galleryIdx.length < 2 || $('rail').classList.contains('hidden')) return;
-  const row = Math.max(0, Math.round(($('gallery').scrollTop - geo.pad) / geo.stride));
+  const row = Math.max(0, Math.round(($('gallery').scrollTop - geo.padT) / geo.stride));
   bubble(Math.min(galleryIdx.length - 1, row * geo.cols));
   clearTimeout(railFollow._t);
   if (!railDrag) railFollow._t = setTimeout(() => $('railBubble').classList.add('hidden'), 900);

@@ -390,12 +390,16 @@ Below 768px the viewer rearranges: the view tabs move to a bottom bar within thu
 reach, filters slide up as a sheet over the map (so the map keeps redrawing behind them
 while you drag the time range), and the delete confirmation goes edge to edge. The top
 bar goes entirely -- the title, the tabs and the summary were all hidden there anyway, so
-it was 46px holding nothing; its row collapses to the notch inset and the two controls
-that can still appear, **Offline** and **Install**, float over the view instead. Safe-area
-insets are honoured, so nothing sits under a notch or a home indicator. There is no sign
-out button: signing out of a private app on your own phone is not something anyone does
-often, and on a phone there is no longer a bar to put it in. Visiting `/__logout` still
-clears the session.
+it was 46px holding nothing -- and the map takes the space, running to the top edge of
+the screen. Its row collapses to zero rather than to the safe-area inset: a phone that
+reports one (any Android drawing edge to edge, not only a notched iPhone) would otherwise
+still show a band of panel colour under the status bar, which is the strip that was worth
+removing in the first place. The inset is then paid by whatever would sit under the
+status bar instead -- the map's controls, the date rail, the scrolling views, and the
+**Offline** and **Install** chips, which float over the view now that there is no row to
+hold them. There is no sign out button: signing out of a private app on your own phone is
+not something anyone does often, and on a phone there is no longer a bar to put it in.
+Visiting `/__logout` still clears the session.
 
 The search box filters filenames and note text together, the same one-box rule the
 desktop uses, and every view answers it - map, globe, gallery and insights all read the
