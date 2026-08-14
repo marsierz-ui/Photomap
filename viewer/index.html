@@ -1,0 +1,1688 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Photo Map</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🗺️</text></svg>">
+<!-- Installable. Every path here is relative, so the app still resolves if the
+     bucket is ever served from a subpath rather than the root of a Worker. -->
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0e1116">
+<!-- iOS ignores the manifest for these: without them "Add to Home Screen"
+     makes a Safari bookmark rather than a standalone app, and takes a
+     screenshot of the page as the icon. -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Photo Map">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<!-- Served from the bucket, not a CDN. A cross-origin script is one the service
+     worker cannot cache, which left the installed app with no map at all when
+     it was offline - the one thing it exists to survive. -->
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="vendor/leaflet/MarkerCluster.css">
+<style>
+:root { --bg:#0e1116; --panel:#161b22; --panel-2:#1c232d; --line:#2a323d;
+        --text:#e6edf3; --muted:#8b97a6; --accent:#4aa3ff; --radius:6px;
+        /* Zero everywhere except an installed app on a notched phone, where the
+           status bar and home indicator sit over the page. */
+        --top:env(safe-area-inset-top, 0px); --bottom:env(safe-area-inset-bottom, 0px); }
+* { box-sizing: border-box; }
+html, body { height:100%; margin:0; background:var(--bg); color:var(--text);
+             font:13px/1.45 system-ui,"Segoe UI",Roboto,sans-serif; overflow:hidden; }
+/* dvh, not vh: iOS Safari counts the address bar in vh, so the bottom row would
+   sit under it until the first scroll. The last row is the mobile tab bar,
+   which collapses to nothing while it is display:none. */
+body { display:grid; grid-template-columns:100%; height:100dvh;
+       grid-template-rows:calc(46px + var(--top)) 1fr auto auto; }
+
+.bar { display:flex; align-items:center; gap:8px; padding:var(--top) 10px 0; background:var(--panel);
+       border-bottom:1px solid var(--line); overflow:hidden; }
+.bar > * { flex-shrink:0; }
+#chips { display:flex; align-items:center; gap:8px; }
+.title { font-weight:650; }
+.spacer { flex:1; }
+.muted { color:var(--muted); }
+.small { font-size:11px; }
+.hidden { display:none !important; }
+.chip { border:1px solid var(--line); border-radius:99px; padding:2px 9px; font-size:11px;
+        background:var(--panel-2); color:var(--muted); white-space:nowrap; }
+.chip.warn { border-color:#5c4a2a; color:#ffd08a; }
+
+button, select, input { font:inherit; color:inherit; }
+button, select { background:var(--panel-2); border:1px solid var(--line);
+                 border-radius:var(--radius); padding:5px 10px; cursor:pointer; }
+button:disabled { opacity:.45; cursor:default; }
+button.active { background:var(--accent); border-color:var(--accent); color:#06121f; font-weight:600; }
+button.danger { border-color:#5c2a2c; color:#ff9ea1; }
+.seg { display:flex; border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; }
+.seg button { border:0; border-radius:0; }
+.tabs button { background:transparent; border:1px solid transparent; color:var(--muted); }
+.tabs button.on { background:var(--panel-2); border-color:var(--line); color:var(--text); }
+
+.view { position:relative; min-height:0; overflow:hidden; }
+#map, #gallery, #panel, #insights, #globe { position:absolute; inset:0; }
+#map { background:#0b0e13; }
+#globe { background:#080b11; }
+/* Leaflet keeps its zoom and attribution controls above everything in its pane,
+   so they would sit on top of the globe. Hidden, not removed: it would lose
+   track of its size, and something has to be under the globe while it loads. */
+#map.under-globe { visibility:hidden; }
+
+.controls .seg { background:var(--panel); }
+.controls .seg button { font-size:11px; padding:4px 7px; }
+.controls > button { font-size:11px; padding:4px 8px; }
+.heatctl { margin:0; padding:7px 9px; width:150px; }
+.heatctl label { display:block; font-size:10px; color:var(--muted); margin-bottom:3px; }
+.heatctl input { width:100%; margin:0 0 4px; }
+.box-select { position:absolute; z-index:800; border:1px dashed var(--accent);
+              background:rgba(74,163,255,.15); pointer-events:none; }
+.selecting, .selecting .leaflet-grab { cursor:crosshair; }
+.globe-tip { position:absolute; top:0; left:0; z-index:600; pointer-events:none;
+             background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+             padding:6px; box-shadow:0 6px 18px rgba(0,0,0,.55); }
+.globe-tip img { display:block; border-radius:3px; }
+/* Only the screenful in view exists as DOM. The grid is uniform, so a photo's
+   box is arithmetic rather than layout, and a 26,000-photo library costs about
+   forty tiles instead of 26,000. The date rail needs that anyway: it can only
+   map a month to a scroll offset if the whole list has a height. */
+#gallery { overflow-y:auto; overflow-x:hidden;
+           --tile:130px; --gap:4px; --pad:8px; --rail:34px; }
+#gsizer { position:relative; }
+#panel, #insights { overflow-y:auto; padding:12px; }
+
+/* Date rail: a scrollbar that knows what month it is on. Dragging it scrubs the
+   gallery. Labels sit at the offset of the first photo of each year, and months
+   fill whatever room is left between them. */
+.rail { position:absolute; top:0; right:0; bottom:0; width:34px; z-index:620;
+        touch-action:none; -webkit-user-select:none; user-select:none; }
+.rail b { position:absolute; right:5px; transform:translateY(-50%); pointer-events:none;
+          font:600 10px/1 system-ui; color:var(--muted); }
+.rail b.y { color:var(--text); font-size:11px; }
+.railbubble { position:absolute; right:40px; z-index:640; transform:translateY(-50%);
+              background:var(--accent); color:#06121f; font:600 12px/1 system-ui;
+              border-radius:99px; padding:5px 11px; white-space:nowrap; pointer-events:none;
+              box-shadow:0 6px 18px rgba(0,0,0,.5); }
+
+/* Insights. Bars are a grid rather than a chart library: one row per bucket,
+   label / bar / count, so it stays readable at phone width. */
+.figs { display:grid; grid-template-columns:repeat(auto-fit,minmax(112px,1fr)); gap:8px; }
+.fig { background:var(--panel-2); border:1px solid var(--line); border-radius:var(--radius); padding:8px 10px; }
+.fig .v { font-size:17px; font-weight:650; }
+.fig .k { color:var(--muted); font-size:11px; }
+.bars { display:grid; grid-template-columns:auto 1fr auto; gap:3px 8px; align-items:center; }
+.bars .lab { color:var(--muted); font-size:11px; white-space:nowrap; }
+.bars .num { color:var(--muted); font-size:11px; text-align:right; font-variant-numeric:tabular-nums; }
+.bars .track { background:var(--panel-2); border-radius:3px; height:13px; overflow:hidden; }
+.bars .track i { display:block; height:100%; background:var(--accent); border-radius:3px; }
+.bars .track i.dim { background:#3a4757; }
+
+.tile { position:absolute; background:#0b0e13; border-radius:4px;
+        overflow:hidden; cursor:pointer; border:2px solid transparent; }
+.tile img { width:100%; height:100%; object-fit:cover; display:block; opacity:0; transition:opacity .18s; }
+.tile img.on { opacity:1; }
+.tile.sel { border-color:var(--accent); }
+.tile .pick { position:absolute; top:5px; left:5px; width:16px; height:16px; border-radius:50%;
+              border:2px solid rgba(255,255,255,.8); background:rgba(0,0,0,.35); }
+.tile.sel .pick { background:var(--accent); border-color:#fff; }
+.tile .star { position:absolute; top:4px; right:5px; font-size:12px; color:#ffd166; }
+.tile .dots { position:absolute; bottom:4px; left:5px; display:flex; gap:3px; }
+.tile .dots i { width:8px; height:8px; border-radius:50%; box-shadow:0 0 0 1px rgba(0,0,0,.5); }
+
+.controls { position:absolute; top:10px; right:10px; z-index:500; display:flex;
+            flex-direction:column; gap:6px; align-items:flex-end; }
+.status { position:absolute; bottom:10px; left:10px; z-index:500; background:rgba(22,27,34,.92);
+          border:1px solid var(--line); border-radius:var(--radius); padding:5px 10px;
+          font-size:11px; color:var(--muted); }
+
+.foot { background:var(--panel); border-top:1px solid var(--line); padding:7px 10px;
+        display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+#range { flex:1; min-width:140px; }
+
+button.danger { border-color:#5c2a2c; color:#ff9ea1; }
+.selbar { position:fixed; left:50%; bottom:74px; transform:translateX(-50%); z-index:1200;
+          display:flex; align-items:center; gap:8px; background:var(--panel);
+          border:1px solid var(--line); border-radius:99px; padding:7px 14px;
+          box-shadow:0 8px 28px rgba(0,0,0,.55); max-width:calc(100vw - 16px); flex-wrap:wrap; }
+
+.card { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+        padding:10px; margin-bottom:10px; }
+.card h4 { margin:0 0 8px; font-size:12px; color:var(--muted); }
+.row { display:flex; align-items:center; gap:8px; padding:5px 4px; border-radius:4px; cursor:pointer; }
+.row:hover { background:var(--panel-2); }
+.row .dot { width:10px; height:10px; border-radius:50%; flex:none; }
+.row .name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dupset { display:flex; gap:6px; flex-wrap:wrap; align-items:flex-start;
+          border-bottom:1px solid var(--line); padding:8px 0; }
+.dupphoto { width:96px; cursor:pointer; border:2px solid transparent; border-radius:5px;
+            padding:3px; background:var(--panel-2); }
+.dupphoto.keep { border-color:#3fb950; background:#16241a; }
+.dupphoto img { width:100%; aspect-ratio:1; object-fit:cover; border-radius:3px; display:block; }
+.dupphoto .b { font-size:9px; font-weight:600; display:block; text-align:center; margin-top:3px; }
+.dupphoto.keep .b { color:#7ee2a8; }
+.dupphoto .b { color:#ff9ea1; }
+
+.pin i { display:block; width:10px; height:10px; margin:2px; border-radius:50%;
+         background:var(--accent); border:1px solid rgba(255,255,255,.85); }
+.marker-cluster-small div, .marker-cluster-medium div, .marker-cluster-large div {
+  background:rgba(74,163,255,.85); color:#06121f; font:600 11px system-ui; }
+.marker-cluster-small, .marker-cluster-medium, .marker-cluster-large { background:rgba(74,163,255,.25); }
+.leaflet-popup-content-wrap, .leaflet-popup-tip { background:var(--panel); color:var(--text); border:1px solid var(--line); }
+.leaflet-popup-content img { display:block; border-radius:4px; max-width:220px; height:auto; }
+
+#shade { position:fixed; inset:0; z-index:3000; background:rgba(6,8,12,.96);
+         display:none; align-items:center; justify-content:center; flex-direction:column; gap:10px; }
+#shade img { max-width:94vw; max-height:76vh; border-radius:6px; }
+#shade .bar2 { display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:center; }
+#shade .notewrap { display:flex; flex-direction:column; gap:3px; width:min(520px,94vw); }
+#shadeNote { width:100%; resize:vertical; background:var(--panel-2); border:1px solid var(--line);
+             border-radius:var(--radius); padding:8px; color:inherit; font:inherit; }
+.tile .pen { position:absolute; bottom:4px; right:5px; font-size:11px; color:#cfe3ff;
+             text-shadow:0 0 3px rgba(0,0,0,.8); }
+#search { min-width:150px; flex:1; background:var(--panel-2); border:1px solid var(--line);
+          border-radius:var(--radius); padding:5px 9px; }
+
+#toast { position:fixed; bottom:80px; left:12px; right:12px; z-index:3500; margin:auto;
+         max-width:460px; background:var(--panel); border:1px solid var(--line);
+         border-left:3px solid var(--accent); border-radius:var(--radius); padding:9px 13px;
+         display:none; align-items:center; justify-content:space-between; gap:8px; }
+#toast.err { border-left-color:#e5484d; }
+
+#confirm { position:fixed; inset:0; z-index:4200; background:rgba(4,6,10,.75);
+           display:none; align-items:center; justify-content:center; padding:12px; }
+#confirm .box { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+                padding:18px; width:min(440px,100%); max-height:86vh; overflow:auto; }
+#confirm h3 { margin:0 0 10px; font-size:16px; }
+#confirm .thumbs { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:10px; align-items:center; }
+#confirm .thumbs img { width:58px; height:58px; object-fit:cover; border-radius:4px; }
+#confirm .thumbs .more { color:var(--muted); font-size:12px; padding:0 6px; }
+#confirm input { width:100%; box-sizing:border-box; background:var(--panel-2);
+                 border:1px solid var(--line); border-radius:6px; padding:9px; margin-bottom:10px; }
+#confirm .acts { display:flex; gap:8px; justify-content:flex-end; }
+#confirm .danger { background:#3a1e20; border-color:#5c2a2c; color:#ff9ea1; font-weight:600; }
+.loading { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+           background:var(--bg); z-index:4000; flex-direction:column; gap:10px; }
+.err { color:#ff9ea1; max-width:420px; text-align:center; }
+
+/* Bottom navigation, phone only. Hidden on desktop, where the tabs live in the
+   top bar; its grid row costs nothing while it is display:none. */
+.tabbar { display:none; background:var(--panel); border-top:1px solid var(--line);
+          padding-bottom:var(--bottom); }
+.tabbar button { flex:1; background:transparent; border:0; border-radius:0; color:var(--muted);
+                 display:flex; flex-direction:column; align-items:center; gap:3px;
+                 padding:7px 0 6px; font-size:11px; }
+.tabbar button.on { color:var(--accent); }
+.tabbar .ico { font-size:17px; line-height:1; }
+#filterDone { display:none; }
+
+/* One breakpoint. Below it the top tabs move to the bottom bar, the filter row
+   becomes a sheet over the map, and the confirmation dialog goes edge to edge. */
+@media (max-width:768px) {
+  .title, .bar .tabs, #summary { display:none; }
+  #gallery { --tile:104px; }
+  .tabbar { display:flex; }
+
+  /* No top bar on a phone. The tabs are in the bottom bar and the title and
+     summary were already hidden, so the row was 46px of nothing. What is left
+     of it collapses to the notch inset, and the two things that can still
+     appear there float over the view instead of holding a row open. */
+  body { grid-template-rows:var(--top) 1fr auto auto; }
+  .bar { padding:0; border-bottom:0; }
+  #chips { position:fixed; top:calc(var(--top) + 8px); left:50%;
+           transform:translateX(-50%); z-index:1500; }
+
+  /* Filters slide up over the map rather than taking the screen, so the map
+     keeps redrawing behind them while the time range moves. */
+  .foot { position:fixed; left:0; right:0; bottom:0; z-index:2100;
+          flex-direction:column; align-items:stretch; gap:10px;
+          padding:14px 14px calc(14px + var(--bottom));
+          transform:translateY(103%); transition:transform .2s ease;
+          box-shadow:0 -14px 34px rgba(0,0,0,.55); }
+  body.filters-on .foot { transform:none; }
+  .foot select, .foot #range, #filterDone { width:100%; }
+  .foot label { padding:4px 0; }
+  #filterDone { display:block; }
+
+  /* Box select wants a mouse drag, which is the gesture the map already uses
+     for panning on a touch screen - and it listens for mouse events a phone
+     never sends. Hidden rather than left as a button that does nothing. */
+  #boxSelect { display:none; }
+
+  .selbar, #toast { bottom:calc(72px + var(--bottom)); }
+  #shade img { max-height:66vh; }
+  #shade .bar2 { padding:0 10px calc(10px + var(--bottom)); }
+
+  #confirm { padding:0; }
+  #confirm .box { width:100%; height:100%; max-height:none; border-radius:0;
+                  padding:18px; padding-top:calc(18px + var(--top)); }
+}
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <span class="title">Photo&nbsp;Map</span>
+  <div class="tabs seg">
+    <button data-view="map" class="on">Map</button>
+    <button data-view="gallery">Gallery</button>
+    <button data-view="panel">Albums</button>
+    <button data-view="insights">Insights</button>
+  </div>
+  <span class="spacer"></span>
+  <span id="chips">
+    <span id="offline" class="chip warn hidden">Offline</span>
+    <button id="install" class="hidden">Install</button>
+  </span>
+  <span id="summary" class="muted small"></span>
+</header>
+
+<div class="view">
+  <div id="map"></div>
+  <div id="gallery" class="hidden"><div id="gsizer"></div></div>
+  <div id="panel" class="hidden"></div>
+  <div id="insights" class="hidden"></div>
+  <div id="globe" class="hidden"></div>
+  <div id="rail" class="rail hidden"></div>
+  <div id="railBubble" class="railbubble hidden"></div>
+  <div class="controls" id="mapControls">
+    <div class="seg" id="mode">
+      <button data-mode="heat" class="active">Heat</button>
+      <button data-mode="cluster">Clusters</button>
+      <button data-mode="points">Points</button>
+      <button data-mode="globe">Globe</button>
+    </div>
+    <div class="seg" id="base">
+      <button data-base="dark" class="active">Dark</button>
+      <button data-base="streets">Streets</button>
+      <button data-base="satellite">Satellite</button>
+    </div>
+    <div class="seg hidden" id="globeSkin">
+      <button data-skin="map" class="active">Map</button>
+      <button data-skin="satellite">Satellite</button>
+    </div>
+    <div class="seg">
+      <button id="togglePath">Path</button>
+      <button id="toggleDays" class="hidden">Days</button>
+      <button id="boxSelect">Box</button>
+    </div>
+    <button id="fit">Fit to photos</button>
+    <div class="card heatctl" id="heatCtl">
+      <label>Radius <input type="range" id="heatRadius" min="1" max="40" value="22"></label>
+      <label>Blur <input type="range" id="heatBlur" min="1" max="40" value="16"></label>
+      <label>Intensity <input type="range" id="heatIntensity" min="1" max="30" value="10"></label>
+    </div>
+  </div>
+  <div class="status" id="status"></div>
+</div>
+
+<footer class="foot">
+  <input type="search" id="search" placeholder="Search filenames and notes"
+         autocomplete="off" autocapitalize="off" spellcheck="false">
+  <select id="album"><option value="">All photos</option></select>
+  <label class="small muted"><input type="checkbox" id="favOnly"> ★ only</label>
+  <input type="range" id="range" min="0" max="100" value="100">
+  <span id="stamp" class="muted small"></span>
+  <button id="filterDone">Done</button>
+</footer>
+
+<nav class="tabbar" id="tabbar">
+  <button data-view="map"><span class="ico">🗺</span>Map</button>
+  <button data-view="gallery"><span class="ico">▦</span>Gallery</button>
+  <button data-view="panel"><span class="ico">☰</span>Albums</button>
+  <button data-view="insights"><span class="ico">▤</span>Insights</button>
+  <button id="filterBtn"><span class="ico">⚙</span>Filters</button>
+</nav>
+
+<div id="selbar" class="selbar hidden">
+  <strong id="selCount">0 selected</strong>
+  <button id="selAlbum">Add to album…</button>
+  <button id="selFav">★ Favourite</button>
+  <button id="selDelete" class="danger hidden">Delete…</button>
+  <button id="selClear">Clear</button>
+</div>
+
+<div id="confirm"></div>
+
+<div id="shade">
+  <img alt="">
+  <div class="bar2">
+    <span id="shadeCap" class="muted small"></span>
+    <button id="shadeFav">★ Favourite</button>
+    <button id="shadeDelete" class="danger hidden">Delete…</button>
+    <button id="shadeClose">Close</button>
+  </div>
+  <div class="notewrap">
+    <textarea id="shadeNote" rows="2" placeholder="Add a note…"></textarea>
+    <span id="noteState" class="muted small"></span>
+  </div>
+</div>
+
+<div id="toast"></div>
+<div class="loading" id="loading"><div>Loading…</div><div class="err small" id="loadErr"></div></div>
+
+<script src="vendor/leaflet/leaflet.js"></script>
+<script src="vendor/leaflet/leaflet.markercluster.js"></script>
+<script src="vendor/leaflet/leaflet-heat.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const DF = new Intl.DateTimeFormat(undefined, { year:'numeric', month:'short', day:'numeric', timeZone:'UTC' });
+const DTF = new Intl.DateTimeFormat(undefined, { year:'numeric', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', timeZone:'UTC' });
+const fmtDate = (t) => t ? DF.format(new Date(t * 1000)) : '—';
+const fmtDT = (t) => t ? DTF.format(new Date(t * 1000)) : '—';
+const fmtNum = (n) => Number(n || 0).toLocaleString();
+
+let M = null;                 // manifest
+let view = 'map', mode = 'heat';
+let cutoff = Infinity, albumFilter = null, favOnly = false, query = '';
+const selection = new Set();
+const pending = [];           // changes queued locally, mirrored into the view
+
+function toast(msg, isErr) {
+  const t = $('toast');
+  t.innerHTML = '';
+  t.appendChild(Object.assign(document.createElement('span'), { textContent: msg }));
+  t.classList.toggle('err', !!isErr);
+  t.style.display = 'flex';
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { t.style.display = 'none'; }, isErr ? 6000 : 3000);
+}
+
+/** Queue a change for the desktop app to pick up on its next sync. */
+async function send(change) {
+  // Queued changes live in the bucket, so there is nowhere to put one offline.
+  // Saying so beats a generic failure after the request times out.
+  if (!navigator.onLine) {
+    toast('Offline - favourites and albums need a connection', true);
+    return false;
+  }
+  try {
+    const r = await fetch('/api/change', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(change),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.statusText);
+    pending.push(change);
+    send.lastKey = data.key || null;
+    return true;
+  } catch (e) {
+    toast(`Could not save: ${e.message}`, true);
+    send.lastKey = null;
+    return false;
+  }
+}
+
+/** Offer to undo while the change is still sitting in the queue. */
+function offerUndo(message, key, onUndone) {
+  const t = $('toast');
+  t.classList.remove('err');
+  t.innerHTML = `<span>${escapeHtml(message)}</span>`;
+  if (key) {
+    const button = document.createElement('button');
+    button.textContent = 'Undo';
+    button.style.marginLeft = '10px';
+    button.onclick = async () => {
+      const r = await fetch('/api/change/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key }),
+      });
+      if (r.ok) {
+        toast('Undone - nothing was deleted');
+        if (onUndone) onUndone();
+      } else {
+        const data = await r.json().catch(() => ({}));
+        toast(data.error || 'Too late to undo - it already synced', true);
+      }
+    };
+    t.appendChild(button);
+  }
+  t.style.display = 'block';
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { t.style.display = 'none'; }, 15000);
+}
+
+/** Deliberate two-step confirmation before anything is deleted. */
+function askDelete(indexes) {
+  return new Promise((resolve) => {
+    const n = indexes.length;
+    const previews = indexes.slice(0, 12)
+      .map((i) => `<img src="t/${M.th[i]}.jpg" alt="">`).join('');
+    const needsTyping = n > 1;
+    $('confirm').innerHTML = `
+      <div class="box">
+        <h3>Delete ${fmtNum(n)} photo${n === 1 ? '' : 's'}?</h3>
+        <div class="thumbs">${previews}${n > 12 ? `<span class="more">+${fmtNum(n - 12)} more</span>` : ''}</div>
+        <p class="muted small">
+          The file${n === 1 ? '' : 's'} will be moved to the recycle bin on your computer at the
+          next sync, and removed from the library. You can restore ${n === 1 ? 'it' : 'them'}
+          from the bin, but not from here.
+        </p>
+        ${needsTyping ? `<p class="small">Type <strong>${n}</strong> to confirm:</p>
+          <input id="confirmCount" inputmode="numeric" autocomplete="off">` : ''}
+        <div class="acts">
+          <button data-x="no">Cancel</button>
+          <button data-x="yes" class="danger" ${needsTyping ? 'disabled' : ''}>
+            Delete ${fmtNum(n)}</button>
+        </div>
+      </div>`;
+    $('confirm').style.display = 'flex';
+
+    const yes = $('confirm').querySelector('[data-x=yes]');
+    if (needsTyping) {
+      const field = $('confirmCount');
+      field.focus();
+      field.oninput = () => { yes.disabled = field.value.trim() !== String(n); };
+      field.onkeydown = (e) => { if (e.key === 'Enter' && !yes.disabled) yes.click(); };
+    }
+    const close = (answer) => { $('confirm').style.display = 'none'; resolve(answer); };
+    yes.onclick = () => close(true);
+    $('confirm').querySelector('[data-x=no]').onclick = () => close(false);
+    $('confirm').onclick = (e) => { if (e.target.id === 'confirm') close(false); };
+  });
+}
+
+async function deletePhotos(indexes) {
+  if (!M.allow_delete) {
+    toast('Deleting is switched off. Enable it in the app on your computer.', true);
+    return;
+  }
+  if (indexes.length > (M.delete_cap || 200)) {
+    toast(`At most ${fmtNum(M.delete_cap || 200)} photos can be deleted at once`, true);
+    return;
+  }
+  if (!await askDelete(indexes)) return;
+
+  const ids = indexes.map((i) => M.ids[i]);
+  if (!await send({ op: 'photo_delete', photo_ids: ids, confirm_count: ids.length })) return;
+
+  const key = send.lastKey;
+  const removed = new Set(ids);
+  const kept = [];
+  for (let i = 0; i < M.n; i += 1) if (!removed.has(M.ids[i])) kept.push(i);
+  const snapshotOf = (field) => kept.map((i) => M[field][i]);
+  const restore = { ids: M.ids, lat: M.lat, lon: M.lon, ts: M.ts, th: M.th, fav: M.fav,
+                    sz: M.sz, cam: M.cam, n: M.n };
+  ['ids', 'lat', 'lon', 'ts', 'th', 'fav'].forEach((f) => { M[f] = snapshotOf(f); });
+  if (M.sz) M.sz = kept.map((i) => restore.sz[i]);
+  if (M.cam) M.cam = kept.map((i) => restore.cam[i]);
+  M.n = kept.length;
+  idPos = null;
+
+  selection.clear();
+  paintSel();
+  refresh();
+  offerUndo(`${fmtNum(ids.length)} queued for deletion`, key, () => {
+    Object.assign(M, restore);
+    idPos = null;
+    refresh();
+  });
+}
+
+// ------------------------------------------------------------------ filtering
+
+/** The note as it stands now, including one edited on this device but not yet
+ *  drained by the desktop - so a search finds what you just wrote. */
+const noteOf = (i) => (M.notes ? M.notes[M.ids[i]] || '' : '');
+
+function visible() {
+  const out = [];
+  const albumSet = albumFilter
+    ? new Set(M.albums.find((a) => a.id === albumFilter)?.photos || [])
+    : null;
+  for (let i = 0; i < M.n; i += 1) {
+    if (M.ts[i] > cutoff) continue;
+    if (favOnly && !M.fav[i]) continue;
+    if (albumSet && !albumSet.has(M.ids[i])) continue;
+    // One box searches both, because "the shot with the broken bike" is a note
+    // and "IMG_4021" is a filename, and nobody wants to pick first.
+    if (query) {
+      const name = (M.name ? M.name[i] || '' : '').toLowerCase();
+      if (!name.includes(query) && !noteOf(i).toLowerCase().includes(query)) continue;
+    }
+    out.push(i);
+  }
+  return out;
+}
+
+const located = (idx) => idx.filter((i) => M.lat[i] != null);
+
+// ----------------------------------------------------------------------- map
+
+// Clustering builds one DOM marker per photo, so it is capped well below the
+// canvas-drawn points layer. Past the cap the heat map answers the same
+// question without asking the browser for 60,000 elements.
+const MAX_MARKERS = 60000;
+const MAX_POINTS = 120000;
+const MAX_PATH = 5000;
+const BASE_COLOR = '#4aa3ff';
+
+let heatLayer = null, clusterLayer = null, pointLayer = null, pathLayer = null;
+let base = 'dark', showPath = false, byDay = false, armed = false;
+
+const map = L.map('map', {
+  center:[25,10], zoom:3, maxZoom:22, worldCopyJump:true, preferCanvas:true,
+  boxZoom:false,  // shift-drag is box select here, as it is on the desktop
+});
+
+const bases = {
+  dark: L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+    { attribution:'&copy; OpenStreetMap, &copy; CARTO', maxZoom:22, maxNativeZoom:20, subdomains:'abcd' }),
+  streets: L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    { attribution:'&copy; OpenStreetMap contributors', maxZoom:22, maxNativeZoom:19 }),
+  satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    { attribution:'Imagery &copy; Esri', maxZoom:22, maxNativeZoom:19 }),
+};
+bases.dark.addTo(map);
+
+function setBase(name) {
+  if (!bases[name] || map.hasLayer(bases[name])) return;
+  Object.values(bases).forEach((l) => map.removeLayer(l));
+  bases[name].addTo(map);
+  base = name;
+}
+
+/** One colour per capture day. The golden-angle step puts consecutive days on
+ *  opposite sides of the wheel, so a week reads as a week and not a gradient.
+ *  Same constants as the desktop, so a place looks the same in both. */
+function dayColor(ts) {
+  if (ts == null || !ts) return BASE_COLOR;
+  const hue = ((Math.floor(ts / 86400) * 137.508) % 360 + 360) % 360;
+  return `hsl(${hue}, 72%, 62%)`;
+}
+
+const albumColor = () => {
+  const a = albumFilter ? M.albums.find((x) => x.id === albumFilter) : null;
+  return a ? a.color : BASE_COLOR;
+};
+
+function heatOptions() {
+  return {
+    radius: Number($('heatRadius').value),
+    blur: Number($('heatBlur').value),
+    max: Math.max(0.1, (31 - Number($('heatIntensity').value)) / 10),
+    minOpacity: 0.25,
+    maxZoom: 12,
+  };
+}
+
+function clearLayers() {
+  [heatLayer, clusterLayer, pointLayer, pathLayer].forEach((l) => { if (l) map.removeLayer(l); });
+  heatLayer = clusterLayer = pointLayer = pathLayer = null;
+}
+
+function bindPhotoEvents(layer) {
+  layer.on('click', (e) => {
+    const i = e.layer?.options?.photoIndex;
+    if (i != null) openPhoto(i);
+  });
+  layer.on('mouseover', (e) => {
+    const i = e.layer?.options?.photoIndex;
+    if (i == null) return;
+    e.layer.bindTooltip(
+      `<img src="t/${M.th[i]}.jpg" width="140" alt="">`
+      + `<div class="muted small">${fmtDT(M.ts[i])}</div>`,
+      { direction:'top', offset:[0,-8], opacity:1 },
+    ).openTooltip();
+  });
+}
+
+/** How many distinct capture days the colours are separating, once they mean
+ *  something. Photos with no date share the fallback colour and are not days. */
+function daySuffix(idx) {
+  if (!byDay) return '';
+  const days = new Set();
+  idx.forEach((i) => { if (M.ts[i]) days.add(Math.floor(M.ts[i] / 86400)); });
+  return ` · ${fmtNum(days.size)} day${days.size === 1 ? '' : 's'}`;
+}
+
+function drawMap() {
+  const shownAll = visible();
+  const idx = located(shownAll);
+  $('map').classList.toggle('under-globe', mode === 'globe');
+
+  if (mode === 'globe') {
+    clearLayers();
+    if (!globeShow(idx)) { setStatus('Preparing the globe…'); return; }
+    const on = Math.min(idx.length, MAX_POINTS);
+    setStatus(idx.length
+      ? `${on < idx.length ? `${fmtNum(on)} of ${fmtNum(idx.length)} on the globe` : `${fmtNum(idx.length)} located photos`}${daySuffix(idx.slice(0, on))}`
+      : 'No photos with location for these filters');
+    return;
+  }
+  globeHide();
+  clearLayers();
+
+  if (!idx.length || !map.getContainer().getBoundingClientRect().width) {
+    setStatus(`0 located · ${fmtNum(shownAll.length)} shown of ${fmtNum(M.n)}`);
+    return;
+  }
+  const color = albumColor();
+  const tail = ` · ${fmtNum(shownAll.length)} shown of ${fmtNum(M.n)}`;
+
+  if (mode === 'heat' || (mode === 'cluster' && idx.length > MAX_MARKERS)) {
+    heatLayer = L.heatLayer(idx.map((i) => [M.lat[i], M.lon[i], 1]), heatOptions()).addTo(map);
+    setStatus(`${fmtNum(idx.length)} located`
+      + (mode === 'cluster' ? ' - too many to cluster, showing heat' : '') + tail);
+  } else if (mode === 'cluster') {
+    clusterLayer = L.markerClusterGroup({
+      chunkedLoading:true, maxClusterRadius:45, spiderfyOnMaxZoom:true, disableClusteringAtZoom:19,
+    });
+    clusterLayer.addLayers(idx.map((i) => {
+      const m = L.marker([M.lat[i], M.lon[i]], {
+        icon: L.divIcon({ className:'pin', html:`<i style="background:${byDay ? dayColor(M.ts[i]) : color}"></i>`,
+                          iconSize:[14,14], iconAnchor:[7,7] }),
+      });
+      m.options.photoIndex = i;
+      return m;
+    }));
+    bindPhotoEvents(clusterLayer);
+    clusterLayer.addTo(map);
+    setStatus(`${fmtNum(idx.length)} located${daySuffix(idx)}${tail}`);
+  } else {
+    // Canvas circles rather than markers: one element for the whole layer, so
+    // this is the mode that survives six figures of photos.
+    const capped = Math.min(idx.length, MAX_POINTS);
+    pointLayer = L.featureGroup();
+    const renderer = L.canvas({ padding:0.3 });
+    for (let k = 0; k < capped; k += 1) {
+      const i = idx[k];
+      const shade = byDay ? dayColor(M.ts[i]) : color;
+      const chosen = selection.has(M.ids[i]);
+      L.circleMarker([M.lat[i], M.lon[i]], {
+        radius: chosen ? 6 : 4,
+        color: chosen ? '#fff' : shade,
+        weight: chosen ? 2 : 1,
+        fillColor: shade, fillOpacity:0.75, renderer, photoIndex:i,
+      }).addTo(pointLayer);
+    }
+    bindPhotoEvents(pointLayer);
+    pointLayer.addTo(map);
+    setStatus((capped < idx.length ? `${fmtNum(capped)} of ${fmtNum(idx.length)} shown`
+                                   : `${fmtNum(idx.length)} located`)
+      + daySuffix(idx.slice(0, capped)) + tail);
+  }
+
+  if (showPath && idx.length > 1 && idx.length <= MAX_PATH) {
+    // Capture order, which is what makes the line a trip rather than a scribble.
+    const ordered = [...idx].sort((a, b) => (M.ts[a] || 0) - (M.ts[b] || 0));
+    pathLayer = L.polyline(ordered.map((i) => [M.lat[i], M.lon[i]]),
+      { color, weight:1.5, opacity:0.6, dashArray:'4 4' }).addTo(map);
+  } else if (showPath && idx.length > MAX_PATH) {
+    toast(`Path hidden: ${fmtNum(idx.length)} points exceeds the ${fmtNum(MAX_PATH)} limit`);
+  }
+}
+
+const setStatus = (text) => { $('status').textContent = text; };
+
+function fit() {
+  const idx = located(visible());
+  if (!idx.length) return;
+  let s = 90, w = 180, n = -90, e = -180;
+  idx.forEach((i) => {
+    s = Math.min(s, M.lat[i]); n = Math.max(n, M.lat[i]);
+    w = Math.min(w, M.lon[i]); e = Math.max(e, M.lon[i]);
+  });
+  if (mode === 'globe') globeFit(s, w, n, e);
+  else map.fitBounds([[s, w], [n, e]], { padding:[40,40], maxZoom:17 });
+}
+
+// ------------------------------------------------------------- box select
+
+// Everything the viewer knows is already in memory, so the rectangle is
+// answered here rather than by a server: the desktop has to ask, because its
+// map holds only the points it has loaded.
+function wireBoxSelect() {
+  const container = map.getContainer();
+  let start = null, box = null;
+
+  container.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || (!armed && !e.shiftKey) || mode === 'globe') return;
+    e.preventDefault();
+    map.dragging.disable();
+    start = map.mouseEventToContainerPoint(e);
+    box = document.createElement('div');
+    box.className = 'box-select';
+    container.appendChild(box);
+  });
+
+  container.addEventListener('mousemove', (e) => {
+    if (!start) return;
+    const now = map.mouseEventToContainerPoint(e);
+    box.style.left = `${Math.min(start.x, now.x)}px`;
+    box.style.top = `${Math.min(start.y, now.y)}px`;
+    box.style.width = `${Math.abs(now.x - start.x)}px`;
+    box.style.height = `${Math.abs(now.y - start.y)}px`;
+  });
+
+  window.addEventListener('mouseup', (e) => {
+    if (!start) return;
+    const from = start, to = map.mouseEventToContainerPoint(e);
+    start = null;
+    box.remove(); box = null;
+    map.dragging.enable();
+    if (armed) { armed = false; $('boxSelect').classList.remove('active'); container.classList.remove('selecting'); }
+    if (Math.abs(to.x - from.x) < 5 && Math.abs(to.y - from.y) < 5) return;
+
+    const bounds = L.latLngBounds(map.containerPointToLatLng(from), map.containerPointToLatLng(to));
+    const hits = located(visible()).filter((i) => bounds.contains([M.lat[i], M.lon[i]]));
+    if (!hits.length) { toast('No photos in that area'); return; }
+    hits.forEach((i) => selection.add(M.ids[i]));
+    paintSel();
+    drawMap();
+    toast(`${fmtNum(hits.length)} photos selected`);
+  });
+}
+wireBoxSelect();
+
+// ------------------------------------------------------------------- globe
+
+// MapLibre is around half a megabyte and most sessions never open this mode, so
+// it is fetched the first time the globe is chosen rather than at boot.
+const G = { lib:null, map:null, ready:false, booting:false, skin:'map', hovered:null, timer:null, tip:null };
+const GLOBE_EMPTY = { type:'FeatureCollection', features:[] };
+const RETINA = window.devicePixelRatio > 1 ? '@2x' : '';
+
+const GLOBE_SKINS = {
+  map: { layer:'skin-map', source:{ type:'raster', tileSize:256, maxzoom:20,
+    tiles:[...'abcd'].map((s) => `https://${s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}${RETINA}.png`),
+    attribution:'&copy; OpenStreetMap, &copy; CARTO' } },
+  satellite: { layer:'skin-satellite', source:{ type:'raster', tileSize:256, maxzoom:19,
+    tiles:['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+    attribution:'Imagery &copy; Esri' } },
+};
+
+const globeTint = () => (byDay ? ['get', 'c'] : BASE_COLOR);
+
+function globeStyle() {
+  const vis = (n) => (n === G.skin ? 'visible' : 'none');
+  return {
+    version: 8,
+    // A sphere out to zoom 10, easing into mercator by 12, which is where a
+    // sphere's floating-point precision runs out anyway.
+    projection: { type:'globe' },
+    sky: { 'sky-color':'#0a1220', 'horizon-color':'#1d3a5f', 'fog-color':'#080b11',
+           'sky-horizon-blend':0.6,
+           'atmosphere-blend':['interpolate',['linear'],['zoom'],0,0.9,5,0.4,8,0] },
+    sources: {
+      'skin-map': GLOBE_SKINS.map.source,
+      'skin-satellite': GLOBE_SKINS.satellite.source,
+      photos: { type:'geojson', data:GLOBE_EMPTY },
+    },
+    layers: [
+      { id:'unpainted', type:'background', paint:{ 'background-color':'#0d1420' } },
+      { id:'skin-map', type:'raster', source:'skin-map', layout:{ visibility:vis('map') } },
+      { id:'skin-satellite', type:'raster', source:'skin-satellite', layout:{ visibility:vis('satellite') } },
+      { id:'photos', type:'circle', source:'photos', paint:{
+          'circle-radius':['interpolate',['linear'],['zoom'],0,2.2,4,3,8,4.2,14,6],
+          'circle-color':globeTint(), 'circle-opacity':0.9,
+          'circle-stroke-width':['interpolate',['linear'],['zoom'],2,0,5,0.8],
+          'circle-stroke-color':'rgba(0,0,0,.55)' } },
+      { id:'photo-hover', type:'circle', source:'photos', filter:['==',['get','id'],-1], paint:{
+          'circle-radius':['interpolate',['linear'],['zoom'],0,4.5,8,6.5,14,8.5],
+          'circle-color':globeTint(), 'circle-stroke-width':2, 'circle-stroke-color':'#fff' } },
+    ],
+  };
+}
+
+async function globeBoot() {
+  if (G.booting || G.map) return;
+  const box = $('globe');
+  const rect = box.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  G.booting = true;
+  try {
+    if (!G.lib) {
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = 'vendor/maplibre-gl/maplibre-gl.css';
+      document.head.appendChild(link);
+      G.lib = await import('./vendor/maplibre-gl/maplibre-gl.mjs');
+    }
+    globeCreate(box);
+  } catch (err) {
+    // Two real cases: the file did not load, or the device has no WebGL2,
+    // which MapLibre requires. Either way the pane would otherwise sit on
+    // "Preparing the globe…" forever. booting stays set, so this is said once.
+    setStatus(`The globe is unavailable here: ${err.message}`);
+  }
+}
+
+function globeCreate(box) {
+  G.map = new G.lib.Map({
+    container: box, style: globeStyle(), center:[10,25], zoom:1.4, minZoom:0, maxZoom:19,
+    attributionControl:{ compact:true },
+    dragRotate:false, pitchWithRotate:false, touchPitch:false, boxZoom:false,
+    maxTileCacheZoomLevels:3,
+  });
+  G.map.addControl(new G.lib.NavigationControl({ showCompass:false }), 'top-left');
+  // style.load, not load: load also waits for the first painted frame, and a
+  // background tab is given no frames at all.
+  G.map.on('style.load', () => {
+    G.ready = true;
+    G.booting = false;
+    globeWire();
+    if (mode === 'globe') drawMap();
+  });
+  G.map.on('error', (e) => console.warn('globe:', e.error?.message || e.type));
+}
+
+function globeWire() {
+  G.map.on('mousemove', 'photos', (e) => {
+    if (!G.map.isMoving()) globeHover(e.features[0]);   // a drag is a spin, not a hover
+  });
+  G.map.on('mouseleave', 'photos', () => globeHover(null));
+  G.map.on('movestart', () => globeHover(null));
+  G.map.on('click', 'photos', (e) => {
+    const i = positionOf(e.features[0].properties.id);
+    if (i >= 0) openPhoto(i);
+  });
+  G.map.on('webglcontextlost', () => setStatus('The globe lost its graphics context - it will come back on its own'));
+  G.map.on('webglcontextrestored', () => { if (mode === 'globe') drawMap(); });
+}
+
+function globeHover(feature) {
+  if (!G.map) return;
+  const point = feature
+    ? { id:feature.properties.id, ts:feature.properties.ts ?? null,
+        lon:feature.geometry.coordinates[0], lat:feature.geometry.coordinates[1] }
+    : null;
+  if (point?.id === G.hovered?.id) return;
+  G.hovered = point;
+  G.map.getCanvas().style.cursor = point ? 'pointer' : '';
+  G.map.setFilter('photo-hover', ['==', ['get','id'], point ? point.id : -1]);
+  clearTimeout(G.timer);
+  if (!point) { globeTip(null); return; }
+  // Sweeping across the globe crosses dozens of photos; showing each one would
+  // fire a thumbnail request per photo crossed. Wait for the pointer to settle.
+  G.timer = setTimeout(() => globeTip(point), 110);
+}
+
+function globeTip(point) {
+  if (!G.tip) {
+    G.tip = document.createElement('div');
+    G.tip.className = 'globe-tip hidden';
+    // Built once and reused: rewriting innerHTML per hover throws the <img>
+    // away and reloads the same picture from scratch.
+    G.tip.innerHTML = '<img width="130" alt=""><div class="small muted"></div>';
+    $('globe').appendChild(G.tip);
+  }
+  if (!point) { G.tip.classList.add('hidden'); return; }
+  const i = positionOf(point.id);
+  if (i < 0) return;
+  const image = G.tip.firstChild;
+  const url = `t/${M.th[i]}.jpg`;
+  if (image.getAttribute('src') !== url) {
+    image.setAttribute('src', url);
+    image.onload = () => { if (G.hovered?.id === point.id) globePlace(point); };
+  }
+  G.tip.lastChild.textContent = fmtDT(point.ts);
+  G.tip.classList.remove('hidden');
+  globePlace(point);
+}
+
+/** Over the photo it belongs to, never hanging off the edge of the pane. */
+function globePlace(point) {
+  const rect = $('globe').getBoundingClientRect();
+  const at = G.map.project([point.lon, point.lat]);
+  const w = G.tip.offsetWidth, h = G.tip.offsetHeight;
+  const above = at.y - h - 14;
+  const clamp = (v, limit) => Math.max(6, Math.min(limit, v));
+  G.tip.style.left = `${clamp(at.x - w / 2, rect.width - w - 6)}px`;
+  G.tip.style.top = `${clamp(above >= 6 ? above : at.y + 18, rect.height - h - 6)}px`;
+}
+
+/** Both colours ride along on every point, so switching between them is a paint
+ *  property rather than a rebuild of the whole set. */
+function globeData(idx) {
+  const cache = new Map();
+  return { type:'FeatureCollection', features: idx.map((i) => {
+    const ts = M.ts[i];
+    const day = ts ? Math.floor(ts / 86400) : -1;
+    let c = cache.get(day);
+    if (!c) { c = dayColor(ts); cache.set(day, c); }
+    return { type:'Feature', geometry:{ type:'Point', coordinates:[M.lon[i], M.lat[i]] },
+             properties:{ id:M.ids[i], ts, c } };
+  }) };
+}
+
+function globeShow(idx) {
+  $('globe').classList.remove('hidden');
+  if (!G.ready) { globeBoot(); return false; }
+  const rect = $('globe').getBoundingClientRect();
+  if (rect.width && rect.height) G.map.resize();
+  globeHover(null);
+  const capped = idx.slice(0, MAX_POINTS);
+  G.map.getSource('photos').setData(capped.length ? globeData(capped) : GLOBE_EMPTY);
+  return true;
+}
+
+function globeHide() {
+  $('globe').classList.add('hidden');
+  globeHover(null);
+}
+
+function globeFit(s, w, n, e) {
+  if (G.map) G.map.fitBounds([[w, s], [e, n]], { padding:40, maxZoom:17, duration:1000 });
+}
+
+function globeSetSkin(name) {
+  if (!GLOBE_SKINS[name]) return;
+  G.skin = name;
+  if (!G.ready) return;
+  Object.entries(GLOBE_SKINS).forEach(([key, def]) => {
+    G.map.setLayoutProperty(def.layer, 'visibility', key === name ? 'visible' : 'none');
+  });
+}
+
+function globeSetDays() {
+  if (!G.ready) return;
+  G.map.setPaintProperty('photos', 'circle-color', globeTint());
+  G.map.setPaintProperty('photo-hover', 'circle-color', globeTint());
+}
+
+// -------------------------------------------------------------------- gallery
+
+const OVERSCAN = 3;              // rows kept live above and below the viewport
+const MY = new Intl.DateTimeFormat(undefined, { year:'numeric', month:'short', timeZone:'UTC' });
+
+let galleryIdx = [];             // positions in M, newest first, after filtering
+let geo = { cols:1, tileW:0, stride:0, pad:8, gap:4 };
+const liveTiles = new Map();     // position in galleryIdx -> element
+let tileColors = new Map(), tileAlbums = new Map();
+
+/** The same column count auto-fill would have chosen, but as numbers, so a
+ *  photo's box can be worked out without it being in the document. */
+function measure() {
+  const cs = getComputedStyle($('gallery'));
+  const num = (name, fallback) => parseFloat(cs.getPropertyValue(name)) || fallback;
+  const pad = num('--pad', 8), gap = num('--gap', 4);
+  const inner = Math.max(0, $('gallery').clientWidth - pad * 2 - num('--rail', 0));
+  const cols = Math.max(1, Math.floor((inner + gap) / (num('--tile', 130) + gap)));
+  const tileW = (inner - (cols - 1) * gap) / cols;
+  geo = { cols, tileW, stride: tileW + gap, pad, gap };
+}
+
+const topOfRow = (row) => geo.pad + row * geo.stride;
+
+function place(node, k) {
+  node.style.left = `${geo.pad + (k % geo.cols) * geo.stride}px`;
+  node.style.top = `${topOfRow(Math.floor(k / geo.cols))}px`;
+  node.style.width = `${geo.tileW}px`;
+  node.style.height = `${geo.tileW}px`;
+}
+
+function makeTile(k) {
+  const i = galleryIdx[k];
+  const id = M.ids[i];
+  const node = document.createElement('div');
+  node.className = `tile${selection.has(id) ? ' sel' : ''}`;
+  node.dataset.i = i;
+  node.dataset.id = id;
+  const dots = (tileAlbums.get(id) || [])
+    .map((a) => `<i style="background:${tileColors.get(a)}"></i>`).join('');
+  node.innerHTML = `<img loading="lazy" src="t/${M.th[i]}.jpg" alt="">
+    <span class="pick"></span>
+    ${M.fav[i] ? '<span class="star">★</span>' : ''}
+    ${noteOf(i) ? '<span class="pen" title="Has a note">✎</span>' : ''}
+    <span class="dots">${dots}</span>`;
+  place(node, k);
+  return node;
+}
+
+/** Bring the tiles around the viewport into the document and drop the rest. */
+function paintWindow() {
+  const g = $('gallery');
+  const first = Math.max(0, Math.floor((g.scrollTop - geo.pad) / geo.stride) - OVERSCAN);
+  const last = Math.floor((g.scrollTop + g.clientHeight - geo.pad) / geo.stride) + OVERSCAN;
+  const from = first * geo.cols;
+  const to = Math.max(from, Math.min(galleryIdx.length, (last + 1) * geo.cols));
+  liveTiles.forEach((node, k) => {
+    if (k < from || k >= to) { node.remove(); liveTiles.delete(k); }
+  });
+  const frag = document.createDocumentFragment();
+  for (let k = from; k < to; k += 1) {
+    if (liveTiles.has(k)) continue;
+    const node = makeTile(k);
+    liveTiles.set(k, node);
+    frag.appendChild(node);
+  }
+  $('gsizer').appendChild(frag);
+}
+
+/** Re-measure and re-place. Tiles already on screen are moved rather than
+ *  rebuilt, so turning the phone does not refetch what is already loaded. */
+function layoutGallery() {
+  measure();
+  const rows = Math.ceil(galleryIdx.length / geo.cols);
+  $('gsizer').style.height = `${rows ? geo.pad * 2 + rows * geo.stride - geo.gap : 0}px`;
+  liveTiles.forEach(place);
+  paintWindow();
+  drawRail();
+}
+
+function drawGallery() {
+  galleryIdx = visible();
+  tileColors = new Map(M.albums.map((a) => [a.id, a.color]));
+  tileAlbums = new Map();
+  M.albums.forEach((a) => a.photos.forEach((p) => {
+    if (!tileAlbums.has(p)) tileAlbums.set(p, []);
+    tileAlbums.get(p).push(a.id);
+  }));
+  liveTiles.forEach((node) => node.remove());
+  liveTiles.clear();
+  $('gallery').scrollTop = 0;
+  buildMarks();
+  layoutGallery();
+  $('status').textContent = `${fmtNum(galleryIdx.length)} shown of ${fmtNum(M.n)}`;
+}
+
+$('gallery').addEventListener('scroll', () => {
+  if (!railDrag) paintWindow();
+  railFollow();
+});
+$('gallery').addEventListener('load', (e) => e.target.classList.add('on'), true);
+$('gallery').addEventListener('click', (e) => {
+  const tile = e.target.closest('.tile');
+  if (!tile) return;
+  const id = Number(tile.dataset.id);
+  if (e.target.classList.contains('pick') || e.ctrlKey || e.metaKey) {
+    if (selection.has(id)) selection.delete(id); else selection.add(id);
+    tile.classList.toggle('sel', selection.has(id));
+    paintSel();
+    return;
+  }
+  openPhoto(Number(tile.dataset.i));
+});
+
+function paintSel() {
+  $('selbar').classList.toggle('hidden', selection.size === 0);
+  $('selCount').textContent = `${fmtNum(selection.size)} selected`;
+  $('selDelete').classList.toggle('hidden', !M?.allow_delete);
+}
+
+// ------------------------------------------------------------------ date rail
+
+const RAIL_PAD = 14;      // keeps the first and last label off the ends
+const RAIL_GAP = 15;      // closest two labels are allowed to sit
+let marks = [];           // first position of each capture month, newest first
+let railDrag = false;
+
+/** One entry per month present, in a single pass: the gallery is already in
+ *  capture order, so a photo inside the current month's range cannot start a
+ *  new one and costs no Date. Undated photos sort to the end and get no mark. */
+function buildMarks() {
+  marks = [];
+  let lo = Infinity, hi = -Infinity;
+  for (let k = 0; k < galleryIdx.length; k += 1) {
+    const t = M.ts[galleryIdx[k]];
+    if (t >= lo && t < hi) continue;
+    if (!t) break;
+    const d = new Date(t * 1000);
+    const y = d.getUTCFullYear(), m = d.getUTCMonth();
+    lo = Date.UTC(y, m) / 1000;
+    hi = Date.UTC(y, m + 1) / 1000;
+    marks.push({ k, y, text: MONTHS[m] });
+  }
+}
+
+/** Years first, because they are what the eye reaches for; months then fill any
+ *  gap left wide enough to read. */
+function railLabels(range) {
+  const n = galleryIdx.length;
+  const at = (k) => RAIL_PAD + (k / (n - 1)) * range;
+  const out = [];
+  let year = null, last = -Infinity;
+  for (const mark of marks) {
+    if (mark.y === year) continue;
+    year = mark.y;
+    const y = at(mark.k);
+    if (y - last < RAIL_GAP) continue;
+    out.push({ y, text:String(mark.y), big:true });
+    last = y;
+  }
+  let p = 0;
+  for (const mark of marks) {
+    const y = at(mark.k);
+    while (p < out.length && out[p].y < y) p += 1;
+    if ((p > 0 ? y - out[p - 1].y : Infinity) < RAIL_GAP) continue;
+    if ((p < out.length ? out[p].y - y : Infinity) < RAIL_GAP) continue;
+    out.splice(p, 0, { y, text:mark.text, big:false });
+  }
+  return out;
+}
+
+function drawRail() {
+  const rail = $('rail'), g = $('gallery');
+  const useful = view === 'gallery' && galleryIdx.length > 1 && marks.length
+                 && g.scrollHeight - g.clientHeight > 8;
+  rail.classList.toggle('hidden', !useful);
+  if (!useful) { $('railBubble').classList.add('hidden'); return; }
+  rail.innerHTML = railLabels(railRange())
+    .map((m) => `<b class="${m.big ? 'y' : ''}" style="top:${m.y.toFixed(1)}px">${m.text}</b>`)
+    .join('');
+}
+
+const railRange = () => Math.max(1, $('rail').clientHeight - 2 * RAIL_PAD);
+
+function bubble(k) {
+  const b = $('railBubble');
+  const t = M.ts[galleryIdx[k]];
+  b.textContent = t ? MY.format(new Date(t * 1000)) : 'No date';
+  b.style.top = `${RAIL_PAD + (k / (galleryIdx.length - 1)) * railRange()}px`;
+  b.classList.remove('hidden');
+}
+
+/** Where the gallery is now, mirrored onto the rail. */
+function railFollow() {
+  if (galleryIdx.length < 2 || $('rail').classList.contains('hidden')) return;
+  const row = Math.max(0, Math.round(($('gallery').scrollTop - geo.pad) / geo.stride));
+  bubble(Math.min(galleryIdx.length - 1, row * geo.cols));
+  clearTimeout(railFollow._t);
+  if (!railDrag) railFollow._t = setTimeout(() => $('railBubble').classList.add('hidden'), 900);
+}
+
+/** The nearest month start within `tol` photos, or `k` untouched. A pixel of a
+ *  full rail can be forty photos, so without this a tap on a year label lands a
+ *  month either side of it and the bubble contradicts the label under the
+ *  finger. In sparse years the months are pixels apart and nothing snaps. */
+function snap(k, tol) {
+  let lo = 0, hi = marks.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (marks[mid].k < k) lo = mid + 1; else hi = mid;
+  }
+  let best = k, dist = tol;
+  for (const mark of [marks[lo - 1], marks[lo]]) {
+    if (mark && Math.abs(mark.k - k) <= dist) { dist = Math.abs(mark.k - k); best = mark.k; }
+  }
+  return best;
+}
+
+function railTo(clientY) {
+  const rect = $('rail').getBoundingClientRect();
+  const range = railRange();
+  const f = Math.max(0, Math.min(1, (clientY - rect.top - RAIL_PAD) / range));
+  const last = galleryIdx.length - 1;
+  const raw = Math.round(f * last);
+  // The ends stay exact: the bottom of the rail is the oldest photo, not the
+  // start of whichever month it happens to land in.
+  const k = f > 0 && f < 1 ? snap(raw, Math.ceil((last * 4) / range)) : raw;
+  // The scroll moves but the tiles do not: a drag across ten years would
+  // otherwise ask for a thumbnail from every month it passed through. The
+  // bubble says where you are, and the window is painted on release.
+  $('gallery').scrollTop = topOfRow(Math.floor(k / geo.cols));
+  bubble(k);
+}
+
+$('rail').addEventListener('pointerdown', (e) => {
+  if (galleryIdx.length < 2) return;
+  railDrag = true;
+  $('rail').setPointerCapture(e.pointerId);
+  e.preventDefault();
+  railTo(e.clientY);
+});
+$('rail').addEventListener('pointermove', (e) => { if (railDrag) railTo(e.clientY); });
+const railRelease = () => {
+  if (!railDrag) return;
+  railDrag = false;
+  paintWindow();
+  railFollow();
+};
+$('rail').addEventListener('pointerup', railRelease);
+$('rail').addEventListener('pointercancel', railRelease);
+// The rail covers the right edge of the gallery, and nothing under it scrolls,
+// so a wheel over the strip has to be handed on.
+$('rail').addEventListener('wheel', (e) => { $('gallery').scrollTop += e.deltaY; }, { passive:true });
+
+// ------------------------------------------------------------------- lightbox
+
+let shadeIndex = null;
+function openPhoto(i) {
+  shadeIndex = i;
+  $('shade').style.display = 'flex';
+  $('shade').querySelector('img').src = `t/${M.th[i]}.jpg`;
+  $('shadeCap').textContent = fmtDT(M.ts[i]) + (M.lat[i] != null ? ` · ${M.lat[i].toFixed(4)}, ${M.lon[i].toFixed(4)}` : ' · no GPS');
+  $('shadeFav').textContent = M.fav[i] ? '★ Favourited' : '☆ Favourite';
+  $('shadeDelete').classList.toggle('hidden', !M.allow_delete);
+  const field = $('shadeNote');
+  field.value = noteOf(i);
+  field.dataset.was = field.value;
+  $('noteState').textContent = '';
+}
+
+/** Saves on the way out of the field, or on Ctrl+Enter. Only when it actually
+ *  changed - closing a photo you only looked at should queue nothing. */
+async function saveNote() {
+  const i = shadeIndex;
+  const field = $('shadeNote');
+  if (i == null || field.value === field.dataset.was) return;
+  const text = field.value.trim();
+  $('noteState').textContent = 'Saving…';
+  if (!await send({ op:'photo_note', photo_ids:[M.ids[i]], note:text })) {
+    $('noteState').textContent = '';
+    return;
+  }
+  if (!M.notes) M.notes = {};
+  if (text) M.notes[M.ids[i]] = text; else delete M.notes[M.ids[i]];
+  field.dataset.was = field.value;
+  $('noteState').textContent = 'Saved - will sync to your laptop';
+  if (view === 'gallery') drawGallery();
+}
+$('shadeNote').addEventListener('blur', saveNote);
+$('shadeNote').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveNote(); }
+  // Escape closes the lightbox, which would otherwise discard what was typed.
+  if (e.key === 'Escape') e.stopPropagation();
+});
+
+const closeShade = () => { saveNote(); $('shade').style.display = 'none'; };
+$('shadeClose').onclick = closeShade;
+$('shade').onclick = (e) => { if (e.target.id === 'shade') closeShade(); };
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeShade(); });
+$('shadeFav').onclick = async () => {
+  const i = shadeIndex;
+  const value = !M.fav[i];
+  if (await send({ op:'favorite', photo_ids:[M.ids[i]], value })) {
+    M.fav[i] = value ? 1 : 0;
+    openPhoto(i);
+    toast(value ? 'Favourited - will sync to your laptop' : 'Unfavourited');
+  }
+};
+$('shadeDelete').onclick = async () => {
+  const i = shadeIndex;
+  $('shade').style.display = 'none';
+  await deletePhotos([i]);
+};
+
+// -------------------------------------------------------------- album actions
+
+$('selFav').onclick = async () => {
+  const ids = [...selection];
+  if (await send({ op:'favorite', photo_ids:ids, value:true })) {
+    const set = new Set(ids);
+    M.ids.forEach((id, i) => { if (set.has(id)) M.fav[i] = 1; });
+    toast(`${fmtNum(ids.length)} favourited - will sync to your laptop`);
+    selection.clear(); paintSel(); refresh();
+  }
+};
+$('selClear').onclick = () => { selection.clear(); paintSel(); refresh(); };
+$('selDelete').onclick = () => {
+  const wanted = new Set(selection);
+  const indexes = [];
+  for (let i = 0; i < M.n; i += 1) if (wanted.has(M.ids[i])) indexes.push(i);
+  deletePhotos(indexes);
+};
+$('selAlbum').onclick = async () => {
+  const names = M.albums.map((a, n) => `${n + 1}. ${a.name}`).join('\n');
+  const answer = prompt(`Add ${selection.size} photos to which album?\n\n${names}\n\nEnter a number, or a new album name:`);
+  if (!answer) return;
+  const ids = [...selection];
+  const asNumber = Number(answer);
+  let ok;
+  if (asNumber >= 1 && asNumber <= M.albums.length) {
+    const album = M.albums[asNumber - 1];
+    ok = await send({ op:'album_add', album_id:album.id, photo_ids:ids });
+    if (ok) album.photos.push(...ids);
+  } else {
+    ok = await send({ op:'album_create', name:answer.trim(), photo_ids:ids });
+    if (ok) M.albums.push({ id:-Date.now(), name:answer.trim(), color:'#ff5a5f', photos:ids });
+  }
+  if (ok) {
+    toast(`${fmtNum(ids.length)} photos added - will sync to your laptop`);
+    selection.clear(); paintSel(); fillAlbums(); refresh();
+  }
+};
+
+// ---------------------------------------------------------------- panel/dupes
+
+let dupeLimit = 60;
+
+/** id -> position, rebuilt whenever the photo list changes under it. A linear
+    indexOf per duplicate was fine at 60 sets and is not at several thousand. */
+let idPos = null;
+function positionOf(id) {
+  if (!idPos || idPos.size !== M.n) {
+    idPos = new Map();
+    for (let i = 0; i < M.n; i += 1) idPos.set(M.ids[i], i);
+  }
+  const i = idPos.get(id);
+  return i === undefined ? -1 : i;
+}
+
+function drawPanel() {
+  const albums = M.albums.map((a) => `
+    <div class="row" data-album="${a.id}">
+      <span class="dot" style="background:${a.color}"></span>
+      <span class="name">${escapeHtml(a.name)}</span>
+      <span class="muted small">${fmtNum(a.photos.length)}</span>
+    </div>`).join('') || '<div class="muted small">No albums yet</div>';
+
+  const allDupes = M.dupes || [];
+  const dupes = allDupes.slice(0, dupeLimit).map((d) => {
+    const photos = d.ids.map((id) => {
+      const i = positionOf(id);
+      if (i < 0) return '';
+      return `<div class="dupphoto${d.keep === id ? ' keep' : ''}" data-hash="${d.hash}" data-id="${id}">
+        <img loading="lazy" src="t/${M.th[i]}.jpg" alt="">
+        <span class="b">${d.keep === id ? 'Keep' : 'Remove'}</span>
+      </div>`;
+    }).join('');
+    return `<div class="dupset" data-hash="${d.hash}">
+      ${photos}
+      <button data-resolve="${d.hash}" class="danger">Remove ${d.ids.length - 1} extra</button>
+    </div>`;
+  }).join('') || '<div class="muted small">No duplicates in this snapshot</div>';
+
+  $('panel').innerHTML = `
+    <div class="card"><h4>Albums</h4>${albums}</div>
+    <div class="card">
+      <h4>Duplicates ${(M.dupes || []).length ? `· ${fmtNum(M.dupes.length)} sets` : ''}</h4>
+      <div class="muted small" style="margin-bottom:8px">
+        One copy is always kept. Tap a photo to keep that one instead. Removals are applied
+        on your laptop at the next sync, and the files go to its recycle bin.
+      </div>
+      ${dupes}
+      ${allDupes.length > dupeLimit ? `<button id="moreDupes" style="margin-top:10px">
+        Show more (${fmtNum(allDupes.length - dupeLimit)} sets left)</button>` : ''}
+    </div>`;
+}
+
+$('panel').addEventListener('click', async (e) => {
+  if (e.target.id === 'moreDupes') {
+    dupeLimit += 60;
+    drawPanel();
+    return;
+  }
+  const albumRow = e.target.closest('[data-album]');
+  if (albumRow) {
+    albumFilter = Number(albumRow.dataset.album);
+    $('album').value = String(albumFilter);
+    setView('gallery');
+    refresh();
+    return;
+  }
+  const photo = e.target.closest('.dupphoto');
+  if (photo) {
+    const set = (M.dupes || []).find((d) => d.hash === photo.dataset.hash);
+    if (set) { set.keep = Number(photo.dataset.id); drawPanel(); }
+    return;
+  }
+  const button = e.target.closest('[data-resolve]');
+  if (button) {
+    const set = (M.dupes || []).find((d) => d.hash === button.dataset.resolve);
+    if (!set) return;
+    if (!confirm(`Remove ${set.ids.length - 1} extra copies? One copy is kept, and the files go to the recycle bin on your laptop.`)) return;
+    if (await send({ op:'dupe_resolve', hash:set.hash, keep_id:set.keep })) {
+      M.dupes = M.dupes.filter((d) => d.hash !== set.hash);
+      toast('Queued - the extras go to the recycle bin at the next sync');
+      drawPanel();
+    }
+  }
+});
+
+function escapeHtml(v) {
+  return String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+}
+
+// ------------------------------------------------------------------ insights
+
+const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function fmtBytes(b) {
+  if (!b) return '—';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let n = b, u = 0;
+  while (n >= 1024 && u < units.length - 1) { n /= 1024; u += 1; }
+  return `${n < 10 && u > 0 ? n.toFixed(1) : Math.round(n)} ${units[u]}`;
+}
+
+/** label/bar/count rows, scaled to the largest bucket. */
+function bars(rows, dim = false) {
+  const top = Math.max(1, ...rows.map((r) => r[1]));
+  return `<div class="bars">${rows.map(([label, count]) => `
+    <span class="lab">${escapeHtml(label)}</span>
+    <span class="track"><i class="${dim ? 'dim' : ''}" style="width:${(count / top) * 100}%"></i></span>
+    <span class="num">${fmtNum(count)}</span>`).join('')}</div>`;
+}
+
+function drawInsights() {
+  const idx = visible();
+  const n = idx.length;
+  // The desktop buckets with SQLite's strftime(..., 'unixepoch'), which is UTC,
+  // and this viewer already prints dates in UTC. Anything local-time here would
+  // quietly disagree with the app on the laptop.
+  const hour = new Array(24).fill(0);
+  const dow = new Array(7).fill(0);
+  const month = new Array(12).fill(0);
+  const years = new Map();
+  const cams = new Map();
+  let geo = 0, favs = 0, bytes = 0, dated = 0, first = null, last = null;
+
+  for (const i of idx) {
+    if (M.lat[i] != null) geo += 1;
+    if (M.fav[i]) favs += 1;
+    if (M.sz) bytes += M.sz[i] || 0;
+    if (M.cam && M.cams && M.cam[i] >= 0) {
+      const name = M.cams[M.cam[i]];
+      cams.set(name, (cams.get(name) || 0) + 1);
+    }
+    const t = M.ts[i];
+    if (!t) continue;
+    dated += 1;
+    if (first === null || t < first) first = t;
+    if (last === null || t > last) last = t;
+    const d = new Date(t * 1000);
+    hour[d.getUTCHours()] += 1;
+    dow[d.getUTCDay()] += 1;
+    month[d.getUTCMonth()] += 1;
+    const y = d.getUTCFullYear();
+    years.set(y, (years.get(y) || 0) + 1);
+  }
+
+  const pct = n ? Math.round((geo / n) * 100) : 0;
+  const cameraRows = [...cams.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+  const yearRows = [...years.entries()].sort((a, b) => a[0] - b[0]).map(([y, c]) => [String(y), c]);
+
+  // sz/cam arrive with manifest v3. An older snapshot still shows everything
+  // else rather than rendering an empty or wrong card.
+  const legacy = !M.sz || !M.cam;
+
+  $('insights').innerHTML = `
+    <div class="card">
+      <h4>Overview</h4>
+      <div class="figs">
+        <div class="fig"><div class="v">${fmtNum(n)}</div><div class="k">photos shown</div></div>
+        <div class="fig"><div class="v">${fmtNum(geo)}</div><div class="k">with GPS · ${pct}%</div></div>
+        <div class="fig"><div class="v">${fmtNum(favs)}</div><div class="k">favourites</div></div>
+        ${M.sz ? `<div class="fig"><div class="v">${fmtBytes(bytes)}</div><div class="k">on disk</div></div>` : ''}
+        <div class="fig"><div class="v">${fmtDate(first)}</div><div class="k">earliest</div></div>
+        <div class="fig"><div class="v">${fmtDate(last)}</div><div class="k">latest</div></div>
+      </div>
+      ${dated < n ? `<div class="muted small" style="margin-top:8px">
+        ${fmtNum(n - dated)} without a capture date are left out of the breakdowns below.</div>` : ''}
+      ${legacy ? `<div class="muted small" style="margin-top:8px">
+        Disk usage and cameras need a newer snapshot - run a sync from the app on your computer.</div>` : ''}
+    </div>
+    <div class="card"><h4>By year</h4>${yearRows.length ? bars(yearRows) : '<div class="muted small">No dated photos</div>'}</div>
+    <div class="card"><h4>By month</h4>${bars(month.map((c, i) => [MONTHS[i], c]))}</div>
+    <div class="card"><h4>By weekday</h4>${bars(dow.map((c, i) => [DOW[i], c]))}</div>
+    <div class="card"><h4>By hour of day</h4>${bars(hour.map((c, i) => [String(i).padStart(2, '0'), c]), true)}</div>
+    ${cameraRows.length ? `<div class="card"><h4>Cameras</h4>${bars(cameraRows)}</div>` : ''}`;
+
+  $('status').textContent = `${fmtNum(n)} shown of ${fmtNum(M.n)}`;
+}
+
+// -------------------------------------------------------------------- chrome
+
+function setView(name) {
+  view = name;
+  // Both switchers carry data-view: the top tabs on a desktop, the bottom bar
+  // on a phone. Only one of them is on screen at a time.
+  document.querySelectorAll('[data-view]').forEach((b) => b.classList.toggle('on', b.dataset.view === name));
+  $('map').classList.toggle('hidden', name !== 'map');
+  $('gallery').classList.toggle('hidden', name !== 'gallery');
+  $('panel').classList.toggle('hidden', name !== 'panel');
+  $('insights').classList.toggle('hidden', name !== 'insights');
+  $('mapControls').classList.toggle('hidden', name !== 'map');
+  // The globe is its own element rather than a layer, so leaving the map has to
+  // put it away explicitly or it stays painted over whatever comes next.
+  if (name !== 'map') globeHide();
+  if (name !== 'gallery') { $('rail').classList.add('hidden'); $('railBubble').classList.add('hidden'); }
+  if (name === 'map') { map.invalidateSize(); drawMap(); }
+  if (name === 'gallery') drawGallery();
+  if (name === 'panel') drawPanel();
+  if (name === 'insights') drawInsights();
+}
+
+function refresh() {
+  if (view === 'map') drawMap();
+  else if (view === 'gallery') drawGallery();
+  else if (view === 'insights') drawInsights();
+  else drawPanel();
+}
+
+document.addEventListener('click', (e) => {
+  // The filter sheet covers the tab bar while it is up, so anything outside it
+  // has to put it away again - otherwise Done is the only way out.
+  if (document.body.classList.contains('filters-on')
+      && !e.target.closest('.foot, #filterBtn')) {
+    document.body.classList.remove('filters-on');
+  }
+  const b = e.target.closest('[data-view]');
+  if (b) setView(b.dataset.view);
+});
+$('filterBtn').onclick = () => document.body.classList.toggle('filters-on');
+$('filterDone').onclick = () => document.body.classList.remove('filters-on');
+
+const pressed = (group, button) =>
+  [...group.children].forEach((x) => x.classList.toggle('active', x === button));
+
+$('mode').onclick = (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  mode = b.dataset.mode;
+  pressed(e.currentTarget, b);
+  // Only the two per-photo renderings can carry a colour per photo; a heat map
+  // has no per-point colour and a cluster pin is a summary of several days.
+  $('toggleDays').classList.toggle('hidden', mode !== 'points' && mode !== 'globe');
+  $('heatCtl').classList.toggle('hidden', mode !== 'heat');
+  $('base').classList.toggle('hidden', mode === 'globe');
+  $('globeSkin').classList.toggle('hidden', mode !== 'globe');
+  $('boxSelect').classList.toggle('hidden', mode === 'globe');
+  drawMap();
+};
+$('base').onclick = (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  setBase(b.dataset.base);
+  pressed(e.currentTarget, b);
+};
+$('globeSkin').onclick = (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  globeSetSkin(b.dataset.skin);
+  pressed(e.currentTarget, b);
+};
+$('togglePath').onclick = (e) => {
+  showPath = !showPath;
+  e.currentTarget.classList.toggle('active', showPath);
+  drawMap();
+};
+$('toggleDays').onclick = (e) => {
+  byDay = !byDay;
+  e.currentTarget.classList.toggle('active', byDay);
+  globeSetDays();
+  drawMap();
+};
+$('boxSelect').onclick = (e) => {
+  armed = !armed;
+  e.currentTarget.classList.toggle('active', armed);
+  map.getContainer().classList.toggle('selecting', armed);
+};
+['heatRadius', 'heatBlur', 'heatIntensity'].forEach((id) => {
+  $(id).addEventListener('input', () => { if (heatLayer) heatLayer.setOptions(heatOptions()); });
+});
+$('fit').onclick = fit;
+$('range').oninput = (e) => {
+  const pct = Number(e.target.value) / 100;
+  cutoff = M.first_ts + (M.last_ts - M.first_ts) * pct;
+  $('stamp').textContent = pct >= 1 ? 'all time' : `up to ${fmtDate(cutoff)}`;
+  refresh();
+};
+// Scanning 26,000 names on every keystroke is fine, but redrawing the map or a
+// gallery page for each one is not, so the filter waits for a pause in typing.
+$('search').oninput = (e) => {
+  const next = e.target.value.trim().toLowerCase();
+  clearTimeout($('search')._t);
+  $('search')._t = setTimeout(() => {
+    if (next === query) return;
+    query = next;
+    refresh();
+  }, 180);
+};
+$('album').onchange = (e) => { albumFilter = e.target.value ? Number(e.target.value) : null; refresh(); };
+$('favOnly').onchange = (e) => { favOnly = e.target.checked; refresh(); };
+window.addEventListener('resize', () => { if (view === 'gallery') layoutGallery(); });
+
+function fillAlbums() {
+  $('album').innerHTML = '<option value="">All photos</option>'
+    + M.albums.map((a) => `<option value="${a.id}">${escapeHtml(a.name)} (${a.photos.length})</option>`).join('');
+  if (albumFilter) $('album').value = String(albumFilter);
+}
+
+// ------------------------------------------------------------------ installed
+
+// The service worker keeps the page, the snapshot and every thumbnail you have
+// already looked at available with no signal. It is registered unconditionally:
+// unlike a dev server, this file is only ever served from the bucket.
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js', { scope: './' }).catch(() => {});
+  });
+}
+
+const paintOnline = () => $('offline').classList.toggle('hidden', navigator.onLine);
+window.addEventListener('online', paintOnline);
+window.addEventListener('offline', paintOnline);
+paintOnline();
+
+// Chrome and Edge offer installation through this event; iOS has no equivalent
+// and needs Share -> Add to Home Screen, so there is nothing to show there.
+let installPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  installPrompt = e;
+  $('install').classList.remove('hidden');
+});
+$('install').onclick = () => {
+  $('install').classList.add('hidden');
+  installPrompt?.prompt();
+  installPrompt = null;
+};
+window.addEventListener('appinstalled', () => $('install').classList.add('hidden'));
+
+// ---------------------------------------------------------------------- boot
+
+fetch('manifest.json', { cache:'no-cache' })
+  .then((r) => { if (!r.ok) throw new Error(`manifest.json returned ${r.status}`); return r.json(); })
+  .then((m) => {
+    M = m;
+    if (!M.ids) throw new Error('This snapshot predates gallery support - run a sync from the app');
+    $('loading').style.display = 'none';
+    $('summary').textContent =
+      `${fmtNum(m.n)} photos · ${fmtNum(m.geo_n)} located · updated ${fmtDate(m.generated)}`;
+    $('stamp').textContent = 'all time';
+    fillAlbums();
+    setView('map');
+    if (m.bounds) map.fitBounds([[m.bounds[0], m.bounds[1]], [m.bounds[2], m.bounds[3]]], { padding:[40,40], maxZoom:15 });
+  })
+  .catch((err) => {
+    $('loading').querySelector('div').textContent = 'Could not load the snapshot';
+    $('loadErr').textContent = `${err.message}. If this is the first run, sync from the Photo Map app once.`;
+  });
+</script>
+</body>
+</html>

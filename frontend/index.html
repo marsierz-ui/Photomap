@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Photo Map</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🗺️</text></svg>">
+<!-- Served from this machine, not a CDN: the app is a local tool and should not
+     stop working because unpkg is having a bad day. See vendor/README.md. -->
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="vendor/leaflet/MarkerCluster.css">
+<link rel="stylesheet" href="css/app.css">
+<script>
+  // Before the stylesheet paints: a saved light theme must not flash dark
+  // first. The app reconciles this with the stored setting once it boots.
+  (() => {
+    const choice = localStorage.getItem('pm-theme') || 'auto';
+    const light = choice === 'light'
+      || (choice === 'auto' && matchMedia('(prefers-color-scheme: light)').matches);
+    document.documentElement.dataset.theme = light ? 'light' : 'dark';
+  })();
+</script>
+</head>
+<body>
+
+<header class="topbar">
+  <button id="btn-menu" class="btn ghost only-narrow" aria-label="Filters and albums">☰</button>
+  <div class="brand">Photo&nbsp;Map</div>
+  <nav class="tabs">
+    <button class="tab active" data-view="map">Map</button>
+    <button class="tab" data-view="gallery">Gallery</button>
+    <button class="tab" data-view="journal">Journal</button>
+    <button class="tab" data-view="insights">Insights</button>
+    <button class="tab" data-view="dupes">Duplicates</button>
+  </nav>
+  <input id="search" type="search" placeholder="Search filename, path or note…" autocomplete="off">
+  <div class="spacer"></div>
+  <div id="scan-chip" class="chip hidden"></div>
+  <div id="cloud-chip" class="chip hidden"></div>
+  <button id="btn-scan" class="btn">Scan library</button>
+  <button id="btn-theme" class="btn ghost" title="Switch between light and dark"></button>
+  <button id="btn-settings" class="btn ghost" title="Library settings">⚙</button>
+</header>
+
+<div class="layout">
+  <div id="scrim" class="scrim hidden"></div>
+  <aside class="sidebar" id="sidebar">
+    <section class="panel">
+      <h3>Filters</h3>
+      <div class="row"><label>From</label><input type="date" id="f-from"></div>
+      <div class="row"><label>To</label><input type="date" id="f-to"></div>
+      <div class="row"><label>Location</label>
+        <select id="f-gps">
+          <option value="any">All photos</option>
+          <option value="yes">With GPS</option>
+          <option value="no">Without GPS</option>
+        </select>
+      </div>
+      <div class="row"><label>Camera</label><select id="f-camera"><option value="">Any</option></select></div>
+      <label class="check"><input type="checkbox" id="f-fav"> Favourites only</label>
+      <label class="check"><input type="checkbox" id="f-viewport"> Follow map viewport</label>
+      <button id="f-reset" class="btn ghost wide">Reset filters</button>
+      <div id="filter-summary" class="muted small"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h3>Albums</h3>
+        <button id="album-new" class="btn tiny">+ New</button>
+      </div>
+      <ul id="album-list" class="list"></ul>
+    </section>
+  </aside>
+
+  <main class="main">
+    <div class="view" id="view-map">
+      <div id="map"></div>
+      <div id="globe" class="hidden"></div>
+      <div class="map-controls">
+        <div class="seg" id="layer-mode">
+          <button data-mode="heat" class="active">Heat</button>
+          <button data-mode="cluster">Clusters</button>
+          <button data-mode="points">Points</button>
+          <button data-mode="globe">Globe</button>
+        </div>
+        <div class="seg" id="base-mode">
+          <button data-base="dark" class="active">Dark</button>
+          <button data-base="streets">Streets</button>
+          <button data-base="satellite">Satellite</button>
+        </div>
+        <div class="seg hidden" id="globe-skin">
+          <button data-skin="map" class="active">Map</button>
+          <button data-skin="satellite">Satellite</button>
+        </div>
+        <button id="map-fit" class="btn tiny">Fit to photos</button>
+        <button id="map-path" class="btn tiny" title="Connect photos in time order">Path</button>
+        <button id="map-days" class="btn tiny hidden" title="Give every capture day its own colour">Colour by day</button>
+        <button id="map-notes" class="btn tiny" title="Show the journal days that have a location">Notes</button>
+        <button id="map-select" class="btn tiny" title="Drag a box on the map (or hold Shift and drag)">Box select</button>
+      </div>
+      <div class="map-heat-controls" id="heat-controls">
+        <label>Radius <input type="range" id="heat-radius" min="4" max="60" value="22"></label>
+        <label>Blur <input type="range" id="heat-blur" min="1" max="45" value="16"></label>
+        <label>Intensity <input type="range" id="heat-intensity" min="1" max="30" value="10"></label>
+      </div>
+      <div class="map-status" id="map-status"></div>
+    </div>
+
+    <div class="view hidden" id="view-gallery">
+      <div class="gallery-bar">
+        <span id="gallery-count" class="muted"></span>
+        <div class="spacer"></div>
+        <label class="inline">Size
+          <input type="range" id="grid-size" min="90" max="360" step="10" value="160">
+        </label>
+        <label class="inline">Sort
+          <select id="gallery-sort">
+            <option value="date_desc">Newest first</option>
+            <option value="date_asc">Oldest first</option>
+            <option value="name">Filename</option>
+            <option value="added">Recently indexed</option>
+            <option value="size">File size</option>
+          </select>
+        </label>
+        <button id="grid-fit" class="btn tiny" title="Square crop, or the whole photo letterboxed">Fill square</button>
+        <button id="gallery-selectall" class="btn tiny">Select all</button>
+      </div>
+      <div id="grid" class="grid"></div>
+    </div>
+
+    <div class="view hidden" id="view-journal">
+      <div class="gallery-bar">
+        <span id="journal-count" class="muted"></span>
+        <div class="spacer"></div>
+        <button id="journal-today" class="btn tiny hidden">Back to today</button>
+        <label class="inline">Go to day <input type="date" id="journal-date"></label>
+      </div>
+      <div id="journal"></div>
+    </div>
+
+    <div class="view hidden" id="view-insights">
+      <div id="insights"></div>
+    </div>
+
+    <div class="view hidden" id="view-dupes">
+      <div class="gallery-bar">
+        <span id="dup-summary" class="muted">Not scanned yet</span>
+        <div class="spacer"></div>
+        <button id="dup-scan" class="btn tiny">Find duplicates</button>
+        <button id="dup-selectall" class="btn tiny">Select page</button>
+        <button id="dup-selectevery" class="btn tiny">Select all sets</button>
+        <button id="dup-resolve" class="btn tiny danger" disabled>Move extras to recycle bin</button>
+      </div>
+      <div id="dup-list"></div>
+      <div id="dup-pager" class="pager hidden">
+        <button id="dup-first" class="btn tiny">« First</button>
+        <button id="dup-prev" class="btn tiny">‹ Previous</button>
+        <span id="dup-page" class="muted small"></span>
+        <button id="dup-next" class="btn tiny">Next ›</button>
+        <label class="inline small">Per page
+          <select id="dup-per"><option>50</option><option selected>100</option><option>200</option><option>500</option></select>
+        </label>
+      </div>
+    </div>
+  </main>
+</div>
+
+<footer class="timeline-wrap">
+  <div class="timeline-head">
+    <button id="tl-play" class="btn tiny" title="Animate a moving time window">▶</button>
+    <span id="tl-label" class="muted small">Timeline</span>
+    <div class="spacer"></div>
+    <label class="inline small">Window
+      <select id="tl-window">
+        <option value="7">1 week</option>
+        <option value="30" selected>1 month</option>
+        <option value="90">3 months</option>
+        <option value="365">1 year</option>
+      </select>
+    </label>
+    <select id="tl-bucket" class="small">
+      <option value="auto">Auto</option>
+      <option value="day">Day</option>
+      <option value="month">Month</option>
+      <option value="year">Year</option>
+    </select>
+    <button id="tl-clear" class="btn tiny ghost">Clear range</button>
+  </div>
+  <canvas id="timeline"></canvas>
+</footer>
+
+<div id="selbar" class="selbar hidden">
+  <strong id="sel-count">0 selected</strong>
+  <button id="sel-map" class="btn tiny">Show on map</button>
+  <button id="sel-album" class="btn tiny">Add to album…</button>
+  <button id="sel-fav" class="btn tiny">Favourite</button>
+  <button id="sel-delete" class="btn tiny danger">Delete…</button>
+  <div class="spacer"></div>
+  <button id="sel-clear" class="btn tiny ghost">Clear</button>
+</div>
+
+<div id="lightbox" class="lightbox hidden">
+  <button class="lb-close" data-lb="close">✕</button>
+  <button class="lb-nav prev" data-lb="prev">‹</button>
+  <button class="lb-nav next" data-lb="next">›</button>
+  <img id="lb-img" alt="">
+  <div id="lb-info" class="lb-info"></div>
+</div>
+
+<div id="modal" class="modal hidden"><div class="modal-box" id="modal-box"></div></div>
+<div id="toast" class="toast hidden"></div>
+
+<script src="vendor/leaflet/leaflet.js"></script>
+<script src="vendor/leaflet/leaflet.markercluster.js"></script>
+<script src="vendor/leaflet/leaflet-heat.js"></script>
+<!-- MapLibre, which draws the globe, is not here on purpose: js/globe.js imports
+     it from vendor/ the first time that mode is opened, so sessions that never
+     do pay nothing for it. -->
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
