@@ -1931,11 +1931,107 @@ $('filterDone').onclick = () => document.body.classList.remove('filters-on');
 const pressed = (group, button) =>
   [...group.children].forEach((x) => x.classList.toggle('active', x === button));
 
-$('mode').onclick = (e) => {
-  const b = e.target.closest('button');
-  if (!b) return;
-  mode = b.dataset.mode;
-  pressed(e.currentTarget, b);
+// -------------------------------------------------- remembering the map view
+//
+// On the device, in localStorage, rather than in the library. These are not
+// library data: the phone and the laptop look at the same photos through very
+// different screens, and a globe that suits one is not what the other wants to
+// open on. Storing them per device also means there is nothing to send to the
+// desktop and nothing to reconcile when two devices disagree.
+//
+// Filters are deliberately not here. A remembered date range or search would
+// reopen the app showing a fraction of the library with no obvious reason why,
+// and "no photos" is a bad first screen. Box select is left out for the same
+// reason: it is a gesture you are in the middle of, not a preference.
+
+const VIEW_KEY = 'photomap-view-v1';
+
+function saveView() {
+  try {
+    const centre = map.getCenter();
+    localStorage.setItem(VIEW_KEY, JSON.stringify({
+      mode,
+      base,
+      skin: G.skin,
+      path: showPath,
+      days: byDay,
+      radius: $('heatRadius').value,
+      blur: $('heatBlur').value,
+      intensity: $('heatIntensity').value,
+      lat: centre.lat,
+      lon: centre.lng,
+      zoom: map.getZoom(),
+    }));
+  } catch {
+    // Private browsing refuses to write, and a full quota throws too. Losing a
+    // preference is not worth interrupting anyone over.
+  }
+}
+
+/** Put a remembered view back before the first draw. Returns true if it also
+ *  restored a position, so boot knows not to fit to the whole library. */
+function applyView() {
+  let saved = null;
+  try {
+    saved = JSON.parse(localStorage.getItem(VIEW_KEY) || 'null');
+  } catch {
+    saved = null;
+  }
+  if (!saved || typeof saved !== 'object') return false;
+
+  // Everything is checked against what the UI actually offers rather than
+  // trusted: this is storage a user can edit, and a stale key from an older
+  // version must not leave the app in a mode with no button for it.
+  const modeBtn = $('mode').querySelector(`[data-mode="${CSS.escape(String(saved.mode || ''))}"]`);
+  if (modeBtn) {
+    mode = saved.mode;
+    pressed($('mode'), modeBtn);
+  }
+  const baseBtn = $('base').querySelector(`[data-base="${CSS.escape(String(saved.base || ''))}"]`);
+  if (baseBtn) {
+    setBase(saved.base);
+    pressed($('base'), baseBtn);
+  }
+  const skinBtn = $('globeSkin').querySelector(`[data-skin="${CSS.escape(String(saved.skin || ''))}"]`);
+  if (skinBtn) {
+    globeSetSkin(saved.skin);
+    pressed($('globeSkin'), skinBtn);
+  }
+  showPath = !!saved.path;
+  $('togglePath').classList.toggle('active', showPath);
+  byDay = !!saved.days;
+  $('toggleDays').classList.toggle('active', byDay);
+
+  [['heatRadius', saved.radius], ['heatBlur', saved.blur], ['heatIntensity', saved.intensity]]
+    .forEach(([id, value]) => {
+      const input = $(id);
+      const n = Number(value);
+      if (Number.isFinite(n) && n >= Number(input.min) && n <= Number(input.max)) {
+        input.value = String(n);
+      }
+    });
+  syncModeControls();
+
+  const { lat, lon, zoom } = saved;
+  if (Number.isFinite(lat) && Number.isFinite(lon) && Number.isFinite(zoom)
+      && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
+    map.setView([lat, lon], Math.min(Math.max(zoom, 0), map.getMaxZoom()));
+    return true;
+  }
+  return false;
+}
+
+// Panning and zooming are the two settings nobody thinks to press a button for,
+// so they are saved from the map itself. Debounced: a pinch-zoom fires moveend
+// repeatedly and localStorage writes are synchronous.
+map.on('moveend zoomend', () => {
+  clearTimeout(saveView._t);
+  saveView._t = setTimeout(saveView, 400);
+});
+
+/** Which controls belong to the mode on screen. Shared by the mode buttons and
+ *  by restoring a remembered mode, so the two cannot drift apart. */
+function syncModeControls() {
   // Only the two per-photo renderings can carry a colour per photo; a heat map
   // has no per-point colour and a cluster pin is a summary of several days.
   $('toggleDays').classList.toggle('hidden', mode !== 'points' && mode !== 'globe');
@@ -1943,30 +2039,43 @@ $('mode').onclick = (e) => {
   $('base').classList.toggle('hidden', mode === 'globe');
   $('globeSkin').classList.toggle('hidden', mode !== 'globe');
   $('boxSelect').classList.toggle('hidden', mode === 'globe');
+}
+
+$('mode').onclick = (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  mode = b.dataset.mode;
+  pressed(e.currentTarget, b);
+  syncModeControls();
   drawMap();
+  saveView();
 };
 $('base').onclick = (e) => {
   const b = e.target.closest('button');
   if (!b) return;
   setBase(b.dataset.base);
   pressed(e.currentTarget, b);
+  saveView();
 };
 $('globeSkin').onclick = (e) => {
   const b = e.target.closest('button');
   if (!b) return;
   globeSetSkin(b.dataset.skin);
   pressed(e.currentTarget, b);
+  saveView();
 };
 $('togglePath').onclick = (e) => {
   showPath = !showPath;
   e.currentTarget.classList.toggle('active', showPath);
   drawMap();
+  saveView();
 };
 $('toggleDays').onclick = (e) => {
   byDay = !byDay;
   e.currentTarget.classList.toggle('active', byDay);
   globeSetDays();
   drawMap();
+  saveView();
 };
 $('boxSelect').onclick = (e) => {
   armed = !armed;
@@ -1975,6 +2084,9 @@ $('boxSelect').onclick = (e) => {
 };
 ['heatRadius', 'heatBlur', 'heatIntensity'].forEach((id) => {
   $(id).addEventListener('input', () => { if (heatLayer) heatLayer.setOptions(heatOptions()); });
+  // On the slider's own change rather than every input event: dragging a range
+  // fires input per pixel, and none of those intermediate values is a choice.
+  $(id).addEventListener('change', saveView);
 });
 $('fit').onclick = fit;
 $('range').oninput = (e) => {
@@ -2058,8 +2170,16 @@ fetch('manifest.json', { cache:'no-cache' })
     } catch {
       $('addPhotos').classList.add('hidden');
     }
+    // Before setView, so the first draw is already in the remembered mode
+    // rather than drawing a heat map and then replacing it.
+    const restored = applyView();
     setView('map');
-    if (m.bounds) map.fitBounds([[m.bounds[0], m.bounds[1]], [m.bounds[2], m.bounds[3]]], { padding:[40,40], maxZoom:15 });
+    // Fitting to the whole library is the right opening move only the first
+    // time. After that, where you left the map is a better answer than where
+    // all the photos are.
+    if (!restored && m.bounds) {
+      map.fitBounds([[m.bounds[0], m.bounds[1]], [m.bounds[2], m.bounds[3]]], { padding:[40,40], maxZoom:15 });
+    }
     paintUploads();
     if (m.allow_import) drainUploads();
   })
