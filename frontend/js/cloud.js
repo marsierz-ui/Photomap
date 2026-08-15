@@ -99,7 +99,10 @@ function renderPanel(panel, status) {
           ${fmtNum(status.received.favourites)} favourites,
           ${fmtNum(status.received.duplicates)} duplicate removals,
           ${fmtNum(status.received.deleted || 0)} deletions from the cloud,
-          ${fmtNum(status.received.imported || 0)} photos added from a phone</span>` : ''}
+          ${fmtNum(status.received.imported || 0)} photos added from a phone${
+            status.received.already_here
+              ? ` (${fmtNum(status.received.already_here)} already in the library, skipped)`
+              : ''}</span>` : ''}
         ${status.phase === 'error' ? `<br><span style="color:#ff9ea1">${escapeHtml(status.error || '')}</span>` : ''}
       </div>
       <div class="row"><label>Publish</label>

@@ -409,6 +409,32 @@ check("replaying an import does not duplicate the photo",
       db.connect().execute("SELECT COUNT(*) c FROM photos WHERE path=?",
                            (row["path"],)).fetchone()["c"] == 1)
 
+# A photo the library already holds, sent up by a phone that could not know that
+# - it left here by cable months ago and was renamed on the way. The bytes are
+# what decide, so it is dropped rather than kept a second time.
+cable = (PHOTOS / "plain_1.jpg").read_bytes()
+before_dupe = db.connect().execute("SELECT COUNT(*) c FROM photos").fetchone()["c"]
+already = queue_import(import_bytes(size=(32, 24)), full=cable, name="IMG_9001.JPG")
+state = run_sync()
+check("a photo already in the library is not imported again", photo_row(already) is None)
+check("the library did not grow",
+      db.connect().execute("SELECT COUNT(*) c FROM photos").fetchone()["c"] == before_dupe)
+check("the skip is counted, and not as an import",
+      state["received"]["already_here"] == 1 and state["received"]["imported"] == 0,
+      str(state["received"]))
+check("its bytes are cleared from the bucket",
+      f"import/{already}.jpg" not in STORE and f"import/{already}.orig" not in STORE)
+check("and its op is not left queued for another try", f"inbox/{already}.json" not in STORE)
+
+# Narrowing by size is how the library is searched without hashing all of it,
+# but the size alone must never be the answer: an import that merely happens to
+# weigh the same as a library photo has to land.
+check("a size collision alone is not a duplicate",
+      sync._already_indexed(db.connect(), len(cable), "0" * 64) is False)
+check("the same bytes are",
+      sync._already_indexed(db.connect(), len(cable),
+                            hashlib.sha256(cable).hexdigest()) is True)
+
 # A proxy on its own, past the grace window, still has to land: the original may
 # never arrive, and the photo is not on the phone forever.
 old = f"{int((time.time() - sync.IMPORT_GRACE - 60) * 1000)}-{uuid.uuid4()}"

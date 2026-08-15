@@ -458,6 +458,54 @@ from the cloud*. Once on, several things have to line up before a file moves:
 - the desktop re-checks the switch when applying, so a snapshot published while it was
   on cannot be used to delete after you turn it off.
 
+### Adding photos from a phone
+
+Off until you switch it on in ⚙ → *Accept photos added from your phone*. Once on, the
+viewer grows a **+ Add** button. A picked photo is pinned straight away from an EXIF
+read in the browser, uploaded as a small proxy and then as the full-resolution
+original, and collected by this computer on its next sync into `data/imported/`, where
+it becomes an ordinary library photo. The desktop re-reads every file it receives with
+Pillow and wins any disagreement with the phone, so a phone that could not parse its
+own HEIC still ends up with real coordinates.
+
+**Select everything, every time.** No web app can reach a camera roll without the
+phone's own picker, so choosing the photos is a gesture only you can make -- but
+choosing *which* photos is not, and picking the lot is the intended way to use it.
+Anything already in the library is passed over, in three places:
+
+- the phone remembers the fingerprint of every photo it has handed to the bucket -
+  name, size and modified time, which costs no reading at all, and the digest of the
+  bytes, which still recognises the same photo offered under a different name. That
+  memory deliberately outlives the upload record itself, which is dropped as soon as
+  this computer has collected the photo;
+- the snapshot already publishes a filename and a byte count per photo, so a photo
+  copied off this phone by cable months ago is recognised without asking anything of
+  the network;
+- and the desktop refuses to file an upload whose bytes it already has, wherever it
+  came from and whatever it is called now. That is the authority - the phone's two
+  checks only save the upload.
+
+Photos are read one at a time and sent as they are read, rather than the whole
+selection being decoded up front: a five thousand photo roll staged in one go is
+several gigabytes of previews parked on the phone waiting to be collected, which is
+the phone's storage quota rather than anything this app could apologise for. If the
+queue stops moving -- no signal, or the bucket full -- reading stops rather than
+filling the device, and the viewer says how many it did not reach. Picking again costs
+nothing, since by then everything sent is skipped on sight.
+
+Uploads are bounded in the Worker, before any bytes land: 64MB per photo, 2MB per
+proxy, and a 4GB ceiling on everything waiting. Past the ceiling it answers 507 and the
+viewer says uploads are paused until this computer syncs, rather than failing quietly.
+One photo per request, since the largest body a Worker can receive is 100MB on the Free
+and Pro plans.
+
+The one case none of this catches: every check here is on exact bytes, and an iPhone
+hands the picker a JPEG transcoded from the original HEIC rather than the file itself.
+So a photo already here as a HEIC, or one whose transcode is not byte-for-byte
+repeatable, can land a second time as a visually identical but differently encoded
+file. ⚙ → *Duplicates* will not pair those either -- it too is byte-exact, on purpose,
+because it offers to delete. Nothing here guesses that two photos are the same one.
+
 ### 1. R2 credentials
 
 In the Cloudflare dashboard: **R2 -> Manage API Tokens -> Create API token**, with

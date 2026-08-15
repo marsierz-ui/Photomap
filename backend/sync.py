@@ -21,7 +21,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import db, photometa, r2, scanner, snapshot, thumbs
+from . import db, dupes, photometa, r2, scanner, snapshot, thumbs
 
 try:
     from send2trash import send2trash
@@ -180,7 +180,7 @@ def _apply_inbox(bucket, conn) -> dict:
     object failed to delete does no harm when it is seen again.
     """
     applied = {"albums": 0, "favourites": 0, "duplicates": 0, "deleted": 0,
-               "notes": 0, "imported": 0, "failed": 0}
+               "notes": 0, "imported": 0, "already_here": 0, "failed": 0}
     try:
         keys = bucket.list_keys(prefix=snapshot.INBOX_PREFIX)
     except r2.R2Error:
@@ -254,8 +254,9 @@ def _apply_inbox(bucket, conn) -> dict:
             elif op == "photo_delete":
                 applied["deleted"] += _delete_photos(conn, change)
             elif op == "photo_import":
-                landed, keep = _import_photo(conn, bucket, change)
+                landed, keep, duplicate = _import_photo(conn, bucket, change)
                 applied["imported"] += landed
+                applied["already_here"] += duplicate
         except Exception:
             applied["failed"] += 1
 
@@ -392,8 +393,50 @@ def _import_write(uid: str, change, body: bytes, ext: str) -> Path | None:
     return target
 
 
-def _import_photo(conn, bucket, change) -> tuple[int, bool]:
-    """Land one photo uploaded from the viewer. Returns (imported, keep_queued).
+def _already_indexed(conn, size: int, digest: str) -> bool:
+    """Whether this exact file is already in the library.
+
+    Narrowed by size first, exactly as dupes does it: two files cannot be
+    identical unless their sizes match, so a phone sending its whole camera roll
+    reads a handful of library files off disk rather than all of them. The hash
+    it computes is kept, so the work is done once per library file however many
+    uploads pass through here.
+    """
+    for row in conn.execute(
+        "SELECT id, path, mtime, content_hash, hashed_mtime FROM photos"
+        " WHERE missing=0 AND filesize=?",
+        (size,),
+    ).fetchall():
+        known = row["content_hash"] if row["hashed_mtime"] == row["mtime"] else None
+        if known is None:
+            known = dupes.file_hash(row["path"])
+            if known is None:
+                continue  # unreadable now; it cannot be shown to be the same file
+            with db.write_lock:
+                conn.execute(
+                    "UPDATE photos SET content_hash=?, hashed_mtime=? WHERE id=?",
+                    (known, row["mtime"], row["id"]),
+                )
+                conn.commit()
+        if known == digest:
+            return True
+    return False
+
+
+def _import_drop(bucket, keys, *targets) -> None:
+    """Clear an import's image objects out of the bucket."""
+    for key in targets:
+        if key in keys:
+            try:
+                bucket.delete(key)
+            except r2.R2Error:
+                pass  # the janitor sweeps it later
+
+
+def _import_photo(conn, bucket, change) -> tuple[int, bool, int]:
+    """Land one photo uploaded from the viewer.
+
+    Returns (imported, keep_queued, already_here).
 
     Never raises: the caller uses the second value to decide whether the inbox
     object stays for another try. The split matters - a transient failure
@@ -404,7 +447,7 @@ def _import_photo(conn, bucket, change) -> tuple[int, bool]:
     now = int(time.time())
     uid = str(change.get("uid", ""))
     if not IMPORT_ID.match(uid):
-        return 0, False  # not a shape this machine wrote; nothing to retry
+        return 0, False, 0  # not a shape this machine wrote; nothing to retry
 
     first_seen = _import_first_seen(conn, uid, now)
     expired = now - first_seen > IMPORT_DEADLINE
@@ -412,7 +455,7 @@ def _import_photo(conn, bucket, change) -> tuple[int, bool]:
         # Refused for now rather than discarded: switching the setting on within
         # the deadline picks these up on the next sync. The Worker's quota is
         # what stops a machine that never opts in from filling the bucket.
-        return 0, not expired
+        return 0, not expired, 0
 
     ext = str(change.get("ext", "")).lower()
     if ext not in IMPORT_EXTS:
@@ -427,7 +470,7 @@ def _import_photo(conn, bucket, change) -> tuple[int, bool]:
         # proxy alone would publish a downscaled photo we would then never
         # replace, so let the op sit rather than settling early.
         if not have_full and not expired and now - first_seen < IMPORT_GRACE:
-            return 0, True
+            return 0, True, 0
         # The original first, the proxy as a fallback. The fallback is not
         # theoretical: the original may be a HEIC this machine cannot decode
         # (pillow_heif missing or blocked), while the proxy is a plain JPEG the
@@ -441,27 +484,38 @@ def _import_photo(conn, bucket, change) -> tuple[int, bool]:
         if proxy_key in keys:
             candidates.append((proxy_key, str(change.get("proxy_sha256") or ""), ".jpg"))
         if not candidates:
-            return 0, False  # both halves gone: nothing to land, nothing to retry
+            return 0, False, 0  # both halves gone: nothing to land, nothing to retry
 
         target = meta = None
         for source_key, expect, want_ext in candidates:
             body = bucket.get(source_key)
             if not body or len(body) > IMPORT_MAX_BYTES:
                 continue
-            if expect and hashlib.sha256(body).hexdigest() != expect:
+            digest = hashlib.sha256(body).hexdigest()
+            if expect and digest != expect:
                 # Truncated in transit. Worth another sync in case the object was
                 # still being written, but not past the deadline.
-                return 0, not expired
+                return 0, not expired, 0
+            # This exact file is already in the library. The phone skips what it
+            # has sent before and what the snapshot names, but neither of those
+            # sees a copy that arrived here by cable and was renamed on the way,
+            # and one photo is not worth keeping twice.
+            if _already_indexed(conn, len(body), digest):
+                _import_drop(bucket, keys, proxy_key, full_key)
+                with db.write_lock:
+                    conn.execute("DELETE FROM import_seen WHERE uid=?", (uid,))
+                    conn.commit()
+                return 0, False, 1
             candidate = _import_write(uid, change, body, want_ext)
             if candidate is None:
-                return 0, False
+                return 0, False, 0
             probe = photometa.read(str(candidate))
             if not probe.get("error"):
                 target, meta = candidate, probe
                 break
             candidate.unlink(missing_ok=True)
         if target is None:
-            return 0, False  # nothing here decodes; retrying will not change that
+            return 0, False, 0  # nothing here decodes; retrying will not change that
 
         # Registered before the row is written, so the scan that follows treats
         # this as an ordinary library folder rather than pruning what it finds.
@@ -478,19 +532,14 @@ def _import_photo(conn, bucket, change) -> tuple[int, bool]:
             conn.commit()
         thumbs.build(photo_id, str(target), int(db.get_setting("snapshot_thumb_size", 160)))
 
-        for key in (proxy_key, full_key):
-            if key in keys:
-                try:
-                    bucket.delete(key)
-                except r2.R2Error:
-                    pass  # the janitor sweeps it later
-        return 1, False
+        _import_drop(bucket, keys, proxy_key, full_key)
+        return 1, False, 0
     except (r2.R2Error, OSError, sqlite3.Error, MemoryError):
         # Transient. Keep the op queued so the photo gets another sync, unless
         # it has been failing for a week, at which point it is not transient.
-        return 0, not expired
+        return 0, not expired, 0
     except Exception:
-        return 0, False
+        return 0, False, 0
 
 
 def _run() -> None:
