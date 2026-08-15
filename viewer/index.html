@@ -120,6 +120,18 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
 .bars .track i { display:block; height:100%; background:var(--accent); border-radius:3px; }
 .bars .track i.dim { background:#3a4757; }
 
+/* Photos added on this device, above the grid. Amber throughout, matching the
+   map pins: not yet in the library, and visibly so. */
+#uptray:empty { display:none; }
+.uphead { padding:2px 0 6px; }
+.uprow { display:flex; gap:6px; overflow-x:auto; padding-bottom:10px; }
+.upcard { margin:0; width:104px; flex:0 0 auto; background:var(--panel-2);
+          border:1px solid #ffb020; border-radius:4px; overflow:hidden; }
+.upcard.bad { border-color:var(--bad, #ff9ea1); }
+.upcard img { width:100%; height:78px; object-fit:cover; display:block; }
+.upcard figcaption { font-size:10px; line-height:1.3; padding:3px 4px;
+                     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
 .tile { position:absolute; background:#0b0e13; border-radius:4px;
         overflow:hidden; cursor:pointer; border:2px solid transparent; }
 .tile img { width:100%; height:100%; object-fit:cover; display:block; opacity:0; transition:opacity .18s; }
@@ -281,14 +293,21 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
   <span class="spacer"></span>
   <span id="chips">
     <span id="offline" class="chip warn hidden">Offline</span>
+    <span id="upstate" class="chip hidden"></span>
+    <button id="addPhotos" class="hidden">+ Add</button>
     <button id="install" class="hidden">Install</button>
   </span>
+  <!-- No `capture`: it forces the camera and takes multi-select away. The
+       accept list is image/* alone on purpose - naming .heic here is what tells
+       iOS to hand over the original HEIC instead of transcoding it to a JPEG,
+       and a JPEG is the one thing every part of this can read. -->
+  <input id="picker" type="file" accept="image/*" multiple hidden>
   <span id="summary" class="muted small"></span>
 </header>
 
 <div class="view">
   <div id="map"></div>
-  <div id="gallery" class="hidden"><div id="gsizer"></div></div>
+  <div id="gallery" class="hidden"><div id="uptray"></div><div id="gsizer"></div></div>
   <div id="panel" class="hidden"></div>
   <div id="insights" class="hidden"></div>
   <div id="globe" class="hidden"></div>
@@ -373,6 +392,7 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
 <script src="vendor/leaflet/leaflet.js"></script>
 <script src="vendor/leaflet/leaflet.markercluster.js"></script>
 <script src="vendor/leaflet/leaflet-heat.js"></script>
+<script src="exif.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const DF = new Intl.DateTimeFormat(undefined, { year:'numeric', month:'short', day:'numeric', timeZone:'UTC' });
@@ -420,6 +440,274 @@ async function send(change) {
     toast(`Could not save: ${e.message}`, true);
     send.lastKey = null;
     return false;
+  }
+}
+
+// ----------------------------------------------------------- adding photos
+//
+// A photo picked here is NOT put into M. M's arrays are index-aligned and every
+// view walks them by position, so appending to them would mean touching each of
+// those walks and getting them all right; a separate list that the map and the
+// gallery each draw once is far less to go wrong.
+//
+// Each photo travels as two objects: a small proxy first, so the pin appears
+// immediately, then the full-resolution original. The desktop collects both on
+// its next sync and the phone's copy is dropped once the snapshot says it
+// arrived.
+
+const uploads = [];              // photos added on this device, kept out of M
+const PROXY_EDGE = 1600;         // long edge of the proxy, in px
+const PROXY_QUALITY = 0.82;
+let uploadsFull = false;         // the bucket refused: nothing more fits
+let uploadLayer = null;
+
+const DB_NAME = 'photomap-uploads';
+let updb = null;
+
+function store(mode) {
+  return updb.transaction('photos', mode).objectStore('photos');
+}
+
+function openUploads() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('photos', { keyPath: 'id' });
+    req.onsuccess = () => { updb = req.result; resolve(); };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+const idbDo = (request) => new Promise((resolve, reject) => {
+  request.onsuccess = () => resolve(request.result);
+  request.onerror = () => reject(request.error);
+});
+
+async function loadUploads() {
+  await openUploads();
+  const rows = await idbDo(store('readonly').getAll());
+  // Oldest first, so a queue drains in the order the photos were picked.
+  rows.sort((a, b) => a.queued_ts - b.queued_ts).forEach((r) => uploads.push(r));
+}
+
+const saveUpload = (rec) => idbDo(store('readwrite').put(rec));
+const dropUpload = (rec) => idbDo(store('readwrite').delete(rec.id));
+
+async function sha256Hex(buffer) {
+  const digest = await crypto.subtle.digest('SHA-256', buffer);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+const b64url = (text) => btoa(unescape(encodeURIComponent(text)))
+  .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+/** A JPEG small enough to send straight away, so the map updates now. Drawn
+ *  through a canvas, which means it carries no EXIF at all - the coordinates
+ *  ride in the metadata header instead. */
+async function downscale(file) {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, PROXY_EDGE / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+  canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', PROXY_QUALITY));
+}
+
+/** Read one picked file into the local queue. Nothing is sent yet. */
+async function stage(file) {
+  const meta = (typeof readExif === 'function' ? await readExif(file) : null) || {};
+  const proxy = await downscale(file);
+  if (!proxy) throw new Error('could not read that photo');
+  const ext = (file.name.match(/\.[A-Za-z0-9]+$/) || ['.jpg'])[0].toLowerCase();
+  const rec = {
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    queued_ts: Date.now(),
+    name: file.name,
+    ext,
+    bytes: file.size,
+    sha256: await sha256Hex(await file.arrayBuffer()),
+    proxy_sha256: await sha256Hex(await proxy.arrayBuffer()),
+    taken_ts: meta.taken_ts ?? null,
+    lat: meta.lat ?? null,
+    lon: meta.lon ?? null,
+    proxy,
+    full: file,
+    iid: null,
+    state: 'queued',
+  };
+  uploads.push(rec);
+  await saveUpload(rec);
+  return rec;
+}
+
+/** The one place that decides what the chips say. Called after every state
+ *  change, so "uploads are paused" cannot be left on screen once it is untrue. */
+function paintUploads() {
+  const chip = $('upstate');
+  const queued = uploads.filter((u) => u.state !== 'done').length;
+  const waiting = uploads.length;
+  if (uploadsFull) {
+    chip.textContent = 'Uploads paused - sync your computer';
+    chip.className = 'chip warn';
+  } else if (queued) {
+    chip.textContent = `Uploading ${fmtNum(queued)}…`;
+    chip.className = 'chip';
+  } else if (waiting) {
+    chip.textContent = `${fmtNum(waiting)} waiting for your computer`;
+    chip.className = 'chip';
+  } else {
+    chip.className = 'chip hidden';
+  }
+  if (view === 'gallery') drawUploadTray();
+}
+
+/** Said once per transition into the blocked state, not once per photo: a toast
+ *  per rejected upload in a batch of forty is noise, not information. */
+function announceFull(pending, quota) {
+  if (uploadsFull) return;
+  uploadsFull = true;
+  const share = quota ? ` (${Math.round((pending / quota) * 100)}% of the space used)` : '';
+  toast(`Uploads paused${share}. Photos already added are waiting for your `
+        + 'computer - run a sync there and adding will work again.', true);
+  paintUploads();
+}
+
+async function postBytes(path, blob, meta) {
+  return fetch(path, {
+    method: 'POST',
+    headers: { 'X-Photo-Meta': b64url(JSON.stringify(meta)), 'Content-Type': 'application/octet-stream' },
+    body: blob,
+  });
+}
+
+/** Push whatever is queued. Safe to call at any time: it takes one photo at a
+ *  time and returns early the moment the bucket says it is full. */
+async function drainUploads() {
+  if (drainUploads.busy || !navigator.onLine) return;
+  drainUploads.busy = true;
+  try {
+    for (const rec of uploads) {
+      if (uploadsFull) break;
+      if (rec.state === 'done') continue;
+      try {
+        if (!rec.iid) {
+          const meta = { name: rec.name, ext: rec.ext, bytes: rec.bytes, sha256: rec.sha256,
+                         proxy_sha256: rec.proxy_sha256, taken_ts: rec.taken_ts,
+                         lat: rec.lat, lon: rec.lon };
+          const r = await postBytes('/api/import', rec.proxy, meta);
+          const data = await r.json().catch(() => ({}));
+          if (r.status === 507) { announceFull(data.pending, data.quota); break; }
+          if (!r.ok) { rec.state = 'failed'; rec.error = data.error || r.statusText; await saveUpload(rec); continue; }
+          rec.iid = data.iid;
+          rec.state = 'sent';
+          await saveUpload(rec);
+          paintUploads();
+        }
+        if (rec.full) {
+          const r = await postBytes(`/api/import/full?iid=${encodeURIComponent(rec.iid)}`,
+                                    rec.full, { sha256: rec.sha256 });
+          const data = await r.json().catch(() => ({}));
+          if (r.status === 507) { announceFull(data.pending, data.quota); break; }
+          if (r.ok) {
+            // The phone keeps nothing but the record: the bytes are in the
+            // bucket now, and holding a 50MB copy per photo fills the device.
+            rec.full = null;
+            rec.state = 'done';
+          } else if (r.status === 413) {
+            // Too big to send. The proxy is already across, so the photo still
+            // lands - at proxy resolution - and the original stays on the phone.
+            rec.full = null;
+            rec.state = 'done';
+            rec.proxy_only = true;
+            toast(`${rec.name} was too large to send in full - the smaller copy was added`, true);
+          } else {
+            rec.state = 'sent';   // try the original again next time round
+          }
+          await saveUpload(rec);
+        } else {
+          rec.state = 'done';
+          await saveUpload(rec);
+        }
+      } catch {
+        rec.state = 'queued';     // network dropped: picked up on the next pass
+        break;
+      }
+    }
+  } finally {
+    drainUploads.busy = false;
+    paintUploads();
+    refresh();
+  }
+}
+
+/** Ask before reading a photo, so a full queue is reported before the phone
+ *  spends time decoding and downscaling something it cannot send. */
+async function importState() {
+  try {
+    const r = await fetch('/api/import/state');
+    if (!r.ok) return null;
+    return await r.json();
+  } catch {
+    return null;
+  }
+}
+
+$('addPhotos').onclick = async () => {
+  if (!navigator.onLine) {
+    toast('Offline - adding a photo needs a connection', true);
+    return;
+  }
+  const state = await importState();
+  if (state && state.full) { announceFull(state.pending, state.quota); return; }
+  // Warned early rather than at the moment of refusal, so a long batch does not
+  // get halfway through and stop.
+  if (state && state.pending > state.quota * 0.5) {
+    toast(`${Math.round((state.pending / state.quota) * 100)}% of the upload space is `
+          + 'used. Sync your computer to clear it.');
+  }
+  uploadsFull = false;
+  $('picker').click();
+};
+
+$('picker').onchange = async (e) => {
+  const files = [...e.target.files];
+  e.target.value = '';
+  for (const file of files) {
+    try {
+      await stage(file);
+    } catch (err) {
+      toast(`Could not add ${file.name}: ${err.message}`, true);
+    }
+  }
+  paintUploads();
+  refresh();
+  drainUploads();
+};
+
+window.addEventListener('online', () => { uploadsFull = false; drainUploads(); });
+
+/** Drop the local copy of every photo the desktop has actually collected.
+ *
+ *  Two conditions, and both matter. The watermark alone is not enough: it moves
+ *  forward on any sync, including one that ran while this phone was offline
+ *  holding a batch it had never sent, and retiring those would delete the only
+ *  copy of photos that never left the device. So a record is only ever retired
+ *  once it has an `iid`, which it gets when the bucket has accepted it.
+ *
+ *  The watermark is seconds; queued_ts is milliseconds. */
+async function retireDrained() {
+  const mark = Number(M.import_watermark) || 0;
+  if (!mark) return;
+  for (const rec of [...uploads]) {
+    if (!rec.iid) continue;                       // never uploaded: not ours to drop
+    if (rec.queued_ts / 1000 >= mark) continue;   // the desktop has not got this far
+    uploads.splice(uploads.indexOf(rec), 1);
+    try {
+      await dropUpload(rec);
+    } catch {
+      /* it reappears next boot and is retired then */
+    }
   }
 }
 
@@ -620,6 +908,43 @@ function heatOptions() {
 function clearLayers() {
   [heatLayer, clusterLayer, pointLayer, pathLayer].forEach((l) => { if (l) map.removeLayer(l); });
   heatLayer = clusterLayer = pointLayer = pathLayer = null;
+  if (uploadLayer) { map.removeLayer(uploadLayer); uploadLayer = null; }
+}
+
+/** Whether there is anything real to draw into.
+ *
+ *  Two different sizes have to agree, and the difference is the whole bug.
+ *  leaflet.heat builds its canvas from map.getSize(), which is a value Leaflet
+ *  caches and only refreshes on invalidateSize; everything else here measures
+ *  the element. A container that gained its size without a resize event - the
+ *  app opened in a background tab and brought forward later - leaves the cache
+ *  at 0x0 while the element measures perfectly well, and the heat layer then
+ *  calls getImageData on a zero-width canvas and throws. Reconciling the two
+ *  here is cheaper than every caller remembering which size it wants. */
+function mapReady() {
+  const box = map.getContainer().getBoundingClientRect();
+  if (!box.width || !box.height) return false;
+  if (!map.getSize().x || !map.getSize().y) map.invalidateSize();
+  return map.getSize().x > 0 && map.getSize().y > 0;
+}
+
+/** Photos added on this phone, drawn over the snapshot in amber so a photo that
+ *  has not reached the library yet is never mistaken for one that has. They
+ *  follow the date and search filters; album and favourite belong to neither. */
+function drawUploads() {
+  const shown = uploads.filter((u) => u.lat != null
+    && (u.taken_ts || 0) <= cutoff
+    && (!query || u.name.toLowerCase().includes(query)));
+  if (!shown.length) return;
+  uploadLayer = L.featureGroup();
+  shown.forEach((u) => {
+    L.circleMarker([u.lat, u.lon], {
+      radius: 6, color: '#ffb020', fillColor: '#ffb020', fillOpacity: 0.9, weight: 2,
+    }).bindTooltip(`${escapeHtml(u.name)}<br><span class="muted small">${
+      u.state === 'done' ? 'waiting for your computer' : 'uploading…'}</span>`,
+    { direction: 'top', offset: [0, -8] }).addTo(uploadLayer);
+  });
+  uploadLayer.addTo(map);
 }
 
 function bindPhotoEvents(layer) {
@@ -664,7 +989,14 @@ function drawMap() {
   globeHide();
   clearLayers();
 
-  if (!idx.length || !map.getContainer().getBoundingClientRect().width) {
+  if (!mapReady()) {
+    setStatus(`0 located · ${fmtNum(shownAll.length)} shown of ${fmtNum(M.n)}`);
+    return;
+  }
+  // Before the empty-snapshot return: a phone whose library has no located
+  // photos at all should still see the one it just added.
+  drawUploads();
+  if (!idx.length) {
     setStatus(`0 located · ${fmtNum(shownAll.length)} shown of ${fmtNum(M.n)}`);
     return;
   }
@@ -1008,7 +1340,10 @@ function measure() {
   const cs = getComputedStyle($('gallery'));
   const num = (value, fallback) => parseFloat(value) || fallback;
   const gap = num(cs.getPropertyValue('--gap'), 4);
-  const padT = num(cs.paddingTop, 8);
+  // The tray of not-yet-synced photos sits above #gsizer in normal flow, so it
+  // pushes the whole grid down. Folding its height in here fixes the window
+  // maths, topOfRow and the rail together - they all read geo.padT.
+  const padT = num(cs.paddingTop, 8) + $('uptray').offsetHeight;
   // #gsizer sits inside the padding, so only the width has to account for it.
   const inner = Math.max(0, $('gallery').clientWidth - num(cs.paddingLeft, 8) - num(cs.paddingRight, 42));
   const cols = Math.max(1, Math.floor((inner + gap) / (num(cs.getPropertyValue('--tile'), 130) + gap)));
@@ -1075,7 +1410,25 @@ function layoutGallery() {
   drawRail();
 }
 
+/** Photos added here but not yet in the library. Painted above the grid rather
+ *  than inside it: the grid is virtualised on the assumption that every tile is
+ *  an index into M, and these are not in M. */
+function drawUploadTray() {
+  const tray = $('uptray');
+  if (!uploads.length) { tray.innerHTML = ''; return; }
+  const label = (u) => (u.state === 'done'
+    ? (u.proxy_only ? 'added, smaller copy' : 'waiting for your computer')
+    : (u.state === 'failed' ? (u.error || 'could not send') : 'uploading…'));
+  tray.innerHTML = `<div class="uphead muted small">Added on this device · ${
+    fmtNum(uploads.length)}</div><div class="uprow">${
+    uploads.map((u) => `<figure class="upcard${u.state === 'failed' ? ' bad' : ''}">
+      <img alt="" src="${URL.createObjectURL(u.proxy)}">
+      <figcaption>${escapeHtml(u.name)}<br><span class="muted">${escapeHtml(label(u))}</span></figcaption>
+    </figure>`).join('')}</div>`;
+}
+
 function drawGallery() {
+  drawUploadTray();
   galleryIdx = visible();
   tileColors = new Map(M.albums.map((a) => [a.id, a.color]));
   tileAlbums = new Map();
@@ -1543,8 +1896,11 @@ function setView(name) {
   $('insights').classList.toggle('hidden', name !== 'insights');
   $('mapControls').classList.toggle('hidden', name !== 'map');
   // The globe is its own element rather than a layer, so leaving the map has to
-  // put it away explicitly or it stays painted over whatever comes next.
-  if (name !== 'map') globeHide();
+  // put it away explicitly or it stays painted over whatever comes next. The
+  // layers go with it: a hidden map is a zero-size container, and leaflet.heat
+  // redraws itself on the map's own moveend - straight into getImageData on a
+  // zero-width canvas, which throws. drawMap() below puts them back on the way in.
+  if (name !== 'map') { globeHide(); clearLayers(); }
   if (name !== 'gallery') { $('rail').classList.add('hidden'); $('railBubble').classList.add('hidden'); }
   if (name === 'map') { map.invalidateSize(); drawMap(); }
   if (name === 'gallery') drawGallery();
@@ -1683,7 +2039,7 @@ window.addEventListener('appinstalled', () => $('install').classList.add('hidden
 
 fetch('manifest.json', { cache:'no-cache' })
   .then((r) => { if (!r.ok) throw new Error(`manifest.json returned ${r.status}`); return r.json(); })
-  .then((m) => {
+  .then(async (m) => {
     M = m;
     if (!M.ids) throw new Error('This snapshot predates gallery support - run a sync from the app');
     $('loading').style.display = 'none';
@@ -1691,8 +2047,21 @@ fetch('manifest.json', { cache:'no-cache' })
       `${fmtNum(m.n)} photos · ${fmtNum(m.geo_n)} located · updated ${fmtDate(m.generated)}`;
     $('stamp').textContent = 'all time';
     fillAlbums();
+    // Adding photos is off unless this snapshot came from a machine that opted
+    // in, so an older snapshot simply has no button.
+    if (m.allow_import) $('addPhotos').classList.remove('hidden');
+    // Never fatal: a phone that refuses IndexedDB (private mode, storage
+    // denied) still gets the whole viewer, just without adding photos.
+    try {
+      await loadUploads();
+      await retireDrained();
+    } catch {
+      $('addPhotos').classList.add('hidden');
+    }
     setView('map');
     if (m.bounds) map.fitBounds([[m.bounds[0], m.bounds[1]], [m.bounds[2], m.bounds[3]]], { padding:[40,40], maxZoom:15 });
+    paintUploads();
+    if (m.allow_import) drainUploads();
   })
   .catch((err) => {
     $('loading').querySelector('div').textContent = 'Could not load the snapshot';

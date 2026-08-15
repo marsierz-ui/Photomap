@@ -8,6 +8,10 @@ DATA_DIR = ROOT_DIR / "data"
 DB_PATH = DATA_DIR / "photomap.db"
 THUMB_DIR = DATA_DIR / "thumbs"
 TRASH_DIR = DATA_DIR / "trash"
+# Photos uploaded from the cloud viewer land here. Created and registered as a
+# library root lazily, on the first accepted import, so a library that never
+# imports never grows a phantom root.
+IMPORT_DIR = DATA_DIR / "imported"
 
 _local = threading.local()
 write_lock = threading.Lock()
@@ -84,6 +88,14 @@ CREATE TABLE IF NOT EXISTS synced (
     uploaded_ts INTEGER
 );
 
+-- When this machine first saw each queued cloud import. The upload's own id
+-- carries the phone's clock, which cannot be trusted to expire anything: a
+-- device set a year fast would look brand new on every sync and never age out.
+CREATE TABLE IF NOT EXISTS import_seen (
+    uid      TEXT PRIMARY KEY,
+    first_ts INTEGER NOT NULL
+);
+
 -- Cached content hash of each snapshot thumbnail, keyed by photo. Recomputed
 -- only when the source file's mtime moves, so repeat syncs stay cheap.
 CREATE TABLE IF NOT EXISTS snapshot_thumbs (
@@ -102,6 +114,9 @@ DEFAULTS = {
     # Deleting ordinary photos from the cloud viewer is off until this machine
     # opts in. Duplicate cleanup is allowed regardless, since a copy survives.
     "cloud_delete_enabled": "0",
+    # Accepting photos uploaded from the cloud viewer is off until this machine
+    # opts in. They land in data/imported and become ordinary library photos.
+    "cloud_import_enabled": "0",
     "sync_on_scan": "1",
     "r2_account_id": "",
     "r2_bucket": "",

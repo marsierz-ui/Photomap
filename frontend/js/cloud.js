@@ -98,7 +98,8 @@ function renderPanel(panel, status) {
           ${fmtNum(status.received.albums)} album changes,
           ${fmtNum(status.received.favourites)} favourites,
           ${fmtNum(status.received.duplicates)} duplicate removals,
-          ${fmtNum(status.received.deleted || 0)} deletions from the cloud</span>` : ''}
+          ${fmtNum(status.received.deleted || 0)} deletions from the cloud,
+          ${fmtNum(status.received.imported || 0)} photos added from a phone</span>` : ''}
         ${status.phase === 'error' ? `<br><span style="color:#ff9ea1">${escapeHtml(status.error || '')}</span>` : ''}
       </div>
       <div class="row"><label>Publish</label>
@@ -133,6 +134,17 @@ function renderPanel(panel, status) {
           : `Off. The viewer can still tidy duplicates, which always keep one copy.
              Turn this on only if you want to delete ordinary photos from your phone.`}
       </div>
+      <label class="check small"><input type="checkbox" data-cloud="allowimport" ${status.allow_import ? 'checked' : ''}>
+        Accept photos added from your phone</label>
+      <div class="muted small">
+        ${status.allow_import
+          ? `On. Photos added in the viewer are copied into
+             <code>${escapeHtml(status.import_dir || '')}</code> and join the library at the next
+             sync. That folder is added to your photo folders automatically - leave it there, or
+             the next scan drops the imports from the index again.`
+          : `Off. Photos added in the viewer stay in the bucket and are discarded after a week.
+             Turn this on to let your phone add photos to the library.`}
+      </div>
     ` : `
       <div class="muted small">Not set up. Uploads a heat map plus small thumbnails so you can
       view it from any device, without your library or this computer.</div>
@@ -166,6 +178,26 @@ function renderPanel(panel, status) {
         toast(e.target.checked
           ? 'Cloud deletion enabled - sync once so the viewer picks it up'
           : 'Cloud deletion disabled');
+        refreshPanel();
+      };
+      return;
+    }
+    if (action === 'allowimport') {
+      node.onchange = async (e) => {
+        if (e.target.checked) {
+          const ok = await confirmModal(
+            'Accept photos from your phone',
+            `Photos added in the viewer will be copied onto this computer and added to the
+             library. They land in a new folder that is added to your photo folders, so they
+             survive a rescan. Anyone who can sign in to your viewer can add photos.`,
+            'Accept photos',
+          );
+          if (!ok) { e.target.checked = false; refreshPanel(); return; }
+        }
+        await guard(api.post('/api/sync/config', { allow_import: e.target.checked }), 'Failed');
+        toast(e.target.checked
+          ? 'Adding photos enabled - sync once so the viewer picks it up'
+          : 'Adding photos disabled');
         refreshPanel();
       };
       return;

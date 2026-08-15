@@ -4,6 +4,7 @@ Uses a mock S3 endpoint, so no real R2 account is touched.
 """
 import hashlib
 import http.server
+import io
 import json
 import shutil
 import sys
@@ -11,6 +12,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import uuid
 import zlib
 from pathlib import Path
 
@@ -323,6 +325,198 @@ check("manifest advertises the switch", manifest()["allow_delete"] is True)
 db.set_setting("cloud_delete_enabled", "0")
 check("manifest hides it again once off",
       json.loads(snapshot.manifest_bytes(snapshot.build()[0]))["allow_delete"] is False)
+
+# --- photos added from a phone ------------------------------------------------
+
+
+def import_bytes(when="2021:06:04 15:00:00", lat=51.5074, lon=-0.1278, size=(64, 48)):
+    """A real JPEG carrying real EXIF, so photometa reads it the way it would
+    read one off a phone rather than being handed values by the test."""
+    from PIL.TiffImagePlugin import IFDRational as R
+
+    img = Image.new("RGB", size, (200, 60, 60))
+    exif = Image.Exif()
+    exif[271] = "TestPhone"
+    exif[0x8769] = {36867: when}
+    if lat is not None:
+        def dms(v):
+            d = int(abs(v)); m = int((abs(v) - d) * 60)
+            return (R(d, 1), R(m, 1), R(round((abs(v) - d - m / 60) * 3600 * 100), 100))
+        exif[0x8825] = {1: "S" if lat < 0 else "N", 2: dms(lat),
+                        3: "W" if lon < 0 else "E", 4: dms(lon)}
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", exif=exif.tobytes())
+    return buf.getvalue()
+
+
+def queue_import(proxy, *, full=None, name="IMG_0001.JPG", ext=".jpg", uid=None, **extra):
+    """Stand in for the Worker: image bytes under import/, one op under inbox/."""
+    uid = uid or f"{int(time.time() * 1000)}-{uuid.uuid4()}"
+    with LOCK:
+        STORE[f"import/{uid}.jpg"] = proxy
+        if full is not None:
+            STORE[f"import/{uid}.orig"] = full
+        op = {"op": "photo_import", "uid": uid, "queued_ts": int(uid.split("-")[0]),
+              "name": name, "ext": ext, "bytes": len(full or proxy),
+              "sha256": hashlib.sha256(full).hexdigest() if full is not None else None,
+              "proxy_sha256": hashlib.sha256(proxy).hexdigest()}
+        op.update(extra)
+        STORE[f"inbox/{uid}.json"] = json.dumps(op).encode()
+    return uid
+
+
+def photo_row(uid):
+    tag = f"{uid[14:18]}-{uid[18:22]}"
+    return db.connect().execute(
+        "SELECT * FROM photos WHERE path LIKE ?", (f"%{tag}%",)).fetchone()
+
+
+before = db.connect().execute("SELECT COUNT(*) c FROM photos").fetchone()["c"]
+full_jpeg = import_bytes()
+uid = queue_import(import_bytes(size=(32, 24)), full=full_jpeg)
+state = run_sync()
+check("import is refused while the switch is off", photo_row(uid) is None)
+check("refused import is not counted", state["received"]["imported"] == 0, str(state["received"]))
+check("refused import stays queued for the deadline", f"inbox/{uid}.json" in STORE)
+
+db.set_setting("cloud_import_enabled", "1")
+state = run_sync()
+row = photo_row(uid)
+check("import lands once the switch is on", row is not None)
+check("sync counts the import", state["received"]["imported"] == 1, str(state["received"]))
+# The same constant is asserted in tests/test_exif.mjs, so the Python and
+# JavaScript readers cannot drift apart without one of the two failing.
+check("capture time is read from EXIF as a UTC wall clock",
+      row and row["taken_ts"] == 1622818800, str(row and row["taken_ts"]))
+check("coordinates are read from EXIF, not taken on trust",
+      row and abs(row["lat"] - 51.5074) < 1e-4 and abs(row["lon"] + 0.1278) < 1e-4,
+      f"{row and row['lat']}, {row and row['lon']}")
+check("the original was preferred over the proxy",
+      row and row["filesize"] == len(full_jpeg), f"{row and row['filesize']} vs {len(full_jpeg)}")
+check("the file landed under the import directory",
+      row and str(db.IMPORT_DIR) in row["path"], row and row["path"])
+check("the import directory is registered as a root",
+      str(db.IMPORT_DIR) in db.get_roots(), str(db.get_roots()))
+check("both image objects were cleared from the bucket",
+      f"import/{uid}.jpg" not in STORE and f"import/{uid}.orig" not in STORE)
+check("the inbox op was cleared", f"inbox/{uid}.json" not in STORE)
+check("the imported photo reaches the manifest", row and row["id"] in manifest()["ids"])
+
+# Replay: the drain tolerates seeing an op twice, and must not make a second row.
+queue_import(import_bytes(size=(32, 24)), full=full_jpeg, uid=uid)
+run_sync()
+check("replaying an import does not duplicate the photo",
+      db.connect().execute("SELECT COUNT(*) c FROM photos WHERE path=?",
+                           (row["path"],)).fetchone()["c"] == 1)
+
+# A proxy on its own, past the grace window, still has to land: the original may
+# never arrive, and the photo is not on the phone forever.
+old = f"{int((time.time() - sync.IMPORT_GRACE - 60) * 1000)}-{uuid.uuid4()}"
+queue_import(import_bytes(when="2022:03:04 09:00:00", lat=-33.8688, lon=151.2093,
+                          size=(24, 18)), uid=old, name="IMG_0002.JPG")
+db.connect().execute("INSERT OR REPLACE INTO import_seen(uid, first_ts) VALUES (?,?)",
+                     (old, int(time.time()) - sync.IMPORT_GRACE - 60))
+db.connect().commit()
+state = run_sync()
+lone = photo_row(old)
+check("a proxy alone lands once the grace window has passed", lone is not None)
+check("southern and western refs keep their sign",
+      lone and abs(lone["lat"] + 33.8688) < 1e-3 and abs(lone["lon"] - 151.2093) < 1e-3,
+      f"{lone and lone['lat']}, {lone and lone['lon']}")
+
+# A proxy whose original is still on its way is left alone rather than settled.
+fresh = f"{int(time.time() * 1000)}-{uuid.uuid4()}"
+queue_import(import_bytes(size=(24, 18)), uid=fresh, name="IMG_0003.JPG")
+run_sync()
+check("a fresh proxy waits for its original", photo_row(fresh) is None)
+check("and its op is held, not deleted", f"inbox/{fresh}.json" in STORE)
+check("the watermark is held back by what is still waiting",
+      int(db.get_setting("import_watermark", 0)) <= int(fresh.split("-")[0]) // 1000,
+      db.get_setting("import_watermark", 0))
+check("the watermark is in seconds, not milliseconds",
+      abs(int(db.get_setting("import_watermark", 0)) - time.time()) < 86400,
+      db.get_setting("import_watermark", 0))
+
+# Truncated in transit: the bytes do not match the hash the phone computed, so
+# the original is refused outright rather than ingested as a broken photo.
+proxy4 = import_bytes(size=(32, 24))
+uid4 = f"{int(time.time() * 1000)}-{uuid.uuid4()}"
+with LOCK:
+    STORE[f"import/{uid4}.jpg"] = proxy4
+    STORE[f"import/{uid4}.orig"] = b"truncated"
+    STORE[f"inbox/{uid4}.json"] = json.dumps({
+        "op": "photo_import", "uid": uid4, "queued_ts": int(uid4.split("-")[0]),
+        "name": "IMG_0004.JPG", "ext": ".jpg", "bytes": 9,
+        "sha256": hashlib.sha256(b"the whole file").hexdigest(),   # will not match
+        "proxy_sha256": hashlib.sha256(proxy4).hexdigest()}).encode()
+run_sync()
+check("an upload that did not arrive intact is not ingested", photo_row(uid4) is None)
+check("and it is held for another try rather than dropped", f"inbox/{uid4}.json" in STORE)
+
+# Intact bytes that are not a decodable image: the original is undecodable but
+# the proxy is a real JPEG, which is the HEIC-without-pillow_heif case. The
+# photo has to survive at proxy resolution rather than be lost.
+undecodable = b"\x00\x01\x02 not an image, but exactly what was hashed"
+fallback = queue_import(import_bytes(size=(40, 30)), full=undecodable, name="IMG_0005.HEIC")
+run_sync()
+fb = photo_row(fallback)
+check("an undecodable original falls back to the proxy", fb is not None)
+check("the fallback row is the proxy, not the broken original",
+      fb is not None and fb["filesize"] != len(undecodable), str(fb and fb["filesize"]))
+
+# Nothing decodable at all: dropped, never indexed as a broken library photo.
+junk = queue_import(b"not an image either", full=None, name="IMG_0006.JPG")
+db.connect().execute("INSERT OR REPLACE INTO import_seen(uid, first_ts) VALUES (?,?)",
+                     (junk, int(time.time()) - sync.IMPORT_GRACE - 60))
+db.connect().commit()
+run_sync()
+check("an upload that will not decode never enters the library", photo_row(junk) is None)
+
+# Traversal and rubbish ids.
+evil = queue_import(import_bytes(size=(32, 24)), full=import_bytes(size=(32, 24)),
+                    name="../../../../evil.jpg")
+run_sync()
+evil_row = photo_row(evil)
+check("a traversing filename cannot escape the import directory",
+      evil_row is not None and str(db.IMPORT_DIR) in evil_row["path"]
+      and ".." not in evil_row["path"], evil_row and evil_row["path"])
+
+with LOCK:
+    STORE["inbox/not-a-real-id.json"] = json.dumps(
+        {"op": "photo_import", "uid": "../../etc/passwd", "queued_ts": 0}).encode()
+    STORE["import/stray.jpg"] = b"loose bytes with no op"
+state = run_sync()
+check("a malformed import id is refused", state["phase"] == "done")
+check("loose image bytes are never JSON-parsed as an op",
+      state["received"]["failed"] == 0, str(state["received"]))
+
+# A scan must not hard-delete an import it did not walk. The prune classifies
+# "not seen, but the file is there" as unrooted and DELETEs the row, and a scan
+# racing a sync would otherwise destroy a photo that had just landed.
+db.set_setting("cloud_import_enabled", "1")
+survivor = queue_import(import_bytes(size=(48, 36)), full=import_bytes(size=(48, 36)),
+                        name="IMG_0007.JPG")
+run_sync()
+kept = photo_row(survivor)
+check("the import is in the index before the scan", kept is not None)
+# The race, made deterministic: a walk that finished before the import landed
+# still sees the file on disk afterwards, which is exactly the state that made
+# the prune classify it as unrooted and DELETE it.
+_real_walk = scanner._walk
+scanner._walk = lambda roots: [f for f in _real_walk(roots) if str(db.IMPORT_DIR) not in f]
+scanner.start()
+while scanner.status()["running"]:
+    time.sleep(0.05)
+scanner._walk = _real_walk
+still = db.connect().execute("SELECT missing FROM photos WHERE id=?", (kept["id"],)).fetchone()
+check("a scan does not drop an imported photo it did not walk", still is not None,
+      "the row was hard-deleted by the prune")
+check("and it is not flagged missing either", still and still["missing"] == 0,
+      str(still and still["missing"]))
+
+db.set_setting("cloud_import_enabled", "0")
+check("manifest hides importing once off",
+      json.loads(snapshot.manifest_bytes(snapshot.build()[0]))["allow_import"] is False)
 
 print()
 if failures:

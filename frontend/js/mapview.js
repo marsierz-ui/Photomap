@@ -22,9 +22,19 @@ let armed = false;
 let loadToken = 0;
 let deferred = false;
 
+/** Whether there is anything real to draw into.
+ *
+ *  Two different sizes have to agree, and the difference is a real crash.
+ *  leaflet.heat builds its canvas from map.getSize(), which Leaflet caches and
+ *  only refreshes on invalidateSize; this measures the element. A container that
+ *  gained its size without a resize event - a pane revealed while the window
+ *  never moved - leaves that cache at 0x0 while the element measures fine, and
+ *  the heat layer then calls getImageData on a zero-width canvas and throws. */
 function hasSize() {
   const box = map.getContainer().getBoundingClientRect();
-  return box.width > 0 && box.height > 0;
+  if (box.width <= 0 || box.height <= 0) return false;
+  if (!map.getSize().x || !map.getSize().y) map.invalidateSize();
+  return map.getSize().x > 0 && map.getSize().y > 0;
 }
 
 const bases = {};
@@ -55,6 +65,12 @@ export function initMap() {
   bases.dark.addTo(map);
 
   map.on('moveend', () => {
+    // A hidden pane is a zero-size container, and Leaflet still fires moveend
+    // for it on a window resize. The bbox that comes out is a point, not a
+    // viewport, so with "follow the map" on it would narrow every other view to
+    // a rectangle nobody is looking at. The real bounds are still there when the
+    // pane comes back.
+    if (!hasSize()) return;
     state.bounds = boundsToBbox(map.getBounds());
     if (state.followMap) emit('filters');
   });
@@ -110,9 +126,20 @@ export function setBase(name) {
 }
 
 export function refreshMapSize() {
-  if (map) map.invalidateSize();
+  if (!map) return;
+  // Called on every window resize, including while the map pane is hidden. A
+  // hidden pane is a zero-size container, and leaflet.heat redraws itself on the
+  // map's own moveend - straight into getImageData on a zero-width canvas, which
+  // throws. Leaflet defers its resize handling to an animation frame, so
+  // dropping the layers here happens first and leaves it nothing to redraw.
+  if (!hasSize()) {
+    clearLayers();
+    deferred = true;
+    return;
+  }
+  map.invalidateSize();
   globe.resize();
-  if (deferred && hasSize()) render();
+  if (deferred) render();
 }
 
 /** Zoom to the located photos in the current selection. Returns false if none. */

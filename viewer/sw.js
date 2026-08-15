@@ -12,11 +12,15 @@
  *   else           the cache as the fallback when there is no signal.
  *
  * /api/ and /__login are never cached: queued changes and the password gate
- * have to reach the Worker or fail loudly.
+ * have to reach the Worker or fail loudly. Photo uploads are POSTs to
+ * /api/import, so they are left alone twice over - by the method check and by
+ * the /api/ passthrough. There is deliberately no Background Sync handler: an
+ * upload only progresses while the page is open, and the viewer says so in its
+ * own chip rather than implying a transfer is continuing in the background.
  */
 // Bumped when the shell's contents change: activate drops every cache not in
 // KEEP, so an installed app cannot keep serving the previous page offline.
-const SHELL_CACHE = 'photomap-shell-v2';
+const SHELL_CACHE = 'photomap-shell-v3';
 const THUMB_CACHE = 'photomap-thumbs-v1';
 const KEEP = [SHELL_CACHE, THUMB_CACHE];
 
@@ -29,7 +33,7 @@ const THUMB_LIMIT = 4000;
 // MapLibre is not listed: it is half a megabyte for a mode most sessions never
 // open, so it is cached on first use by the same network-first path instead.
 const SHELL = [
-  './', './index.html', './manifest.webmanifest', './icon.svg',
+  './', './index.html', './manifest.webmanifest', './icon.svg', './exif.js',
   './vendor/leaflet/leaflet.js',
   './vendor/leaflet/leaflet.css',
   './vendor/leaflet/leaflet.markercluster.js',

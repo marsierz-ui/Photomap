@@ -20,7 +20,11 @@ from . import db, thumbs
 MANIFEST_KEY = "manifest.json"
 THUMB_PREFIX = "t/"
 INBOX_PREFIX = "inbox/"
-MANIFEST_VERSION = 4
+# Image bytes uploaded from the viewer. Deliberately not under INBOX_PREFIX: the
+# inbox drain JSON-parses everything it finds there, and a JPEG would sit in it
+# failing to parse on every sync forever.
+IMPORT_PREFIX = "import/"
+MANIFEST_VERSION = 5
 
 
 def _thumb_hash(path) -> tuple[str, int]:
@@ -205,6 +209,14 @@ def build(progress=None) -> tuple[dict, dict]:
         # re-checks this on apply, so a stale manifest cannot grant it.
         "allow_delete": db.get_setting("cloud_delete_enabled", "0") == "1",
         "delete_cap": 200,
+        # Advisory, exactly like allow_delete: the desktop re-checks the setting
+        # when it applies an import, so a stale manifest cannot grant it.
+        "allow_import": db.get_setting("cloud_import_enabled", "0") == "1",
+        "import_max_mb": 64,
+        # Seconds. Imports queued before this have all been drained, so the phone
+        # can drop its local copies. A low-water mark, not a high one: an import
+        # still waiting for its full-resolution half holds it back.
+        "import_watermark": int(db.get_setting("import_watermark", 0) or 0),
         "first_ts": min(stamps) if stamps else None,
         "last_ts": max(stamps) if stamps else None,
         "total_photos": totals["total"] or 0,

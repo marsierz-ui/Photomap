@@ -24,8 +24,23 @@ const env = {
   PASSWORD_HASH: await sha256Hex(PASSWORD),
   SESSION_SECRET: 'a-long-random-session-secret-for-tests',
   BUCKET: {
-    async put(key, body) {
-      PUTS.push({ key, body: JSON.parse(body) });
+    async put(key, body, options) {
+      // Image uploads arrive as bytes, ops as JSON strings. Only the JSON is
+      // parsed, so the existing assertions keep reading `body` as an object.
+      const isText = typeof body === 'string';
+      PUTS.push({
+        key,
+        body: isText ? JSON.parse(body) : null,
+        size: isText ? body.length : body.byteLength,
+        type: options?.httpMetadata?.contentType,
+      });
+    },
+    async list({ prefix = '' } = {}) {
+      return {
+        objects: PUTS.filter((p) => p.key.startsWith(prefix))
+          .map((p) => ({ key: p.key, size: p.size })),
+        truncated: false,
+      };
     },
     async head(key) {
       return PUTS.some((p) => p.key === key) ? { key } : null;
@@ -260,6 +275,101 @@ res = await call('/api/change/cancel', {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: 'inbox/x.json' }),
 });
 check('undo without a session refused', res.status === 401, `got ${res.status}`);
+
+// --- adding photos from a phone ---------------------------------------------
+
+const b64url = (text) => Buffer.from(text, 'utf8').toString('base64url');
+const bytesOf = (n, fill = 7) => new Uint8Array(n).fill(fill);
+const digestOf = async (bytes) => Buffer.from(
+  await crypto.subtle.digest('SHA-256', bytes),
+).toString('hex');
+
+const upload = (bytes, meta, path = '/api/import') => call(path, {
+  method: 'POST',
+  headers: { Cookie: cookie, 'X-Photo-Meta': b64url(JSON.stringify(meta)) },
+  body: bytes,
+});
+
+const proxy = bytesOf(2048);
+const proxyHash = await digestOf(proxy);
+
+res = await upload(proxy, { name: 'IMG_1.JPG', ext: '.jpg', bytes: 4_000_000,
+                            proxy_sha256: proxyHash });
+let body = await res.json();
+check('a valid proxy is accepted', res.status === 202, `got ${res.status} ${JSON.stringify(body)}`);
+const iid = body.iid;
+check('the id is a worker-generated ms-epoch and uuid',
+      /^\d{13}-[0-9a-f-]{36}$/.test(iid || ''), String(iid));
+check('the image goes under import/, never inbox/',
+      PUTS.some((p) => p.key === `import/${iid}.jpg` && p.type === 'image/jpeg'));
+const op = PUTS.find((p) => p.key === `inbox/${iid}.json`);
+check('an op is written for the desktop to find', !!op);
+check('the op is photo_import with the matching id',
+      op?.body?.op === 'photo_import' && op?.body?.uid === iid, JSON.stringify(op?.body));
+check('the op carries a millisecond queued_ts',
+      String(op?.body?.queued_ts || '').length === 13, String(op?.body?.queued_ts));
+check('the image object was written before the op',
+      PUTS.findIndex((p) => p.key === `import/${iid}.jpg`)
+      < PUTS.findIndex((p) => p.key === `inbox/${iid}.json`));
+
+// The hash guard: this is the check that a string-only sha256 helper would have
+// broken, by digesting every upload to the same constant.
+res = await upload(proxy, { proxy_sha256: 'f'.repeat(64) });
+check('a proxy whose hash does not match is refused', res.status === 422, `got ${res.status}`);
+res = await upload(bytesOf(2048, 9), { proxy_sha256: proxyHash });
+check('different bytes really do hash differently', res.status === 422, `got ${res.status}`);
+
+res = await upload(bytesOf(0), { proxy_sha256: proxyHash });
+check('an empty body is refused', res.status === 400, `got ${res.status}`);
+res = await upload(bytesOf(3 * 1024 * 1024), { proxy_sha256: proxyHash });
+check('an oversized preview is refused', res.status === 413, `got ${res.status}`);
+res = await call('/api/import', { method: 'POST', headers: { Cookie: cookie }, body: proxy });
+check('a missing metadata header is refused', res.status === 400, `got ${res.status}`);
+res = await call('/api/import', { method: 'POST', body: proxy });
+check('uploading without a session is refused', res.status === 401, `got ${res.status}`);
+
+res = await upload(proxy, { proxy_sha256: proxyHash, bytes: 200 * 1024 * 1024 });
+check('a photo over the per-photo cap is refused up front', res.status === 413, `got ${res.status}`);
+
+// The original, under the same id.
+const original = bytesOf(9000, 3);
+const originalHash = await digestOf(original);
+res = await upload(original, { sha256: originalHash }, `/api/import/full?iid=${iid}`);
+check('the original is accepted under the same id', res.status === 202, `got ${res.status}`);
+check('it lands as import/<id>.orig', PUTS.some((p) => p.key === `import/${iid}.orig`));
+
+res = await upload(original, { sha256: 'a'.repeat(64) }, `/api/import/full?iid=${iid}`);
+check('an original whose hash does not match is refused', res.status === 422, `got ${res.status}`);
+res = await upload(original, { sha256: originalHash },
+                   `/api/import/full?iid=1700000000000-${'0'.repeat(8)}-0000-0000-0000-000000000000`);
+check('an original with no proxy already there is refused', res.status === 409, `got ${res.status}`);
+res = await upload(original, { sha256: originalHash }, '/api/import/full?iid=../../etc');
+check('a malformed id is refused', res.status === 400, `got ${res.status}`);
+
+res = await call('/api/import/state', { headers: { Cookie: cookie } });
+body = await res.json();
+check('the viewer can ask how full the queue is', res.status === 200 && body.quota > 0,
+      JSON.stringify(body));
+check('pending counts the bytes actually stored', body.pending > 0, JSON.stringify(body));
+check('the queue is not full yet', body.full === false, JSON.stringify(body));
+
+// Fill it past the ceiling and confirm the refusal is a 507 the viewer can act
+// on, rather than a silent failure or an accepted upload that fills the tier.
+PUTS.push({ key: 'import/huge.orig', body: null, size: 5 * 1024 * 1024 * 1024 });
+res = await upload(proxy, { proxy_sha256: proxyHash, bytes: 1000 });
+body = await res.json();
+check('a full queue refuses new photos with 507', res.status === 507, `got ${res.status}`);
+check('and says so in a way the viewer can show', body.full === true && body.pending > 0,
+      JSON.stringify(body));
+res = await upload(original, { sha256: originalHash }, `/api/import/full?iid=${iid}`);
+check('a full queue also refuses originals, not just previews',
+      res.status === 507, `got ${res.status}`);
+res = await call('/api/import/state', { headers: { Cookie: cookie } });
+check('and the state endpoint reports it full', (await res.json()).full === true);
+PUTS.splice(PUTS.findIndex((p) => p.key === 'import/huge.orig'), 1);
+
+check('photo_import cannot be injected through the ordinary change route',
+      (await change({ op: 'photo_import', uid: 'x' })).status === 400);
 
 res = await call('/__logout', { headers: { Cookie: cookie } });
 check('logout redirects', res.status === 302, `got ${res.status}`);

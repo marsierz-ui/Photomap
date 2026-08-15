@@ -56,6 +56,15 @@ export default {
     if (url.pathname === '/api/change/cancel' && request.method === 'POST') {
       return cancelChange(request, env);
     }
+    if (url.pathname === '/api/import' && request.method === 'POST') {
+      return receiveImport(request, env);
+    }
+    if (url.pathname === '/api/import/full' && request.method === 'POST') {
+      return receiveOriginal(request, env);
+    }
+    if (url.pathname === '/api/import/state' && request.method === 'GET') {
+      return importState(env);
+    }
     if (request.method !== 'GET' && request.method !== 'HEAD') {
       return text(405, 'Method not allowed');
     }
@@ -103,6 +112,13 @@ async function sha256Hex(value) {
   return hex(digest);
 }
 
+/** The same digest over raw bytes. Separate from sha256Hex on purpose: that one
+ *  runs the value through TextEncoder, which stringifies an ArrayBuffer to
+ *  "[object ArrayBuffer]" and would hash every upload to the same constant. */
+async function sha256Bytes(buffer) {
+  return hex(await crypto.subtle.digest('SHA-256', buffer));
+}
+
 async function hmacHex(secret, message) {
   const key = await crypto.subtle.importKey(
     'raw',
@@ -136,6 +152,24 @@ const ALLOWED_OPS = new Set([
 ]);
 const MAX_IDS = 5000;
 const DELETE_CAP = 200;
+
+// ------------------------------------------------------------------- imports
+// A photo picked on a phone arrives as two objects under import/: a small proxy
+// first, so the map updates straight away, then the full-resolution original.
+// Image bytes never go under inbox/ - the desktop drain JSON-parses everything
+// it finds there, and a JPEG would fail to parse on every sync forever.
+//
+// One photo per request: the maximum request body through a Worker is set by the
+// Cloudflare account plan (100 MB on Free and Pro), so a batch in one body is
+// not an option.
+const IMPORT_MAX_BYTES = 64 * 1024 * 1024;  // covers a 50MB phone photo
+const PROXY_MAX_BYTES = 2 * 1024 * 1024;
+// The real risk is not one big photo, it is a computer that has not synced for
+// weeks. R2's free tier is 10 GB; past this the bucket stops accepting, which
+// leaves the snapshot and plenty of headroom. Clearing it is one sync.
+const IMPORT_QUOTA_BYTES = 4 * 1024 * 1024 * 1024;
+const IMPORT_META_MAX = 4096;
+const IMPORT_ID = /^\d{13}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 // A note is a caption, not a document. Long enough for anything anyone types on
 // a phone, short enough that the inbox cannot be filled with one request.
 const NOTE_MAX = 4000;
@@ -188,6 +222,149 @@ async function queueChange(request, env) {
     httpMetadata: { contentType: 'application/json' },
   });
   return json(202, { queued: true, key });
+}
+
+/** Bytes already waiting for the desktop to collect.
+ *
+ *  Listing costs one Class A operation against a million-a-month allowance, and
+ *  it is the only honest number: the alternative is trusting a counter that
+ *  drifts the moment a sync deletes objects behind the Worker's back.
+ */
+async function pendingBytes(env) {
+  let total = 0;
+  let cursor;
+  do {
+    const listed = await env.BUCKET.list({ prefix: 'import/', limit: 1000, cursor });
+    for (const object of listed.objects) total += object.size || 0;
+    cursor = listed.truncated ? listed.cursor : undefined;
+  } while (cursor);
+  return total;
+}
+
+/** Metadata rides in a header so the body stays raw bytes: base64 in a JSON
+ *  body would waste a third of the 100 MB a Worker can receive. */
+function readMeta(request) {
+  const raw = request.headers.get('X-Photo-Meta') || '';
+  if (!raw || raw.length > IMPORT_META_MAX) return null;
+  try {
+    const padded = raw.replace(/-/g, '+').replace(/_/g, '/');
+    const text = new TextDecoder().decode(
+      Uint8Array.from(atob(padded), (c) => c.charCodeAt(0)),
+    );
+    const meta = JSON.parse(text);
+    return meta && typeof meta === 'object' ? meta : null;
+  } catch {
+    return null;
+  }
+}
+
+function quotaResponse(pending) {
+  return json(507, {
+    error: 'Photos are waiting for your computer to sync. Nothing more can be '
+      + 'uploaded until it does.',
+    pending,
+    quota: IMPORT_QUOTA_BYTES,
+    full: true,
+  });
+}
+
+/** The small proxy, sent first so the photo appears on the map straight away. */
+async function receiveImport(request, env) {
+  const meta = readMeta(request);
+  if (!meta) return json(400, { error: 'Missing or malformed X-Photo-Meta' });
+  if (typeof meta.proxy_sha256 !== 'string') {
+    return json(400, { error: 'Metadata needs proxy_sha256' });
+  }
+
+  const bytes = await request.arrayBuffer();
+  if (bytes.byteLength === 0) return json(400, { error: 'Empty body' });
+  if (bytes.byteLength > PROXY_MAX_BYTES) return json(413, { error: 'Preview too large' });
+  if (await sha256Bytes(bytes) !== meta.proxy_sha256) {
+    return json(422, { error: 'Upload did not arrive intact - try again' });
+  }
+
+  // Checked against what this photo will eventually occupy, both halves, so a
+  // proxy is never accepted for an original that cannot follow it.
+  const claimed = Number(meta.bytes) || bytes.byteLength;
+  if (claimed > IMPORT_MAX_BYTES) {
+    return json(413, { error: `Photos are limited to ${IMPORT_MAX_BYTES >> 20}MB` });
+  }
+  const pending = await pendingBytes(env);
+  if (pending + claimed > IMPORT_QUOTA_BYTES) return quotaResponse(pending);
+
+  const iid = `${Date.now()}-${crypto.randomUUID()}`;
+  await env.BUCKET.put(`import/${iid}.jpg`, bytes, {
+    httpMetadata: { contentType: 'image/jpeg' },
+  });
+  // Written only after the proxy landed, so the desktop never drains an op
+  // whose image is missing. The op is synthesised here rather than accepted
+  // from the client, which is why photo_import is not in ALLOWED_OPS.
+  await env.BUCKET.put(`inbox/${iid}.json`, JSON.stringify({
+    op: 'photo_import',
+    uid: iid,
+    queued_ts: Date.now(),
+    name: String(meta.name || '').slice(0, 120),
+    ext: String(meta.ext || '').slice(0, 12).toLowerCase(),
+    bytes: claimed,
+    sha256: typeof meta.sha256 === 'string' ? meta.sha256 : null,
+    proxy_sha256: meta.proxy_sha256,
+    taken_ts: Number.isFinite(meta.taken_ts) ? meta.taken_ts : null,
+    lat: Number.isFinite(meta.lat) ? meta.lat : null,
+    lon: Number.isFinite(meta.lon) ? meta.lon : null,
+  }), { httpMetadata: { contentType: 'application/json' } });
+
+  return json(202, {
+    queued: true, iid, pending: pending + bytes.byteLength, quota: IMPORT_QUOTA_BYTES,
+  });
+}
+
+/** The full-resolution original, sent after the proxy under the same id. */
+async function receiveOriginal(request, env) {
+  const url = new URL(request.url);
+  const iid = url.searchParams.get('iid') || '';
+  if (!IMPORT_ID.test(iid)) return json(400, { error: 'Not an upload id' });
+
+  const meta = readMeta(request);
+  if (!meta || typeof meta.sha256 !== 'string') {
+    return json(400, { error: 'Metadata needs sha256' });
+  }
+  // The proxy has to be there first: without it the desktop has an original
+  // with no op to describe it, and nothing would ever collect it.
+  if (!(await env.BUCKET.head(`import/${iid}.jpg`))) {
+    return json(409, { error: 'That upload is not open' });
+  }
+
+  const bytes = await request.arrayBuffer();
+  if (bytes.byteLength === 0) return json(400, { error: 'Empty body' });
+  if (bytes.byteLength > IMPORT_MAX_BYTES) {
+    return json(413, { error: `Photos are limited to ${IMPORT_MAX_BYTES >> 20}MB` });
+  }
+  if (await sha256Bytes(bytes) !== meta.sha256) {
+    return json(422, { error: 'Upload did not arrive intact - try again' });
+  }
+  // Enforced here too, not only on the proxy: this is the request that carries
+  // the bytes that actually fill the bucket.
+  const pending = await pendingBytes(env);
+  if (pending + bytes.byteLength > IMPORT_QUOTA_BYTES) return quotaResponse(pending);
+
+  await env.BUCKET.put(`import/${iid}.orig`, bytes, {
+    httpMetadata: { contentType: 'application/octet-stream' },
+  });
+  return json(202, {
+    stored: true, pending: pending + bytes.byteLength, quota: IMPORT_QUOTA_BYTES,
+  });
+}
+
+/** What the viewer asks before picking, so it can say the queue is full before
+ *  a photo is chosen rather than after it has been read and downscaled. */
+async function importState(env) {
+  const pending = await pendingBytes(env);
+  return json(200, {
+    pending,
+    quota: IMPORT_QUOTA_BYTES,
+    max_bytes: IMPORT_MAX_BYTES,
+    full: pending >= IMPORT_QUOTA_BYTES,
+  });
 }
 
 /** Undo: drop a queued change before the desktop app has drained it. */

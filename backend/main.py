@@ -177,6 +177,8 @@ def sync_status():
     state["on_scan"] = db.get_setting("sync_on_scan", "1") == "1"
     state["allow_delete"] = db.get_setting("cloud_delete_enabled", "0") == "1"
     state["delete_cap"] = sync.CLOUD_DELETE_CAP
+    state["allow_import"] = db.get_setting("cloud_import_enabled", "0") == "1"
+    state["import_dir"] = str(db.IMPORT_DIR)
     state["viewer_url"] = db.get_setting("viewer_url", "") or ""
     state["last_sync_ts"] = db.get_setting("last_sync_ts", None)
     state["account_id"] = cfg["account_id"]
@@ -214,6 +216,8 @@ def sync_config(request: Request, body: dict = Body(...)):
         db.set_setting("sync_on_scan", "1" if body["on_scan"] else "0")
     if "allow_delete" in body:
         db.set_setting("cloud_delete_enabled", "1" if body["allow_delete"] else "0")
+    if "allow_import" in body:
+        db.set_setting("cloud_import_enabled", "1" if body["allow_import"] else "0")
     if "scope" in body and body["scope"] in ("all", "located"):
         if db.get_setting("snapshot_scope", "all") != body["scope"]:
             db.set_setting("snapshot_scope", body["scope"])

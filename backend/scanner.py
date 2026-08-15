@@ -82,6 +82,40 @@ def _walk(roots: list[str]) -> list[str]:
     return found
 
 
+def upsert(conn, meta: dict, now: int) -> tuple[int, bool]:
+    """Insert or refresh one photo row. Returns (photo_id, was_created).
+
+    The caller holds db.write_lock and commits - threading.Lock is not
+    reentrant, and flush() below already holds it. Lifted out of that closure so
+    the cloud import path can reuse it: one INSERT statement and one column
+    ordering in the codebase means the two paths cannot drift apart.
+    """
+    row = conn.execute("SELECT id FROM photos WHERE path=?", (meta["path"],)).fetchone()
+    values = (
+        meta["path"], meta["folder"], meta["filename"], meta["ext"],
+        meta["taken_ts"], meta["taken_src"], meta["lat"], meta["lon"],
+        meta["altitude"], meta["width"], meta["height"], meta["orientation"],
+        meta["camera_make"], meta["camera_model"], meta["filesize"], meta["mtime"],
+    )
+    if row:
+        conn.execute(
+            "UPDATE photos SET path=?, folder=?, filename=?, ext=?, taken_ts=?,"
+            " taken_src=?, lat=?, lon=?, altitude=?, width=?, height=?, orientation=?,"
+            " camera_make=?, camera_model=?, filesize=?, mtime=?, missing=0"
+            " WHERE id=?",
+            values + (row["id"],),
+        )
+        return row["id"], False
+    cur = conn.execute(
+        "INSERT INTO photos(path, folder, filename, ext, taken_ts, taken_src,"
+        " lat, lon, altitude, width, height, orientation, camera_make,"
+        " camera_model, filesize, mtime, added_ts, missing)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",
+        values + (now,),
+    )
+    return cur.lastrowid, True
+
+
 def _run(force: bool) -> None:
     conn = db.connect()
     try:
@@ -133,33 +167,12 @@ def _run(force: bool) -> None:
                 return
             with db.write_lock:
                 for meta in batch:
-                    row = conn.execute("SELECT id FROM photos WHERE path=?", (meta["path"],)).fetchone()
-                    values = (
-                        meta["path"], meta["folder"], meta["filename"], meta["ext"],
-                        meta["taken_ts"], meta["taken_src"], meta["lat"], meta["lon"],
-                        meta["altitude"], meta["width"], meta["height"], meta["orientation"],
-                        meta["camera_make"], meta["camera_model"], meta["filesize"], meta["mtime"],
-                    )
-                    if row:
-                        conn.execute(
-                            "UPDATE photos SET path=?, folder=?, filename=?, ext=?, taken_ts=?,"
-                            " taken_src=?, lat=?, lon=?, altitude=?, width=?, height=?, orientation=?,"
-                            " camera_make=?, camera_model=?, filesize=?, mtime=?, missing=0"
-                            " WHERE id=?",
-                            values + (row["id"],),
-                        )
-                        seen_ids.add(row["id"])
-                        updated += 1
-                    else:
-                        cur = conn.execute(
-                            "INSERT INTO photos(path, folder, filename, ext, taken_ts, taken_src,"
-                            " lat, lon, altitude, width, height, orientation, camera_make,"
-                            " camera_model, filesize, mtime, added_ts, missing)"
-                            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",
-                            values + (now,),
-                        )
-                        seen_ids.add(cur.lastrowid)
+                    photo_id, created = upsert(conn, meta, now)
+                    seen_ids.add(photo_id)
+                    if created:
                         added += 1
+                    else:
+                        updated += 1
                 conn.commit()
             batch = []
 
@@ -189,11 +202,22 @@ def _run(force: bool) -> None:
             # need different handling: the file is genuinely gone (flag it), or
             # it still exists but no longer sits under any configured root, in
             # which case it simply is not part of the library any more.
+            # A cloud import that landed while this scan was walking is not
+            # unrooted, it is simply newer than the walk - and "dropped" is a
+            # hard DELETE, so treating it that way would destroy a photo that is
+            # present and correct. added_ts cannot answer this: it has one-second
+            # resolution and a scan can start inside the same second as the
+            # insert. The import folder can, and only while it is still a root -
+            # remove that root and imports prune like anything else.
+            import_root = str(db.IMPORT_DIR)
+            guarded = import_root in roots
             gone, dropped = [], []
             for row in conn.execute("SELECT id, path FROM photos WHERE missing=0"):
                 if row["id"] in seen_ids:
                     continue
                 if os.path.exists(row["path"]):
+                    if guarded and row["path"].startswith(import_root + os.sep):
+                        continue
                     dropped.append(row["id"])
                 else:
                     gone.append(row["id"])
