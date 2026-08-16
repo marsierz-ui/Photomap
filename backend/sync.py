@@ -523,9 +523,21 @@ def _import_photo(conn, bucket, change) -> tuple[int, bool, int]:
 
         # The desktop is authoritative - meta came from Pillow reading the file
         # it just wrote - so a phone that could not parse its own HEIC still ends
-        # up with real coordinates. The phone's guess only fills a gap.
+        # up with real coordinates. The phone's reading only fills a gap.
+        #
+        # It has to fill both gaps, not just the position. When the original
+        # cannot be used and the proxy is what landed, the proxy is a canvas
+        # re-encode carrying no EXIF at all, so photometa finds no capture time
+        # either and falls back to the file's own date - which is the moment it
+        # was written here, not when the photo was taken. The phone read the
+        # original before it downscaled it, and that reading is the only copy of
+        # those two facts left.
         if meta["lat"] is None and isinstance(change.get("lat"), (int, float)):
             meta["lat"], meta["lon"] = float(change["lat"]), float(change["lon"])
+        taken = change.get("taken_ts")
+        if meta["taken_src"] != "exif" and isinstance(taken, (int, float)) and taken:
+            meta["taken_ts"] = int(taken)
+            meta["taken_src"] = "phone"
         with db.write_lock:
             photo_id, _ = scanner.upsert(conn, meta, now)
             conn.execute("DELETE FROM import_seen WHERE uid=?", (uid,))
@@ -686,6 +698,75 @@ def _run() -> None:
 def maybe_sync_after_scan() -> None:
     if db.get_setting("sync_on_scan", "1") == "1" and configured():
         start()
+
+
+# --------------------------------------------------------------------- watcher
+#
+# A photo added on a phone sat in the bucket until someone ran a sync here, which
+# is a strange thing to ask of a machine that is switched on and idle. This looks
+# for work and starts one.
+#
+# It watches keys rather than counting them, and both prefixes rather than the
+# inbox alone. An import whose full-resolution half has not arrived is left
+# queued on purpose, so its inbox key is still there on the next look: counting
+# would see work every time and sync in a loop forever. A new key is new work,
+# and the arriving `.orig` is itself a new key, which is exactly the moment that
+# import wants another try.
+WATCH_INTERVAL = 60  # seconds
+
+_watch_stop = threading.Event()
+_watch_thread: threading.Thread | None = None
+_watch_seen: set[str] = set()
+
+
+def _pending_keys(bucket) -> set[str]:
+    return set(bucket.list_keys(prefix=snapshot.INBOX_PREFIX)) | set(
+        bucket.list_keys(prefix=snapshot.IMPORT_PREFIX)
+    )
+
+
+def _watch_once() -> bool:
+    """One look at the bucket. True if it started a sync."""
+    global _watch_seen
+    if _state["running"] or not configured():
+        return False
+    if db.get_setting("cloud_watch_enabled", "1") != "1":
+        return False
+
+    keys = _pending_keys(client())
+    fresh = keys - _watch_seen
+    # Forget what has been drained, so the same key arriving again later still
+    # counts as new.
+    _watch_seen = keys
+    if not fresh:
+        return False
+    return start()
+
+
+def _watch_loop(interval: int) -> None:
+    # One list of each prefix per pass: two Class A operations a minute against a
+    # million-a-month allowance, and nothing at all is transferred.
+    while not _watch_stop.wait(interval):
+        try:
+            _watch_once()
+        except (r2.R2Error, OSError, sqlite3.Error):
+            pass  # a bucket that cannot be reached now is worth another look later
+        except Exception:
+            pass
+
+
+def start_watching(interval: int = WATCH_INTERVAL) -> None:
+    """Begin looking for work left in the bucket. Idempotent."""
+    global _watch_thread
+    if _watch_thread and _watch_thread.is_alive():
+        return
+    _watch_stop.clear()
+    _watch_thread = threading.Thread(target=_watch_loop, args=(interval,), daemon=True)
+    _watch_thread.start()
+
+
+def stop_watching() -> None:
+    _watch_stop.set()
 
 
 def reset_remote_state() -> None:

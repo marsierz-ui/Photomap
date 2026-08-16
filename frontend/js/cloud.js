@@ -148,6 +148,16 @@ function renderPanel(panel, status) {
           : `Off. Photos added in the viewer stay in the bucket and are discarded after a week.
              Turn this on to let your phone add photos to the library.`}
       </div>
+      <label class="check small"><input type="checkbox" data-cloud="watch" ${status.watch ? 'checked' : ''}>
+        Sync by itself when the phone adds something</label>
+      <div class="muted small">
+        ${status.watch
+          ? `On. Checks the bucket every ${status.watch_interval || 60}s and syncs when a photo or
+             an edit is waiting, so nothing sits there until you press Sync. Idle it transfers
+             nothing - it only lists two prefixes.`
+          : `Off. Photos and edits made in the viewer wait in the bucket until the next sync,
+             whether you start one or a library scan does.`}
+      </div>
     ` : `
       <div class="muted small">Not set up. Uploads a heat map plus small thumbnails so you can
       view it from any device, without your library or this computer.</div>
@@ -161,6 +171,13 @@ function renderPanel(panel, status) {
     if (action === 'onscan') {
       node.onchange = async (e) => {
         await api.post('/api/sync/config', { on_scan: e.target.checked });
+        refreshPanel();
+      };
+      return;
+    }
+    if (action === 'watch') {
+      node.onchange = async (e) => {
+        await api.post('/api/sync/config', { watch: e.target.checked });
         refreshPanel();
       };
       return;

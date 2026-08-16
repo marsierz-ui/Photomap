@@ -117,6 +117,9 @@ DEFAULTS = {
     # Accepting photos uploaded from the cloud viewer is off until this machine
     # opts in. They land in data/imported and become ordinary library photos.
     "cloud_import_enabled": "0",
+    # Look in the bucket for photos and edits made in the viewer, and sync when
+    # any turn up, rather than leaving them there until someone presses Sync.
+    "cloud_watch_enabled": "1",
     "sync_on_scan": "1",
     "r2_account_id": "",
     "r2_bucket": "",

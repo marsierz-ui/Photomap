@@ -25,6 +25,11 @@ FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
 db.init()
 app = FastAPI(title="Photo Map", docs_url=None, redoc_url=None)
 
+# Photos added on a phone reach the bucket immediately and the library only on a
+# sync, so while this is running it looks for them itself. The thread is a daemon
+# and does nothing at all until the bucket has something new in it.
+sync.start_watching()
+
 
 @app.middleware("http")
 async def access_gate(request: Request, call_next):
@@ -178,6 +183,8 @@ def sync_status():
     state["allow_delete"] = db.get_setting("cloud_delete_enabled", "0") == "1"
     state["delete_cap"] = sync.CLOUD_DELETE_CAP
     state["allow_import"] = db.get_setting("cloud_import_enabled", "0") == "1"
+    state["watch"] = db.get_setting("cloud_watch_enabled", "1") == "1"
+    state["watch_interval"] = sync.WATCH_INTERVAL
     state["import_dir"] = str(db.IMPORT_DIR)
     state["viewer_url"] = db.get_setting("viewer_url", "") or ""
     state["last_sync_ts"] = db.get_setting("last_sync_ts", None)
@@ -218,6 +225,8 @@ def sync_config(request: Request, body: dict = Body(...)):
         db.set_setting("cloud_delete_enabled", "1" if body["allow_delete"] else "0")
     if "allow_import" in body:
         db.set_setting("cloud_import_enabled", "1" if body["allow_import"] else "0")
+    if "watch" in body:
+        db.set_setting("cloud_watch_enabled", "1" if body["watch"] else "0")
     if "scope" in body and body["scope"] in ("all", "located"):
         if db.get_setting("snapshot_scope", "all") != body["scope"]:
             db.set_setting("snapshot_scope", body["scope"])

@@ -438,8 +438,11 @@ check("the same bytes are",
 # A proxy on its own, past the grace window, still has to land: the original may
 # never arrive, and the photo is not on the phone forever.
 old = f"{int((time.time() - sync.IMPORT_GRACE - 60) * 1000)}-{uuid.uuid4()}"
+# The phone's reading is deliberately wrong here, and deliberately different, so
+# "the file won" is something the check can actually see.
 queue_import(import_bytes(when="2022:03:04 09:00:00", lat=-33.8688, lon=151.2093,
-                          size=(24, 18)), uid=old, name="IMG_0002.JPG")
+                          size=(24, 18)), uid=old, name="IMG_0002.JPG",
+             taken_ts=1600000000, lat=10.0, lon=10.0)
 db.connect().execute("INSERT OR REPLACE INTO import_seen(uid, first_ts) VALUES (?,?)",
                      (old, int(time.time()) - sync.IMPORT_GRACE - 60))
 db.connect().commit()
@@ -449,6 +452,34 @@ check("a proxy alone lands once the grace window has passed", lone is not None)
 check("southern and western refs keep their sign",
       lone and abs(lone["lat"] + 33.8688) < 1e-3 and abs(lone["lon"] - 151.2093) < 1e-3,
       f"{lone and lone['lat']}, {lone and lone['lon']}")
+
+# The proxy that landed above is a canvas re-encode in real life: no EXIF at all,
+# so photometa reads no capture time and falls back to the file's own date, which
+# is the moment it was written here. What the phone read off the original before
+# downscaling it is the only copy of that fact left, and it has to be used.
+naked = io.BytesIO()
+Image.new("RGB", (20, 15), (30, 30, 30)).save(naked, "JPEG")   # stripped, like a canvas proxy
+bare = f"{int((time.time() - sync.IMPORT_GRACE - 60) * 1000)}-{uuid.uuid4()}"
+queue_import(naked.getvalue(), uid=bare, name="IMG_0009.JPG",
+             taken_ts=1646384400, lat=-33.8688, lon=151.2093)
+db.connect().execute("INSERT OR REPLACE INTO import_seen(uid, first_ts) VALUES (?,?)",
+                     (bare, int(time.time()) - sync.IMPORT_GRACE - 60))
+db.connect().commit()
+run_sync()
+stripped = photo_row(bare)
+check("a stripped proxy keeps the capture time the phone read",
+      stripped and stripped["taken_ts"] == 1646384400, str(stripped and stripped["taken_ts"]))
+check("and it is not passed off as the file's own date",
+      stripped and stripped["taken_src"] == "phone", str(stripped and stripped["taken_src"]))
+check("and it keeps the position the phone read",
+      stripped and abs(stripped["lat"] + 33.8688) < 1e-3, str(stripped and stripped["lat"]))
+# The file's own EXIF still outranks the phone wherever there is any: that photo
+# was sent with a capture time and a position that disagree with its own tags.
+check("a real EXIF capture time still outranks the phone's",
+      lone and lone["taken_src"] == "exif" and lone["taken_ts"] == 1646384400,
+      f"{lone and lone['taken_src']} {lone and lone['taken_ts']}")
+check("and a real EXIF position does too",
+      lone and abs(lone["lat"] + 33.8688) < 1e-3, str(lone and lone["lat"]))
 
 # A proxy whose original is still on its way is left alone rather than settled.
 fresh = f"{int(time.time() * 1000)}-{uuid.uuid4()}"
@@ -539,6 +570,47 @@ check("a scan does not drop an imported photo it did not walk", still is not Non
       "the row was hard-deleted by the prune")
 check("and it is not flagged missing either", still and still["missing"] == 0,
       str(still and still["missing"]))
+
+# --- the watcher -------------------------------------------------------------
+# It has to start a sync when the phone leaves something, and - the part that is
+# easy to get wrong - it must NOT start one for work it has already seen. An
+# import waiting for its full-resolution half keeps its inbox key on purpose, so
+# a watcher that counted keys rather than tracking them would sync forever.
+db.set_setting("cloud_import_enabled", "1")
+while sync.status()["running"]:          # nothing below is true mid-sync
+    time.sleep(0.05)
+started = []
+_real_start = sync.start
+sync.start = lambda: (started.append(1), True)[1]
+# Adopt what is in the bucket now, so only what arrives next counts as new.
+sync._watch_seen = sync._pending_keys(sync.client())
+try:
+    check("an idle bucket does not start a sync", sync._watch_once() is False)
+
+    queue({"op": "favorite", "photo_ids": [target], "value": True})
+    check("a new inbox object starts one", sync._watch_once() is True)
+    check("and it started exactly one", len(started) == 1, str(len(started)))
+
+    # Nothing drained it (start is stubbed), so the key is still there.
+    check("the same object does not start another", sync._watch_once() is False)
+    check("still exactly one", len(started) == 1, str(len(started)))
+
+    # The other half of an import arriving is a new key under import/, which is
+    # precisely when the op that was left queued deserves another try.
+    with LOCK:
+        STORE["import/9999999999999-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.orig"] = b"bytes"
+    check("a full-resolution half arriving starts one", sync._watch_once() is True)
+
+    db.set_setting("cloud_watch_enabled", "0")
+    with LOCK:
+        STORE["inbox/ignored-while-off.json"] = json.dumps({"op": "favorite"}).encode()
+    check("switched off, it looks at nothing", sync._watch_once() is False)
+    db.set_setting("cloud_watch_enabled", "1")
+finally:
+    sync.start = _real_start
+with LOCK:
+    STORE.pop("import/9999999999999-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.orig", None)
+    STORE.pop("inbox/ignored-while-off.json", None)
 
 db.set_setting("cloud_import_enabled", "0")
 check("manifest hides importing once off",

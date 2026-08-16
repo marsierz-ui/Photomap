@@ -505,6 +505,41 @@ viewer says uploads are paused until this computer syncs, rather than failing qu
 One photo per request, since the largest body a Worker can receive is 100MB on the Free
 and Pro plans.
 
+**The computer collects them by itself.** While Photo Map is running it looks in the
+bucket every 60 seconds and syncs when it finds anything - a photo, a favourite, an
+album - so nothing waits for someone to press Sync. Idle it transfers nothing: two
+prefix listings, about 90,000 Class A operations a month against a million-a-month
+allowance. It tracks keys rather than counting them, which is the part that matters: an
+import whose full-resolution half has not arrived keeps its inbox key on purpose, so
+counting would find work every minute and sync in a loop forever. A new key is new work,
+and the arriving `.orig` is itself the new key that gives that import its next try. It
+is ⚙ → *Sync by itself when the phone adds something*, on by default.
+
+**And the phone notices when they land.** The viewer re-reads `manifest.json` every 20
+seconds while photos of its own are still out there - never otherwise, and never while
+the screen is off - and swaps in a newer snapshot without touching the view you are
+looking at. The amber pin becomes an ordinary library photo on its own, and it says so.
+Together with the watcher, a photo picked on a phone is in the library and on the map
+about a minute later with nothing pressed on either device.
+
+**Original files, not the picker's copies.** The `accept` list names `.heic`/`.heif`
+rather than `image/*` alone, and that one line decides whether a photo arrives with a
+location on it: asked for `image/*`, iOS transcodes a HEIC to JPEG on the way out of the
+picker and the copy it builds has the GPS tags stripped, so the file reaching the bucket
+has no position and nothing downstream can put one back. Naming the extensions makes it
+hand over the original untouched. The cost is that `viewer/exif.js` is JPEG APP1 only
+and cannot read a HEIC, so those get their pin when the computer files them rather than
+the instant they are picked - a real location a minute later against none at all. A
+preview still has to be made from the file either way, so `downscale` falls back from
+`createImageBitmap` to an `<img>`, which reaches decoders the former does not.
+
+Where the file itself has neither, the desktop keeps **what the phone read**. It already
+did that for the position; it now does it for the capture time too, and the distinction
+is not academic: when only the proxy survives, the proxy is a canvas re-encode carrying
+no EXIF at all, so the capture time would otherwise fall back to the file's own date -
+the moment it was written on the computer. That reading is stored as `taken_src=phone`,
+and anything the file actually carries still outranks it.
+
 **Adding photos lives in Settings**, the ⚙ tab in the bottom bar - the button and the
 upload state, not just the filters, which is why that tab is no longer called Filters.
 Below 768px there is no top bar at all, so anything left in it floats over the map next

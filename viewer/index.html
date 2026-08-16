@@ -331,11 +331,18 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
     <span id="offline" class="chip warn hidden">Offline</span>
     <button id="install" class="hidden">Install</button>
   </span>
-  <!-- No `capture`: it forces the camera and takes multi-select away. The
-       accept list is image/* alone on purpose - naming .heic here is what tells
-       iOS to hand over the original HEIC instead of transcoding it to a JPEG,
-       and a JPEG is the one thing every part of this can read. -->
-  <input id="picker" type="file" accept="image/*" multiple hidden>
+  <!-- No `capture`: it forces the camera and takes multi-select away.
+       The extensions are named deliberately, and this is the trade that decides
+       whether a photo arrives with a location on it. Asked for `image/*` alone,
+       iOS transcodes a HEIC to JPEG on the way out of the picker, and the copy
+       it builds has the GPS tags removed - so the file that reaches the bucket
+       has no position in it and neither the phone nor the computer can put one
+       back. Naming .heic/.heif makes it hand over the original untouched, EXIF
+       and all. The cost is that the phone can no longer read that file itself
+       (exif.js is JPEG APP1 only), so a HEIC gets its pin when the computer
+       files it rather than the moment it is picked. A photo with a real
+       location a minute later beats one with none at all. -->
+  <input id="picker" type="file" accept="image/*,.heic,.heif,.HEIC,.HEIF" multiple hidden>
   <span id="summary" class="muted small"></span>
 </header>
 
@@ -653,14 +660,38 @@ const b64url = (text) => btoa(unescape(encodeURIComponent(text)))
  *  through a canvas, which means it carries no EXIF at all - the coordinates
  *  ride in the metadata header instead. */
 async function downscale(file) {
-  const bitmap = await createImageBitmap(file);
-  const scale = Math.min(1, PROXY_EDGE / Math.max(bitmap.width, bitmap.height));
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-  canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-  bitmap.close();
-  return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', PROXY_QUALITY));
+  let source = null;
+  let url = '';
+  try {
+    try {
+      source = await createImageBitmap(file);
+    } catch {
+      // An <img> goes through the browser's whole image pipeline, which on some
+      // engines reads formats createImageBitmap alone refuses - HEIC among them.
+      // Without this second try, asking the picker for original HEICs would mean
+      // a phone that cannot build a preview drops the photo altogether, which is
+      // a worse failure than the missing location this is here to fix.
+      url = URL.createObjectURL(file);
+      source = await new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error('this device cannot read that image'));
+        img.src = url;
+      });
+    }
+    const w = source.naturalWidth || source.width;
+    const h = source.naturalHeight || source.height;
+    if (!w || !h) throw new Error('that image has no size');
+    const scale = Math.min(1, PROXY_EDGE / Math.max(w, h));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(w * scale));
+    canvas.height = Math.max(1, Math.round(h * scale));
+    canvas.getContext('2d').drawImage(source, 0, 0, canvas.width, canvas.height);
+    return await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', PROXY_QUALITY));
+  } finally {
+    if (source && source.close) source.close();
+    if (url) URL.revokeObjectURL(url);
+  }
 }
 
 /** Read one picked file into the local queue. Nothing is sent yet.
@@ -2827,6 +2858,73 @@ $('install').onclick = () => {
 };
 window.addEventListener('appinstalled', () => $('install').classList.add('hidden'));
 
+// ------------------------------------------------------- watching the snapshot
+//
+// The computer publishes a new manifest every sync, and until now the only way
+// to see one was to reopen the app: a photo added here stayed an amber pin for
+// the rest of the session, however long ago it had actually landed. So the
+// snapshot is re-read while photos of ours are still out there, and swapped in
+// when it changes - the pin becomes an ordinary library photo on its own.
+//
+// Only while something is waiting. A viewer with nothing outstanding has no
+// reason to poll, and the fetch is conditional anyway: an unchanged manifest is
+// a 304 against the ETag the Worker already sets.
+
+const SNAPSHOT_POLL = 20000;
+
+async function watchSnapshot() {
+  if (watchSnapshot.timer) clearTimeout(watchSnapshot.timer);
+  const again = (ms) => { watchSnapshot.timer = setTimeout(watchSnapshot, ms); };
+
+  // Nothing of ours is out there, or there is no connection to ask over.
+  if (!uploads.length || !navigator.onLine || document.hidden) { again(SNAPSHOT_POLL); return; }
+  try {
+    const r = await fetch('manifest.json', { cache:'no-cache' });
+    if (r.ok) {
+      const m = await r.json();
+      if (m && m.ids && m.generated !== M.generated) await adoptSnapshot(m);
+    }
+  } catch {
+    /* offline or a blip: the next pass tries again */
+  }
+  again(SNAPSHOT_POLL);
+}
+
+/** Take a newer snapshot without disturbing where anyone is looking.
+ *
+ *  Deliberately not the boot path: that restores a remembered view, fits the map
+ *  to the whole library and switches to the map tab, none of which anyone asked
+ *  for while they are reading something. The filters stay exactly as they are,
+ *  which is why the album select is refilled with the current choice preserved
+ *  and the date range is left alone. */
+async function adoptSnapshot(m) {
+  const grew = (m.n || 0) - (M.n || 0);
+  M = m;
+  $('summary').textContent =
+    `${fmtNum(m.n)} photos · ${fmtNum(m.geo_n)} located · updated ${fmtDate(m.generated)}`;
+  fillAlbums();
+  $('addPhotos').classList.toggle('hidden', !m.allow_import);
+  const before = uploads.length;
+  try {
+    await retireDrained();
+  } catch {
+    /* the records reappear next boot and are retired then */
+  }
+  const landed = before - uploads.length;
+  paintUploads();
+  refresh();
+  if (landed > 0) {
+    toast(`${fmtNum(landed)} photo${landed === 1 ? '' : 's'} `
+      + `${landed === 1 ? 'is' : 'are'} in your library now`);
+  } else if (grew > 0) {
+    toast(`${fmtNum(grew)} new photo${grew === 1 ? '' : 's'} in the library`);
+  }
+}
+
+// A phone spends most of its time with the screen off. Coming back is the moment
+// worth asking, rather than a timer that has been firing into a locked screen.
+document.addEventListener('visibilitychange', () => { if (!document.hidden) watchSnapshot(); });
+
 // ---------------------------------------------------------------------- boot
 
 fetch('manifest.json', { cache:'no-cache' })
@@ -2865,6 +2963,7 @@ fetch('manifest.json', { cache:'no-cache' })
     // opening the app should not raise a panel about a queue that emptied
     // itself, but a queue that cannot empty has been silent for far too long.
     if (m.allow_import) reportDrain(await drainUploads(), null);
+    watchSnapshot();
   })
   .catch((err) => {
     $('loading').querySelector('div').textContent = 'Could not load the snapshot';
