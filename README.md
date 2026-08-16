@@ -505,6 +505,29 @@ viewer says uploads are paused until this computer syncs, rather than failing qu
 One photo per request, since the largest body a Worker can receive is 100MB on the Free
 and Pro plans.
 
+**Adding photos lives in Settings**, the ⚙ tab in the bottom bar - the button and the
+upload state, not just the filters, which is why that tab is no longer called Filters.
+Below 768px there is no top bar at all, so anything left in it floats over the map next
+to the map's own controls, which is where both of them used to sit. The tab carries a
+dot when an upload needs attention, since the sheet is shut most of the time.
+
+**A photo can upload perfectly and still not be on the map**, and the reason is
+coordinates rather than anything going wrong. The viewer reads EXIF itself so a pin can
+appear before the upload finishes, but `viewer/exif.js` only parses JPEG APP1: a HEIC
+carries none it can read, and a phone may hand over a copy with the location stripped.
+Those photos are sent, and the desktop reads their real coordinates with Pillow when it
+files them, so they appear a sync later. Until then the status line says how many are
+waiting on a location rather than leaving them silently missing, and the result panel
+says it too.
+
+Photos added here are drawn on the **globe** as well now. They were only ever drawn on
+the flat map, so a session that had last used Globe - which the viewer remembers between
+visits - showed nothing at all for a photo that had just been added.
+
+Nothing here says "waiting for your computer" any more. It reads as a fault when the
+computer is switched on and in front of you; what it meant was that Photo Map has to run
+a sync before an uploaded photo joins the library, so that is what it says.
+
 **A progress bar while it runs, and a result panel afterwards.** The bar names the photo
 in flight and fills with the bytes actually delivered - `XMLHttpRequest`, not `fetch`,
 which has no upload progress event at all - so a 50MB photo over a bad signal is

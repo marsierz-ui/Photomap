@@ -154,6 +154,7 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
 .foot { background:var(--panel); border-top:1px solid var(--line); padding:7px 10px;
         display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 #range { flex:1; min-width:140px; }
+.addrow { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 
 button.danger { border-color:#5c2a2c; color:#ff9ea1; }
 .selbar { position:fixed; left:50%; bottom:74px; transform:translateX(-50%); z-index:1200;
@@ -253,11 +254,15 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
    top bar; its grid row costs nothing while it is display:none. */
 .tabbar { display:none; background:var(--panel); border-top:1px solid var(--line);
           padding-bottom:var(--bottom); }
-.tabbar button { flex:1; background:transparent; border:0; border-radius:0; color:var(--muted);
-                 display:flex; flex-direction:column; align-items:center; gap:3px;
-                 padding:7px 0 6px; font-size:11px; }
+.tabbar button { position:relative; flex:1; background:transparent; border:0; border-radius:0;
+                 color:var(--muted); display:flex; flex-direction:column; align-items:center;
+                 gap:3px; padding:7px 0 6px; font-size:11px; }
 .tabbar button.on { color:var(--accent); }
 .tabbar .ico { font-size:17px; line-height:1; }
+/* Upload trouble is inside the sheet now, so the tab that opens it has to say
+   there is something to open it for. */
+.tabbar button.alert::after { content:''; position:absolute; top:6px; left:calc(50% + 9px);
+                              width:7px; height:7px; border-radius:50%; background:#e5484d; }
 #filterDone { display:none; }
 
 /* One breakpoint. Below it the top tabs move to the bottom bar, the filter row
@@ -291,7 +296,8 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
           transform:translateY(103%); transition:transform .2s ease;
           box-shadow:0 -14px 34px rgba(0,0,0,.55); }
   body.filters-on .foot { transform:none; }
-  .foot select, .foot #range, #filterDone { width:100%; }
+  .foot select, .foot #range, #filterDone, .addrow { width:100%; }
+  .addrow #addPhotos { flex:1; padding:9px; }
   .foot label { padding:4px 0; }
   #filterDone { display:block; }
 
@@ -323,8 +329,6 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
   <span class="spacer"></span>
   <span id="chips">
     <span id="offline" class="chip warn hidden">Offline</span>
-    <span id="upstate" class="chip hidden"></span>
-    <button id="addPhotos" class="hidden">+ Add</button>
     <button id="install" class="hidden">Install</button>
   </span>
   <!-- No `capture`: it forces the camera and takes multi-select away. The
@@ -382,6 +386,14 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
   <label class="small muted"><input type="checkbox" id="favOnly"> ★ only</label>
   <input type="range" id="range" min="0" max="100" value="100">
   <span id="stamp" class="muted small"></span>
+  <!-- Adding photos lives in here rather than over the map. On a phone the top
+       bar is gone entirely, so anything left in it floats across the view it is
+       meant to be showing - next to the map's own controls, which is where the
+       Add button and the upload state used to sit. -->
+  <div class="addrow" id="addrow">
+    <button id="addPhotos" class="hidden">+ Add photos</button>
+    <span id="upstate" class="chip hidden"></span>
+  </div>
   <button id="filterDone">Done</button>
 </footer>
 
@@ -390,7 +402,7 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
   <button data-view="gallery"><span class="ico">▦</span>Gallery</button>
   <button data-view="panel"><span class="ico">☰</span>Albums</button>
   <button data-view="insights"><span class="ico">▤</span>Insights</button>
-  <button id="filterBtn"><span class="ico">⚙</span>Filters</button>
+  <button id="filterBtn"><span class="ico">⚙</span>Settings</button>
 </nav>
 
 <div id="selbar" class="selbar hidden">
@@ -711,13 +723,28 @@ function paintUploads() {
     chip.textContent = `Uploading ${fmtNum(queued)}…`;
     chip.className = 'chip';
   } else if (waiting) {
-    chip.textContent = `${fmtNum(waiting)} waiting for your computer`;
+    // Not "waiting for your computer", which reads as a fault when the computer
+    // is right there and switched on. Nothing happens until Photo Map runs a
+    // sync, and that is the sentence worth putting on screen.
+    chip.textContent = `${fmtNum(waiting)} sent · run a sync on your computer`;
     chip.className = 'chip';
   } else {
     chip.className = 'chip hidden';
   }
+  // The sheet is shut most of the time, so the tab that opens it carries the dot.
+  $('filterBtn').classList.toggle('alert', !!(failed || uploadsFull));
   if (view === 'gallery') drawUploadTray();
 }
+
+/** Added here, but with nowhere to be drawn yet.
+ *
+ *  A pin needs coordinates, and this reads them out of the file itself: a JPEG
+ *  with GPS in its EXIF pins immediately. Anything else - a HEIC, which is not
+ *  JPEG APP1 and which exif.js declines, or a photo a phone handed over with the
+ *  location stripped - has none to read, so there is nothing to place. The
+ *  desktop re-reads every file it receives with Pillow and fills them in, which
+ *  is why these appear on the map a sync later rather than never. */
+const unplaced = () => uploads.filter((u) => u.lat == null).length;
 
 // What the bar is showing. `of` is 0 while a step reports no fraction of its
 // own - reading one photo - which is what puts the bar in its indeterminate
@@ -1204,6 +1231,14 @@ async function addFiles(files) {
     lines.push(`${fmtNum(stillQueued)} still queued - they go when you next open the app`);
   }
   if (left) lines.push(`${fmtNum(left)} not reached - add them again once these have gone`);
+  // The question this answers is "why is it not on the map?", and it is asked
+  // the moment the panel appears rather than later.
+  const noPin = unplaced();
+  if (sent && noPin) {
+    lines.push(`${fmtNum(noPin)} have no location in the file itself, so they are not `
+      + 'pinned yet - your computer reads it when it files them');
+  }
+  if (sent) lines.push('They join the library the next time Photo Map syncs on your computer.');
 
   // Stopping is a choice, not a fault, so it is not painted as one.
   const bad = !stopped && !!(fatal || unread.size || (added && !sent));
@@ -1470,6 +1505,19 @@ function mapReady() {
 /** Photos added on this phone, drawn over the snapshot in amber so a photo that
  *  has not reached the library yet is never mistaken for one that has. They
  *  follow the date and search filters; album and favourite belong to neither. */
+/** What the map cannot say for itself about photos added on this device: how
+ *  many are pinned, and how many are here but have no coordinates to be pinned
+ *  by. Without the second number a photo that uploaded perfectly well simply is
+ *  not on the map, with nothing anywhere saying why. */
+function addedTail() {
+  if (!uploads.length) return '';
+  const noPin = unplaced();
+  const bits = [];
+  if (uploads.length - noPin) bits.push(`${fmtNum(uploads.length - noPin)} added here`);
+  if (noPin) bits.push(`${fmtNum(noPin)} added, no location yet`);
+  return ` · ${bits.join(' · ')}`;
+}
+
 function drawUploads() {
   const shown = uploads.filter((u) => u.lat != null
     && (u.taken_ts || 0) <= cutoff
@@ -1480,7 +1528,7 @@ function drawUploads() {
     L.circleMarker([u.lat, u.lon], {
       radius: 6, color: '#ffb020', fillColor: '#ffb020', fillOpacity: 0.9, weight: 2,
     }).bindTooltip(`${escapeHtml(u.name)}<br><span class="muted small">${
-      u.state === 'done' ? 'waiting for your computer' : 'uploading…'}</span>`,
+      u.state === 'done' ? 'sent · waiting for a sync on your computer' : 'uploading…'}</span>`,
     { direction: 'top', offset: [0, -8] }).addTo(uploadLayer);
   });
   uploadLayer.addTo(map);
@@ -1520,27 +1568,27 @@ function drawMap() {
     clearLayers();
     if (!globeShow(idx)) { setStatus('Preparing the globe…'); return; }
     const on = Math.min(idx.length, MAX_POINTS);
-    setStatus(idx.length
+    setStatus((idx.length
       ? `${on < idx.length ? `${fmtNum(on)} of ${fmtNum(idx.length)} on the globe` : `${fmtNum(idx.length)} located photos`}${daySuffix(idx.slice(0, on))}`
-      : 'No photos with location for these filters');
+      : 'No photos with location for these filters') + addedTail());
     return;
   }
   globeHide();
   clearLayers();
 
   if (!mapReady()) {
-    setStatus(`0 located · ${fmtNum(shownAll.length)} shown of ${fmtNum(M.n)}`);
+    setStatus(`0 located · ${fmtNum(shownAll.length)} shown of ${fmtNum(M.n)}${addedTail()}`);
     return;
   }
   // Before the empty-snapshot return: a phone whose library has no located
   // photos at all should still see the one it just added.
   drawUploads();
   if (!idx.length) {
-    setStatus(`0 located · ${fmtNum(shownAll.length)} shown of ${fmtNum(M.n)}`);
+    setStatus(`0 located · ${fmtNum(shownAll.length)} shown of ${fmtNum(M.n)}${addedTail()}`);
     return;
   }
   const color = albumColor();
-  const tail = ` · ${fmtNum(shownAll.length)} shown of ${fmtNum(M.n)}`;
+  const tail = ` · ${fmtNum(shownAll.length)} shown of ${fmtNum(M.n)}${addedTail()}`;
 
   if (mode === 'heat' || (mode === 'cluster' && idx.length > MAX_MARKERS)) {
     heatLayer = L.heatLayer(idx.map((i) => [M.lat[i], M.lon[i], 1]), heatOptions()).addTo(map);
@@ -1697,6 +1745,7 @@ function globeStyle() {
       'skin-satellite': GLOBE_SKINS.satellite.source,
       photos: { type:'geojson', data:GLOBE_EMPTY },
       path: { type:'geojson', data:GLOBE_EMPTY },
+      added: { type:'geojson', data:GLOBE_EMPTY },
     },
     layers: [
       { id:'unpainted', type:'background', paint:{ 'background-color':'#0d1420' } },
@@ -1718,6 +1767,14 @@ function globeStyle() {
       { id:'photo-hover', type:'circle', source:'photos', filter:['==',['get','id'],-1], paint:{
           'circle-radius':['interpolate',['linear'],['zoom'],0,4.5,8,6.5,14,8.5],
           'circle-color':globeTint(), 'circle-stroke-width':2, 'circle-stroke-color':'#fff' } },
+      // Photos added on this device, in the same amber the flat map pins them
+      // in, and above the library so a new one is never buried under it. The
+      // globe used to draw the snapshot and nothing else, so a photo added here
+      // was simply missing from this mode.
+      { id:'added-pins', type:'circle', source:'added', paint:{
+          'circle-radius':['interpolate',['linear'],['zoom'],0,3.5,8,5.5,14,7],
+          'circle-color':'#ffb020', 'circle-opacity':0.9,
+          'circle-stroke-width':2, 'circle-stroke-color':'rgba(0,0,0,.55)' } },
     ],
   };
 }
@@ -1871,6 +1928,21 @@ function globeSetPath(idx) {
   }
 }
 
+/** The same photos the flat map pins in amber, on the same filters. Kept in
+ *  step with drawUploads deliberately: a photo added here should be in the same
+ *  place whichever of the two modes is on screen. */
+function globeSetAdded() {
+  if (!G.ready) return;
+  const source = G.map.getSource('added');
+  if (!source) return;
+  const shown = uploads.filter((u) => u.lat != null
+    && (u.taken_ts || 0) <= cutoff
+    && (!query || u.name.toLowerCase().includes(query)));
+  source.setData(shown.length ? { type:'FeatureCollection', features: shown.map((u) => ({
+    type:'Feature', geometry:{ type:'Point', coordinates:[u.lon, u.lat] }, properties:{},
+  })) } : GLOBE_EMPTY);
+}
+
 function globeShow(idx) {
   $('globe').classList.remove('hidden');
   if (!G.ready) { globeBoot(); return false; }
@@ -1880,6 +1952,7 @@ function globeShow(idx) {
   const capped = idx.slice(0, MAX_POINTS);
   G.map.getSource('photos').setData(capped.length ? globeData(capped) : GLOBE_EMPTY);
   globeSetPath(idx);
+  globeSetAdded();
   return true;
 }
 
@@ -2008,7 +2081,7 @@ function drawUploadTray() {
   const tray = $('uptray');
   if (!uploads.length) { tray.innerHTML = ''; return; }
   const label = (u) => (u.state === 'done'
-    ? (u.proxy_only ? 'added, smaller copy' : 'waiting for your computer')
+    ? (u.proxy_only ? 'sent, smaller copy' : 'sent · waiting for a sync')
     : (u.state === 'failed' ? (u.error || 'could not send') : 'uploading…'));
   // Newest first and capped: the older proxies have been dropped by now anyway,
   // to keep a long queue from filling the phone.
