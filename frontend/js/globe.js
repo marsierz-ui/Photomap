@@ -14,7 +14,7 @@
 // the renderer sleeps when nothing moves instead of spinning a frame loop.
 import { thumbUrl } from './api.js';
 import { emit, fmtNum, fmtDateTime, dayColor } from './state.js';
-import { el } from './ui.js';
+import { el, toast } from './ui.js';
 
 // Vendored rather than fetched from a CDN, so an outage cannot take the globe
 // out. Resolved against this module's own URL: MapLibre finds its worker with
@@ -27,6 +27,9 @@ const CSS = new URL('../vendor/maplibre-gl/maplibre-gl.css', import.meta.url).hr
 // and tiles it on a worker, so the only cost that scales here is building the
 // GeoJSON, which is why there is still a cap at all.
 const MAX_POINTS = 120000;
+// Same limit mapview.js applies to the flat map's Path: a line is a trip at
+// thousands of points, a scribble - and a very slow one to build - past it.
+const MAX_PATH = 5000;
 const BASE_COLOR = '#4aa3ff';
 const HOVER_SETTLE = 110;
 const EMPTY = { type: 'FeatureCollection', features: [] };
@@ -48,6 +51,18 @@ const SKINS = {
       tileSize: 256,
       maxzoom: 20,
       attribution: '&copy; OpenStreetMap, &copy; CARTO',
+    },
+  },
+  // Same tile source as the 2D map's Streets basemap: a single host, no retina
+  // set - unlike CARTO, raw OSM tiles do not offer an @2x variant.
+  streets: {
+    layer: 'skin-streets',
+    source: {
+      type: 'raster',
+      tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+      tileSize: 256,
+      maxzoom: 19,
+      attribution: '&copy; OpenStreetMap contributors',
     },
   },
   satellite: {
@@ -87,7 +102,10 @@ function loadLib() {
     link.rel = 'stylesheet';
     link.href = CSS;
     document.head.appendChild(link);
-    libPromise = import(LIB);
+    // Cleared on failure rather than left holding the rejection: a promise, once
+    // settled, replays the same outcome forever, so a network blip on the first
+    // try would otherwise poison every later attempt without a byte going out.
+    libPromise = import(LIB).catch((err) => { libPromise = null; throw err; });
   }
   return libPromise;
 }
@@ -110,15 +128,32 @@ function style() {
     },
     sources: {
       'skin-map': SKINS.map.source,
+      'skin-streets': SKINS.streets.source,
       'skin-satellite': SKINS.satellite.source,
       photos: { type: 'geojson', data: EMPTY },
+      path: { type: 'geojson', data: EMPTY },
     },
     layers: [
       // The sphere before any tile lands. Without it the unpainted globe is
       // white, which flashes on every first zoom into a new region.
       { id: 'unpainted', type: 'background', paint: { 'background-color': '#0d1420' } },
       { id: 'skin-map', type: 'raster', source: 'skin-map', layout: { visibility: vis('map') } },
+      { id: 'skin-streets', type: 'raster', source: 'skin-streets', layout: { visibility: vis('streets') } },
       { id: 'skin-satellite', type: 'raster', source: 'skin-satellite', layout: { visibility: vis('satellite') } },
+      // Under the points, not over them - a dashed line drawn across the dots
+      // it connects reads worse than one sitting beneath them.
+      {
+        id: 'path-line',
+        type: 'line',
+        source: 'path',
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': BASE_COLOR,
+          'line-width': 1.5,
+          'line-opacity': 0.6,
+          'line-dasharray': [4, 4],
+        },
+      },
       {
         id: 'photos',
         type: 'circle',
@@ -171,9 +206,10 @@ async function boot() {
     create(box);
   } catch (err) {
     // Two real cases: the CDN is unreachable, or the machine has no WebGL2,
-    // which MapLibre requires. Either way the pane would otherwise sit on
-    // "Preparing the globe…" forever, so say what happened. booting stays set
-    // so this is reported once rather than retried on every redraw.
+    // which MapLibre requires. Cleared here rather than left set, so a retry
+    // (reopening the globe, or a network blip clearing up) gets another
+    // attempt instead of the pane sitting on "Preparing the globe…" forever.
+    booting = false;
     el('map-status').textContent = `The globe is unavailable here: ${err.message}`;
   }
 }
@@ -354,6 +390,32 @@ export function update(data) {
   count = Math.min(data.n, MAX_POINTS);
   map.getSource('photos').setData(count ? toGeoJSON(data, count) : EMPTY);
   return count;
+}
+
+/** The trip line. `data.lat`/`data.lon` already arrive in capture order -
+ *  /api/points sorts by taken_ts - so unlike the point layer this draws
+ *  straight from the arrays with no rebuild of its own.
+ *
+ *  Never capped to MAX_POINTS: that limit exists so tens of thousands of
+ *  circles stay paintable, and a LineString of the same length is one
+ *  geometry, not one draw call per vertex. It has its own ceiling instead,
+ *  matching the flat map's Path exactly, including the warning once it is
+ *  past drawing at all. */
+export function setPath(data, on, color) {
+  if (!ready) return;
+  const source = map.getSource('path');
+  const n = data ? data.n : 0;
+  if (on && n > 1 && n <= MAX_PATH) {
+    const coords = new Array(n);
+    for (let i = 0; i < n; i += 1) coords[i] = [data.lon[i], data.lat[i]];
+    map.setPaintProperty('path-line', 'line-color', color);
+    source.setData({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } });
+  } else {
+    source.setData(EMPTY);
+    if (on && n > MAX_PATH) {
+      toast(`Path hidden: ${fmtNum(n)} points exceeds the ${fmtNum(MAX_PATH)} limit`);
+    }
+  }
 }
 
 export function resize() {

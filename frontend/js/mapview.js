@@ -220,6 +220,7 @@ function render() {
       setStatus('Preparing the globe…');
       return;
     }
+    globe.setPath(data, showPath, albumColor());
     const onGlobe = Math.min(data.n, globe.pointLimit);
     setStatus(data.n ? globe.label(onGlobe, data.n) + daySuffix(onGlobe)
                      : 'No photos with location for these filters');

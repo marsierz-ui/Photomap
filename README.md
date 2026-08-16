@@ -200,11 +200,17 @@ photos, and showing each one fired a thumbnail request per photo crossed. It ask
 256px thumbnail the gallery already caches rather than a size of its own, so a hover is
 usually a cache hit instead of the server decoding a full-size photo to make one more.
 
-Two skins, *Map* and *Satellite*, streaming the same tiles as the 2D map. Both live in
-the style at once and are switched by visibility: MapLibre only fetches tiles a visible
-layer uses, so the hidden skin costs nothing, the visible one keeps what it had cached
-when you switch back, and the attribution line follows on its own. CARTO's `@2x` tiles
-are asked for only where the display can show them.
+Three skins, *Map*, *Streets* and *Satellite*, streaming the same tiles as the 2D map's
+three basemaps. All three live in the style at once and are switched by visibility:
+MapLibre only fetches tiles a visible layer uses, so a hidden skin costs nothing, the
+visible one keeps what it had cached when you switch back, and the attribution line
+follows on its own. CARTO's `@2x` tiles are asked for only where the display can show
+them; raw OpenStreetMap tiles, behind *Streets*, do not offer a retina set to ask for.
+
+`Path` works here too: its own line layer, drawn under the points rather than over them,
+so the dots it connects stay legible instead of getting a dashed line drawn across them.
+Capture order comes for free - `/api/points` already returns photos sorted by
+`taken_ts` - so this draws straight off the arrays it is given, with no sort of its own.
 
 `globe` is a projection preset rather than a mode: a sphere out to zoom 10, easing into
 mercator by 12, which is where a sphere's floating-point precision runs out anyway. So
@@ -498,6 +504,35 @@ proxy, and a 4GB ceiling on everything waiting. Past the ceiling it answers 507 
 viewer says uploads are paused until this computer syncs, rather than failing quietly.
 One photo per request, since the largest body a Worker can receive is 100MB on the Free
 and Pro plans.
+
+**A progress bar while it runs, and a result panel afterwards.** The bar names the photo
+in flight and fills with the bytes actually delivered - `XMLHttpRequest`, not `fetch`,
+which has no upload progress event at all - so a 50MB photo over a bad signal is
+visibly moving rather than apparently hung. **Stop** ends the run and aborts the request
+in flight; nothing queued is lost, and picking again skips whatever already went.
+
+The panel that follows says what happened and, when something failed, why - and it
+stays until dismissed, because a toast is three seconds long and a reason is worth
+reading twice. Reasons are grouped, so forty photos that failed the same way are one
+line rather than forty, and it offers **Retry**, which re-sends the failed records
+without re-reading the camera roll.
+
+Every failure carries its status code, which is the fix for a specific and bad silence:
+the old code reported `data.error || r.statusText`, and *both halves are empty* for the
+answers this actually gets. A non-JSON body - a Cloudflare error page, a Worker with no
+import route, an expired session's login page - leaves the first empty, and HTTP/2,
+which is what Cloudflare speaks, has no status text at all, so the second is empty
+always. Every one of those arrived on screen as "could not send" and nothing else. The
+common ones are now named outright: an expired session, a 413, a 507, and a **405 or
+404 on `/api/import`, which means the Worker predates the import routes and needs
+`wrangler deploy`** - a snapshot sync publishes the viewer to the bucket but never
+deploys the Worker, so that one is easy to hit and was impossible to diagnose.
+
+A run also stops on the first failure that will repeat - an expired session, a missing
+route, a server error, a dropped connection - instead of grinding a whole camera roll
+into the same wall. Failures that belong to one photo, like a 413, only skip that
+photo. And a connection that stops moving for 60 seconds is treated as gone rather than
+slow: an absolute timeout cannot tell those apart, but bytes arriving can.
 
 The one case none of this catches: every check here is on exact bytes, and an iPhone
 hands the picker a JPEG transcoded from the original HEIC rather than the file itself.
