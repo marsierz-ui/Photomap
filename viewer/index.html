@@ -1768,6 +1768,9 @@ const MAX_MARKERS = 60000;
 const MAX_POINTS = 120000;
 const MAX_PATH = 5000;
 const BASE_COLOR = '#4aa3ff';
+// Photos added on this device, everywhere they are drawn: the flat map, the
+// globe, and the border on the gallery tray's cards.
+const UPLOAD_COLOR = '#ffb020';
 
 let heatLayer = null, clusterLayer = null, pointLayer = null, pathLayer = null;
 let base = 'dark', showPath = false, byDay = false, armed = false;
@@ -1863,10 +1866,24 @@ function drawUploads() {
     && (!query || u.name.toLowerCase().includes(query)));
   if (!shown.length) return;
   uploadLayer = L.featureGroup();
+  // Drawn as whatever the mode draws a photo as, in amber. It used to be one
+  // fixed marker at radius 6 and weight 2, which is the size and stroke this map
+  // gives a *selected* photo - so an uploading photo came out half again as wide
+  // as every real one beside it, and in heat mode, where nothing else is a dot at
+  // all, as a solid disc over the field. Only the colour should say it is new.
+  const pins = mode === 'cluster';
+  const renderer = pins ? null : L.canvas({ padding: 0.3 });
   shown.forEach((u) => {
-    L.circleMarker([u.lat, u.lon], {
-      radius: 6, color: '#ffb020', fillColor: '#ffb020', fillOpacity: 0.9, weight: 2,
-    }).bindTooltip(`${escapeHtml(u.name)}<br><span class="muted small">${
+    const marker = pins
+      ? L.marker([u.lat, u.lon], {
+        icon: L.divIcon({ className:'pin', html:`<i style="background:${UPLOAD_COLOR}"></i>`,
+                          iconSize:[14,14], iconAnchor:[7,7] }),
+      })
+      : L.circleMarker([u.lat, u.lon], {
+        radius: 4, color: UPLOAD_COLOR, fillColor: UPLOAD_COLOR,
+        fillOpacity: 0.75, weight: 1, renderer,
+      });
+    marker.bindTooltip(`${escapeHtml(u.name)}<br><span class="muted small">${
       u.state === 'done' ? 'sent · waiting for a sync on your computer' : 'uploading…'}</span>`,
     { direction: 'top', offset: [0, -8] }).addTo(uploadLayer);
   });
@@ -2106,14 +2123,16 @@ function globeStyle() {
       { id:'photo-hover', type:'circle', source:'photos', filter:['==',['get','id'],-1], paint:{
           'circle-radius':['interpolate',['linear'],['zoom'],0,4.5,8,6.5,14,8.5],
           'circle-color':globeTint(), 'circle-stroke-width':2, 'circle-stroke-color':'#fff' } },
-      // Photos added on this device, in the same amber the flat map pins them
+      // Photos added on this device, in the same amber the flat map draws them
       // in, and above the library so a new one is never buried under it. The
-      // globe used to draw the snapshot and nothing else, so a photo added here
-      // was simply missing from this mode.
+      // size and stroke are the photos layer's own, deliberately: a marker that
+      // is bigger than everything around it reads as important rather than as
+      // new, and only the colour is meant to be saying anything here.
       { id:'added-pins', type:'circle', source:'added', paint:{
-          'circle-radius':['interpolate',['linear'],['zoom'],0,3.5,8,5.5,14,7],
-          'circle-color':'#ffb020', 'circle-opacity':0.9,
-          'circle-stroke-width':2, 'circle-stroke-color':'rgba(0,0,0,.55)' } },
+          'circle-radius':['interpolate',['linear'],['zoom'],0,2.2,4,3,8,4.2,14,6],
+          'circle-color':UPLOAD_COLOR, 'circle-opacity':0.9,
+          'circle-stroke-width':['interpolate',['linear'],['zoom'],2,0,5,0.8],
+          'circle-stroke-color':'rgba(0,0,0,.55)' } },
     ],
   };
 }

@@ -633,6 +633,13 @@ Photos added here are drawn on the **globe** as well now. They were only ever dr
 the flat map, so a session that had last used Globe - which the viewer remembers between
 visits - showed nothing at all for a photo that had just been added.
 
+They are drawn at whatever size the mode draws a photo, in amber, and nothing more. They
+used to be one fixed marker at radius 6 with a 2px stroke, which is what this map gives a
+*selected* photo: half again as wide as every real photo beside it in Points, and in Heat,
+where nothing else is a dot at all, a solid disc sitting on top of the field. The globe
+had the same problem from the other direction, its own added layer being larger at every
+zoom than the photos around it. Only the colour is meant to be saying anything.
+
 Nothing here says "waiting for your computer" any more. It reads as a fault when the
 computer is switched on and in front of you; what it meant was that Photo Map has to run
 a sync before an uploaded photo joins the library, so that is what it says.
