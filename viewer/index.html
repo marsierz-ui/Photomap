@@ -343,6 +343,13 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
        files it rather than the moment it is picked. A photo with a real
        location a minute later beats one with none at all. -->
   <input id="picker" type="file" accept="image/*,.heic,.heif,.HEIC,.HEIF" multiple hidden>
+  <!-- The same job with no `accept` at all, which is the whole point. An accept
+       of image types sends Android to its photo picker, and a photo that leaves
+       through the photo picker has had its GPS removed by the system before the
+       page ever sees it - the file itself still has it, the copy handed over
+       does not. With no accept, the chooser offers the file browser, and a file
+       read as a document arrives with its metadata intact. -->
+  <input id="pickerFiles" type="file" multiple hidden>
   <span id="summary" class="muted small"></span>
 </header>
 
@@ -399,6 +406,7 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
        Add button and the upload state used to sit. -->
   <div class="addrow" id="addrow">
     <button id="addPhotos" class="hidden">+ Add photos</button>
+    <button id="addFiles" class="hidden" title="Browse files instead of the photo picker - keeps the location on the photo">+ From files</button>
     <span id="upstate" class="chip hidden"></span>
   </div>
   <label class="small muted hidden" id="wifiRow">
@@ -776,16 +784,27 @@ async function downscale(file) {
 const LOC_WHY = {
   ok: 'located',
   heic: 'HEIC - this phone cannot read those here, your computer does it when it files them',
-  nogps: 'the file has EXIF but no GPS tags - the photo was taken without a location',
-  stripped: 'the file arrived with no EXIF at all - the phone removed it when handing it over',
+  nogps: 'the file has a GPS block with no fix in it - taken without a location',
+  redacted: 'the picker removed the location before the app saw it - use "+ From files" '
+    + 'and browse to your photos instead, which hands them over whole',
+  stripped: 'the file arrived with no EXIF at all - the picker stripped it',
 };
 
+/** Which of four different silences this photo is.
+ *
+ *  The one that matters is `redacted`: EXIF is present and complete except that
+ *  the GPS block is gone entirely. A camera does not write a file that way - a
+ *  photo taken without a fix still has the block, empty - so a missing block
+ *  means something removed it in transit, which is what Android's photo picker
+ *  does to every photo it hands an app that cannot ask for locations. The file
+ *  on the phone is untouched; only the copy is stripped. */
 function locKind(file, read) {
   if (read && read.lat != null) return 'ok';
   const heicish = /\.(heic|heif|avif)$/i.test(file.name)
     || /heic|heif|avif/i.test(file.type || '');
   if (heicish) return 'heic';
-  return read ? 'nogps' : 'stripped';
+  if (!read) return 'stripped';
+  return read.gps ? 'nogps' : 'redacted';
 }
 
 /** Read one picked file into the local queue. Nothing is sent yet.
@@ -1275,6 +1294,26 @@ $('addPhotos').onclick = async () => {
 };
 
 $('picker').onchange = async (e) => {
+  const files = [...e.target.files];
+  e.target.value = '';
+  await addFiles(files);
+};
+
+// Same flow, different door. This one carries no `accept`, so the chooser offers
+// the file browser rather than the photo picker, and what comes back has not been
+// through the system's metadata redaction.
+$('addFiles').onclick = () => {
+  if (!navigator.onLine) { toast('Offline - adding a photo needs a connection', true); return; }
+  if (picking) { toast('Still reading the last batch'); return; }
+  if (meteredHold()) {
+    toast('On mobile data - photos are only uploaded on Wi-Fi. Change that in Settings.', true);
+    return;
+  }
+  uploadsFull = false;
+  $('pickerFiles').click();
+};
+
+$('pickerFiles').onchange = async (e) => {
   const files = [...e.target.files];
   e.target.value = '';
   await addFiles(files);
@@ -3060,6 +3099,7 @@ fetch('manifest.json', { cache:'no-cache' })
     // in, so an older snapshot simply has no button.
     if (m.allow_import) {
       $('addPhotos').classList.remove('hidden');
+      $('addFiles').classList.remove('hidden');
       $('wifiRow').classList.remove('hidden');
       loadUploadPrefs();
       paintWifi();

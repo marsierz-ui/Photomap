@@ -215,6 +215,25 @@ const heic = new Uint8Array(32);
 heic.set(new TextEncoder().encode('ftypheic'), 4);
 check('HEIC declines cleanly rather than guessing', parseExifBuffer(heic.buffer) === null);
 
+// ------------------------------------------------ evidence, not just values
+//
+// Whether the file carries a GPS block at all is the one thing that separates a
+// photo taken without a fix from a photo whose location was removed on the way
+// out of a picker. Both have no coordinates; only the second has no block, and
+// only the second is worth telling anyone to do something about.
+const located = parseExifBuffer(buildJpeg({ lat: 51.5074, lon: 0.1278 }));
+check('a located photo reports its GPS block', located?.gps === true);
+const noBlock = parseExifBuffer(buildJpeg({ dtOriginal: '2021:06:04 15:00:00' }));
+check('EXIF with no GPS block at all says so', noBlock !== null && noBlock.gps === false,
+      JSON.stringify(noBlock));
+check('and that is not confused with having no coordinates',
+      noBlock?.lat === null && located?.lat !== null);
+// Null island is a missing fix written into a block that IS present, which is
+// exactly the case that must not look like a picker stripping the location.
+const nullIsland = parseExifBuffer(buildJpeg({ lat: 0, lon: 0 }));
+check('a rejected fix still counts as a block being there',
+      nullIsland?.lat === null && nullIsland?.gps === true, JSON.stringify(nullIsland));
+
 console.log();
 const failed = results.filter((x) => !x.ok);
 if (failed.length) {

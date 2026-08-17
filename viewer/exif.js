@@ -162,11 +162,17 @@ function parseExifBuffer(buffer) {
   const sub = ifd0[EXIF_IFD] ? readIfd(view, tiff, tiff + ifd0[EXIF_IFD], little) : {};
   const gps = ifd0[GPS_IFD] ? readIfd(view, tiff, tiff + ifd0[GPS_IFD], little) : {};
 
-  const out = { lat: null, lon: null, altitude: null, taken_ts: null };
+  // `gps` is not a value, it is evidence: whether the file carries a GPS block
+  // at all. A photo taken without a fix has the block with nothing usable in it;
+  // a photo whose location was removed on the way out of a picker has no block.
+  // Both read as "no coordinates", and they want completely different answers,
+  // so the difference is reported rather than flattened.
+  const out = { lat: null, lon: null, altitude: null, taken_ts: null, gps: false };
   out.taken_ts = parseDT(sub[TAG_DT_ORIGINAL])
     ?? parseDT(sub[TAG_DT_DIGITIZED])
     ?? parseDT(ifd0[TAG_DATETIME]);
 
+  out.gps = Object.keys(gps).length > 0;
   let lat = toDegrees(gps[2]);
   let lon = toDegrees(gps[4]);
   if (lat !== null && lon !== null) {

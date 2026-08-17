@@ -514,11 +514,29 @@ blocks - a switch that silently stops everything forever is worse than one that 
 be enforced - and the sheet says which of the two you are looking at instead of implying
 a guarantee it cannot make.
 
-**When a photo has no pin, it now says which of four things happened**: the file had GPS
-(pinned), it is a HEIC this phone cannot read but the computer can, it has EXIF but no
-GPS tags because it was taken without a location, or it arrived with no EXIF at all
-because the phone stripped it on the way out of the picker. Those want opposite
-reactions and had all been reported as the same silence.
+**When a photo has no pin, it says which of four things happened**, because they want
+opposite reactions and had all been reported as the same silence: the file is a HEIC
+this phone cannot read but the computer can; it has a GPS block with no fix in it, so it
+was taken without a location; it has EXIF but *no GPS block at all*; or it has no EXIF
+whatsoever.
+
+The third of those is the one worth knowing about, and the distinction is what makes it
+diagnosable. A camera does not write a file with the GPS block missing - a photo taken
+without a fix still has the block, empty - so a *missing* block means something removed
+it in transit. That something is the phone's own photo picker: **Android redacts the
+location from every photo it hands an app that cannot ask for it**, which includes the
+browser. The file on the phone still has its coordinates; the copy the page receives
+does not, and no amount of reading it harder will find them.
+
+So there are two ways in. **+ Add photos** is the photo picker: convenient, and on
+Android the location is stripped. **+ From files** is the same flow through an input with
+no `accept` at all, which sends the chooser to the file browser instead - a photo read as
+a document arrives whole. Which one your phone needs is not a guess any more: add a few
+either way and the result panel says whether they came through located.
+
+`viewer/exif.js` was measured against 40 real photos out of this library - Samsung,
+HONOR, FOSSiBOT - and agreed with Pillow on every one to within 1e-4 degrees, which is
+how the picker rather than the parser was identified as the thing losing them.
 
 **Collecting carries on with the app closed.** `collect.py` is one pass - look, sync if
 there is anything new, exit - and `python collect.py --install` registers a Windows
