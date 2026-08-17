@@ -466,6 +466,9 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
 <script src="vendor/leaflet/leaflet.markercluster.js"></script>
 <script src="vendor/leaflet/leaflet-heat.js"></script>
 <script src="exif.js"></script>
+<!-- The queue, shared with sw.js so the page and the background drain cannot
+     disagree about the database, the endpoints or the metadata header. -->
+<script src="uploadq.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const DF = new Intl.DateTimeFormat(undefined, { year:'numeric', month:'short', day:'numeric', timeZone:'UTC' });
@@ -549,8 +552,6 @@ let uploadsFull = false;         // the bucket refused: nothing more fits
 let uploadLayer = null;
 let picking = null;              // {done, total} while a picked batch is read
 
-const DB_NAME = 'photomap-uploads';
-const DB_VERSION = 2;
 let updb = null;
 
 // ---------------------------------------------------------------- metered data
@@ -563,34 +564,37 @@ let updb = null;
 // forever is worse than one that cannot be enforced - and the sheet says which
 // of the two you are looking at instead of implying a guarantee it cannot make.
 
-const UPLOAD_PREFS = 'photomap-upload-v1';
+// The old home for this was localStorage, which a service worker cannot read -
+// and the worker is what sends photos once the app is shut, so it has to be able
+// to honour the same preference. It lives in the database with the queue now.
+const UPLOAD_PREFS = 'photomap-upload-v1';   // the old key, migrated once
 let wifiOnly = true;
 
 const netInfo = () =>
   navigator.connection || navigator.mozConnection || navigator.webkitConnection || null;
 
-/** true on Wi-Fi, false on something metered, null when the phone will not say. */
-function onWifi() {
-  const net = netInfo();
-  if (!net) return null;
-  // Data Saver is the same request in different words, whatever the link is.
-  if (net.saveData) return false;
-  const kind = net.type;
-  if (typeof kind !== 'string' || !kind) return null;
-  if (kind === 'wifi' || kind === 'ethernet') return true;
-  if (kind === 'cellular') return false;
-  // bluetooth, wimax, other, unknown, none: not a claim either way.
-  return null;
-}
-
+const onWifi = Q.onWifi;
 const meteredHold = () => wifiOnly && onWifi() === false;
 
-function loadUploadPrefs() {
+async function loadUploadPrefs() {
+  let legacy = null;
   try {
     const saved = JSON.parse(localStorage.getItem(UPLOAD_PREFS) || 'null');
-    if (saved && typeof saved.wifiOnly === 'boolean') wifiOnly = saved.wifiOnly;
+    if (saved && typeof saved.wifiOnly === 'boolean') legacy = saved.wifiOnly;
   } catch {
     /* a stored preference is not worth interrupting anyone over */
+  }
+  try {
+    const stored = await Q.getPref(updb, 'wifiOnly', null);
+    if (typeof stored === 'boolean') wifiOnly = stored;
+    else {
+      // First run on this version: carry the old choice across, then stop
+      // reading it.
+      wifiOnly = legacy === null ? true : legacy;
+      await Q.setPref(updb, 'wifiOnly', wifiOnly);
+    }
+  } catch {
+    if (legacy !== null) wifiOnly = legacy;
   }
   $('wifiOnly').checked = wifiOnly;
 }
@@ -603,16 +607,16 @@ function paintWifi() {
     : (known ? 'On Wi-Fi now.' : 'On mobile data now - photos wait.');
 }
 
-$('wifiOnly').onchange = (e) => {
+$('wifiOnly').onchange = async (e) => {
   wifiOnly = e.target.checked;
   try {
-    localStorage.setItem(UPLOAD_PREFS, JSON.stringify({ wifiOnly }));
+    await Q.setPref(updb, 'wifiOnly', wifiOnly);
   } catch {
-    /* private mode refuses to write; the choice still holds for this session */
+    /* the choice still holds for this session, and for this page's own drain */
   }
   paintWifi();
   paintUploads();
-  if (!meteredHold()) drainUploads().then((s) => reportDrain(s, null));
+  if (!meteredHold()) reportDrain(await drainUploads(), null);
 };
 
 // Moving from mobile data onto Wi-Fi is exactly when a held queue should go.
@@ -630,44 +634,30 @@ if (netInfo() && netInfo().addEventListener) {
 // camera roll again would send every photo a second time.
 const sent = new Set();
 
-function store(name, mode) {
-  return updb.transaction(name, mode).objectStore(name);
-}
-
-function openUploads() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
-      const handle = req.result;
-      // Checked rather than assumed: this also runs as an upgrade from the
-      // version that had photos and nothing else.
-      if (!handle.objectStoreNames.contains('photos')) {
-        handle.createObjectStore('photos', { keyPath: 'id' });
-      }
-      if (!handle.objectStoreNames.contains('sent')) {
-        handle.createObjectStore('sent', { keyPath: 'key' });
-      }
-    };
-    req.onsuccess = () => { updb = req.result; resolve(); };
-    req.onerror = () => reject(req.error);
-  });
-}
-
-const idbDo = (request) => new Promise((resolve, reject) => {
-  request.onsuccess = () => resolve(request.result);
-  request.onerror = () => reject(request.error);
-});
+const idbDo = Q.done;
 
 async function loadUploads() {
-  await openUploads();
-  const rows = await idbDo(store('photos', 'readonly').getAll());
+  updb = await Q.open();
   // Oldest first, so a queue drains in the order the photos were picked.
-  rows.sort((a, b) => a.queued_ts - b.queued_ts).forEach((r) => uploads.push(r));
-  (await idbDo(store('sent', 'readonly').getAllKeys())).forEach((key) => sent.add(key));
+  (await Q.records(updb)).forEach((r) => uploads.push(r));
+  (await Q.sentKeys(updb)).forEach((key) => sent.add(key));
 }
 
-const saveUpload = (rec) => idbDo(store('photos', 'readwrite').put(rec));
-const dropUpload = (rec) => idbDo(store('photos', 'readwrite').delete(rec.id));
+const saveUpload = (rec) => Q.put(updb, rec);
+const dropUpload = (rec) => Q.drop(updb, rec.id);
+
+/** Re-read the queue, because the service worker changes it while the app is
+ *  closed. Coming back to a page holding records that were sent an hour ago -
+ *  still saying "uploading…" - is the state this exists to avoid. */
+async function reloadQueue() {
+  if (!updb) return;
+  const rows = await Q.records(updb);
+  uploads.length = 0;
+  rows.forEach((r) => uploads.push(r));
+  (await Q.sentKeys(updb)).forEach((key) => sent.add(key));
+  paintUploads();
+  refresh();
+}
 
 /** Two fingerprints per photo, and both are exact.
  *
@@ -676,8 +666,8 @@ const dropUpload = (rec) => idbDo(store('photos', 'readwrite').delete(rec.id));
  *  thousand picked photos instant. The second is the digest of the bytes, and
  *  it is what still recognises a photo the phone handed over under a different
  *  name the second time. */
-const fileKey = (file) => `f|${file.name.toLowerCase()}|${file.size}|${file.lastModified}`;
-const hashKey = (digest) => `h|${digest}`;
+const fileKey = Q.fileKey;
+const hashKey = Q.hashKey;
 
 /** What the library already holds, by name and size.
  *
@@ -712,7 +702,7 @@ async function remember(rec) {
     if (!key || sent.has(key)) continue;
     sent.add(key);
     try {
-      await idbDo(store('sent', 'readwrite').put({ key, ts: Date.now() }));
+      await Q.addSent(updb, key);
     } catch {
       // The set still holds it for this session, so the batch in hand is not
       // affected; a later visit offers the photo again and the computer drops it.
@@ -1032,8 +1022,8 @@ function sendBytes(path, blob, meta, onProgress) {
     };
 
     xhr.open('POST', path, true);
-    xhr.setRequestHeader('X-Photo-Meta', b64url(JSON.stringify(meta)));
-    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    // The same header the worker sends, built the same way.
+    Object.entries(Q.headers(meta)).forEach(([k, v]) => xhr.setRequestHeader(k, v));
     xhr.upload.onprogress = (e) => {
       bump();
       if (onProgress) onProgress(e.loaded, e.lengthComputable ? e.total : blob.size);
@@ -1068,9 +1058,8 @@ const stripTags = (s) => String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ')
 // Answers that will be exactly the same for the next photo. There is nothing to
 // learn from failing three hundred times in a row, so the run stops on these and
 // says why, rather than grinding through the whole camera roll.
-const NO_POINT_RETRYING = new Set([401, 403, 404, 405, 429, 501]);
 const isFatal = (res) => res.kind === 'network' || res.kind === 'stalled'
-  || NO_POINT_RETRYING.has(res.status) || res.status >= 500;
+  || Q.fatal(res.status, res.kind);
 
 /** Why an upload did not land, in words, and never without the status.
  *
@@ -1141,10 +1130,7 @@ async function drainUploads() {
       if (rec.state === 'done') continue;
 
       if (!rec.iid) {
-        const meta = { name: rec.name, ext: rec.ext, bytes: rec.bytes, sha256: rec.sha256,
-                       proxy_sha256: rec.proxy_sha256, taken_ts: rec.taken_ts,
-                       lat: rec.lat, lon: rec.lon };
-        const res = await sendBytes('/api/import', rec.proxy, meta,
+        const res = await sendBytes(Q.PROXY_PATH, rec.proxy, Q.proxyMeta(rec),
           (loaded, total) => at(rec, loaded, total, ' (preview)'));
         if (res.status === 507) {
           announceFull(res.data.pending, res.data.quota);
@@ -1168,7 +1154,7 @@ async function drainUploads() {
       }
 
       if (rec.full) {
-        const res = await sendBytes(`/api/import/full?iid=${encodeURIComponent(rec.iid)}`,
+        const res = await sendBytes(Q.fullPath(rec.iid),
           rec.full, { sha256: rec.sha256 },
           (loaded, total) => at(rec, loaded, total, ''));
         if (res.status === 507) {
@@ -1246,6 +1232,41 @@ function reportDrain(summary, title) {
   if (title && summary.sent) {
     showResult(`${title} · ${fmtNum(summary.sent)} sent`, lines, false, false);
   }
+}
+
+/** Ask the service worker to finish the queue after this page is gone.
+ *
+ *  Background Sync, which is what makes "the upload stops when I close the app"
+ *  untrue: the browser wakes the worker when there is a connection, whether or
+ *  not anything is open, and the worker sends what is still staged. Chromium
+ *  only - Safari has never shipped it - so this is an improvement where it
+ *  exists and silently nothing where it does not, which is why the page still
+ *  drains on its own as well. */
+async function handOver() {
+  if (!uploads.some((u) => u.state !== 'done')) return false;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    if (!reg.sync) return false;
+    await reg.sync.register(Q.SYNC_TAG);
+    return true;
+  } catch {
+    return false;   // permission refused, or no Background Sync here
+  }
+}
+
+/** Photos sent to the app from somewhere else - a file manager, a gallery - which
+ *  the service worker parked because there was no page yet to give them to. */
+async function takeShared() {
+  if (!updb) return;
+  let rows = [];
+  try {
+    rows = await Q.shared(updb);
+    if (rows.length) await Q.clearShared(updb);
+  } catch {
+    return;
+  }
+  const files = rows.map((r) => r.file).filter(Boolean);
+  if (files.length) await addFiles(files);
 }
 
 /** Ask before reading a photo, so a full queue is reported before the phone
@@ -1527,6 +1548,10 @@ async function addFiles(chosen) {
     picking = null;
     endProgress();
   }
+
+  // Hand whatever is left to the service worker, so closing the app is no longer
+  // the same as stopping the upload.
+  await handOver();
 
   const stillQueued = queued();
   const lines = [];
@@ -3206,7 +3231,16 @@ async function adoptSnapshot(m) {
 
 // A phone spends most of its time with the screen off. Coming back is the moment
 // worth asking, rather than a timer that has been firing into a locked screen.
-document.addEventListener('visibilitychange', () => { if (!document.hidden) watchSnapshot(); });
+// Coming back is the moment to ask, rather than a timer firing into a locked
+// screen. The queue is re-read too: the service worker may have sent half of it
+// since this page was last looked at, and a card still saying "uploading…" for a
+// photo that landed an hour ago is worse than no card at all.
+document.addEventListener('visibilitychange', async () => {
+  if (document.hidden) return;
+  await reloadQueue().catch(() => {});
+  await takeShared();
+  watchSnapshot();
+});
 
 // ---------------------------------------------------------------------- boot
 
@@ -3226,16 +3260,24 @@ fetch('manifest.json', { cache:'no-cache' })
       $('addPhotos').classList.remove('hidden');
       $('addFiles').classList.remove('hidden');
       $('wifiRow').classList.remove('hidden');
-      loadUploadPrefs();
-      paintWifi();
     }
     // Never fatal: a phone that refuses IndexedDB (private mode, storage
     // denied) still gets the whole viewer, just without adding photos.
+    // The preference is read after the queue, since it now lives in the same
+    // database - the service worker cannot see localStorage.
     try {
       await loadUploads();
       await retireDrained();
-    } catch {
+      if (m.allow_import) {
+        await loadUploadPrefs();
+        paintWifi();
+      }
+    } catch (err) {
       $('addPhotos').classList.add('hidden');
+      $('addFiles').classList.add('hidden');
+      // Worth saying when it is something anyone can do something about, rather
+      // than the button simply not being there.
+      if (/another tab/.test(err.message || '')) toast(err.message, true);
     }
     // Before setView, so the first draw is already in the remembered mode
     // rather than drawing a heat map and then replacing it.
@@ -3253,6 +3295,9 @@ fetch('manifest.json', { cache:'no-cache' })
     // itself, but a queue that cannot empty has been silent for far too long.
     if (m.allow_import) reportDrain(await drainUploads(), null);
     watchSnapshot();
+    // Anything shared into the app while it was shut. Last, so the map is up
+    // before a batch starts moving the progress bar over it.
+    if (m.allow_import) await takeShared();
   })
   .catch((err) => {
     $('loading').querySelector('div').textContent = 'Could not load the snapshot';

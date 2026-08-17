@@ -537,6 +537,21 @@ was never the problem, which is what pointed at the copy instead.
 **A .zip is the way past it.** An archive is not an image, so nothing on the path
 inspects it or rewrites anything inside: zip the photos with any file manager, add the
 .zip with **+ From files or .zip**, and they arrive exactly as they sit on the phone.
+
+**Share it instead of hunting for it.** The app is a share target, so the archive - or
+the photos themselves, if the app doing the sharing hands over the originals - can be
+sent to Photo Map straight from a file manager: select, compress, share, done. Sharing
+lands in the service worker, which parks the files and opens the app, and the app imports
+them on sight. That removes the picker from the process entirely. It needs the app
+installed, since a share target is a property of an installed app.
+
+**Per archive**: up to 65,535 photos and just under 4GB, which is where zip's own 32-bit
+header stops and zip64 begins - zip64 is refused with a message saying so rather than
+misread. Per photo the Worker's caps still apply, 64MB each. What is actually worth
+watching is the 4GB ceiling on everything waiting in the bucket at once: past that
+uploads pause until the computer has collected them, which it now does by itself. So a
+few thousand photos in one archive is ordinary, and the archive costs almost nothing to
+open - stored entries are handed on as slices of a file the browser already has.
 The archive is unpacked in the browser, straight from the central directory, so a large
 one costs one small read rather than a pass over the whole thing - and stored entries,
 which is what a zip of JPEGs almost always holds since they do not compress, are handed
@@ -621,6 +636,26 @@ visits - showed nothing at all for a photo that had just been added.
 Nothing here says "waiting for your computer" any more. It reads as a fault when the
 computer is switched on and in front of you; what it meant was that Photo Map has to run
 a sync before an uploaded photo joins the library, so that is what it says.
+
+**Closing the app no longer stops the upload.** Whatever is still queued is handed to the
+service worker through Background Sync: the browser wakes it when there is a connection,
+with nothing open, and it sends the photos that are already staged. It shares the queue
+with the page through `viewer/uploadq.js` - the database, the record shape, both
+endpoints, the metadata header and which failures are worth retrying - rather than
+keeping a second copy of any of that to drift out of step. It honours the Wi-Fi
+preference too, which is why that preference moved out of localStorage, which a worker
+cannot read, and into the queue's own database. It re-registers itself while anything is
+left, since a sync event that resolves is considered finished.
+
+Chromium only - Safari has never shipped Background Sync - so it is an improvement where
+it exists and silently nothing where it does not, and the page still drains on its own
+either way. Coming back to the app re-reads the queue, because the worker may have sent
+half of it in the meantime and a card still saying *uploading…* for a photo that landed
+an hour ago is worse than no card.
+
+**Nothing needs a library scan.** An import is inserted into the index directly and its
+thumbnail built there and then, so the sync that collects it also publishes it. Scanning
+afterwards finds nothing new to do.
 
 **A progress bar while it runs, and a result panel afterwards.** The bar names the photo
 in flight and fills with the bytes actually delivered - `XMLHttpRequest`, not `fetch`,
