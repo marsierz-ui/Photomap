@@ -29,6 +29,9 @@ import uvicorn  # noqa: E402
 from backend import auth, db, netinfo  # noqa: E402
 
 db.init()  # first run: the schema has to exist before the access key is read
+# Recorded so collect.py can tell whether this app is already open and watching
+# the bucket, and stay out of the way if it is.
+db.set_setting("server_port", args.port)
 
 if args.new_key:
     print(f"New access key: {auth.reset()}")

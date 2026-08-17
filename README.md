@@ -505,6 +505,33 @@ viewer says uploads are paused until this computer syncs, rather than failing qu
 One photo per request, since the largest body a Worker can receive is 100MB on the Free
 and Pro plans.
 
+**Only on Wi-Fi**, by default - photos are the one thing here big enough to matter on a
+phone plan. The queue holds on mobile data and goes by itself the moment Wi-Fi comes
+back, with no second visit to the app. What the phone will admit decides whether this
+can be honoured at all: `navigator.connection` is Android's, Safari has never shipped
+it, so on an iPhone the connection type is simply unknown. Unknown sends rather than
+blocks - a switch that silently stops everything forever is worse than one that cannot
+be enforced - and the sheet says which of the two you are looking at instead of implying
+a guarantee it cannot make.
+
+**When a photo has no pin, it now says which of four things happened**: the file had GPS
+(pinned), it is a HEIC this phone cannot read but the computer can, it has EXIF but no
+GPS tags because it was taken without a location, or it arrived with no EXIF at all
+because the phone stripped it on the way out of the picker. Those want opposite
+reactions and had all been reported as the same silence.
+
+**Collecting carries on with the app closed.** `collect.py` is one pass - look, sync if
+there is anything new, exit - and `python collect.py --install` registers a Windows
+scheduled task that runs it every 15 minutes. It stands down when the app is open, since
+the app is already watching and two processes draining one inbox is worth avoiding; it
+tells the two apart by whether anything is listening on the app's port. The record of
+what has already been seen lives in the database rather than in memory precisely so the
+two agree.
+
+    python collect.py              one pass, then exit
+    python collect.py --install    every 15 minutes, app open or not
+    python collect.py --remove     stop that
+
 **The computer collects them by itself.** While Photo Map is running it looks in the
 bucket every 60 seconds and syncs when it finds anything - a photo, a favourite, an
 album - so nothing waits for someone to press Sync. Idle it transfers nothing: two

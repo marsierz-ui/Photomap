@@ -583,7 +583,7 @@ started = []
 _real_start = sync.start
 sync.start = lambda: (started.append(1), True)[1]
 # Adopt what is in the bucket now, so only what arrives next counts as new.
-sync._watch_seen = sync._pending_keys(sync.client())
+sync._set_watch_seen(sync._pending_keys(sync.client()))
 try:
     check("an idle bucket does not start a sync", sync._watch_once() is False)
 

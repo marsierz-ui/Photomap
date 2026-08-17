@@ -716,7 +716,6 @@ WATCH_INTERVAL = 60  # seconds
 
 _watch_stop = threading.Event()
 _watch_thread: threading.Thread | None = None
-_watch_seen: set[str] = set()
 
 
 def _pending_keys(bucket) -> set[str]:
@@ -725,19 +724,36 @@ def _pending_keys(bucket) -> set[str]:
     )
 
 
+def _watch_seen() -> set[str]:
+    """What the last look found.
+
+    In the database rather than in memory, because two different processes do
+    this now: the app while it is open, and collect.py from a scheduled task
+    while it is not. Sharing the record is what stops the second one syncing
+    over work the first has already seen.
+    """
+    try:
+        return set(json.loads(db.get_setting("cloud_watch_seen", "[]") or "[]"))
+    except (ValueError, TypeError):
+        return set()
+
+
+def _set_watch_seen(keys: set[str]) -> None:
+    db.set_setting("cloud_watch_seen", json.dumps(sorted(keys)))
+
+
 def _watch_once() -> bool:
     """One look at the bucket. True if it started a sync."""
-    global _watch_seen
     if _state["running"] or not configured():
         return False
     if db.get_setting("cloud_watch_enabled", "1") != "1":
         return False
 
     keys = _pending_keys(client())
-    fresh = keys - _watch_seen
+    fresh = keys - _watch_seen()
     # Forget what has been drained, so the same key arriving again later still
     # counts as new.
-    _watch_seen = keys
+    _set_watch_seen(keys)
     if not fresh:
         return False
     return start()

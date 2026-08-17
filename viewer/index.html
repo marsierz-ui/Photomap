@@ -401,6 +401,10 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
     <button id="addPhotos" class="hidden">+ Add photos</button>
     <span id="upstate" class="chip hidden"></span>
   </div>
+  <label class="small muted hidden" id="wifiRow">
+    <input type="checkbox" id="wifiOnly"> Upload only on Wi-Fi
+  </label>
+  <span class="small muted hidden" id="wifiNote"></span>
   <button id="filterDone">Done</button>
 </footer>
 
@@ -540,6 +544,77 @@ let picking = null;              // {done, total} while a picked batch is read
 const DB_NAME = 'photomap-uploads';
 const DB_VERSION = 2;
 let updb = null;
+
+// ---------------------------------------------------------------- metered data
+//
+// Photos are the one thing here big enough to matter on a phone plan, so they
+// wait for Wi-Fi by default. What the phone will tell us decides whether that
+// can be honoured: navigator.connection is Android's, and Safari has never
+// shipped it, so on an iPhone the answer is simply unknown. Unknown is treated
+// as "send" rather than "never send" - a switch that silently stops everything
+// forever is worse than one that cannot be enforced - and the sheet says which
+// of the two you are looking at instead of implying a guarantee it cannot make.
+
+const UPLOAD_PREFS = 'photomap-upload-v1';
+let wifiOnly = true;
+
+const netInfo = () =>
+  navigator.connection || navigator.mozConnection || navigator.webkitConnection || null;
+
+/** true on Wi-Fi, false on something metered, null when the phone will not say. */
+function onWifi() {
+  const net = netInfo();
+  if (!net) return null;
+  // Data Saver is the same request in different words, whatever the link is.
+  if (net.saveData) return false;
+  const kind = net.type;
+  if (typeof kind !== 'string' || !kind) return null;
+  if (kind === 'wifi' || kind === 'ethernet') return true;
+  if (kind === 'cellular') return false;
+  // bluetooth, wimax, other, unknown, none: not a claim either way.
+  return null;
+}
+
+const meteredHold = () => wifiOnly && onWifi() === false;
+
+function loadUploadPrefs() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(UPLOAD_PREFS) || 'null');
+    if (saved && typeof saved.wifiOnly === 'boolean') wifiOnly = saved.wifiOnly;
+  } catch {
+    /* a stored preference is not worth interrupting anyone over */
+  }
+  $('wifiOnly').checked = wifiOnly;
+}
+
+function paintWifi() {
+  const known = onWifi();
+  $('wifiNote').classList.remove('hidden');
+  $('wifiNote').textContent = known === null
+    ? 'This phone does not report whether it is on Wi-Fi, so this cannot be enforced here.'
+    : (known ? 'On Wi-Fi now.' : 'On mobile data now - photos wait.');
+}
+
+$('wifiOnly').onchange = (e) => {
+  wifiOnly = e.target.checked;
+  try {
+    localStorage.setItem(UPLOAD_PREFS, JSON.stringify({ wifiOnly }));
+  } catch {
+    /* private mode refuses to write; the choice still holds for this session */
+  }
+  paintWifi();
+  paintUploads();
+  if (!meteredHold()) drainUploads().then((s) => reportDrain(s, null));
+};
+
+// Moving from mobile data onto Wi-Fi is exactly when a held queue should go.
+if (netInfo() && netInfo().addEventListener) {
+  netInfo().addEventListener('change', () => {
+    paintWifi();
+    paintUploads();
+    if (!meteredHold()) drainUploads().then((s) => reportDrain(s, null));
+  });
+}
 
 // Fingerprints of every photo this device has handed to the bucket. Deliberately
 // kept apart from the records above: those are dropped the moment the computer
@@ -694,6 +769,25 @@ async function downscale(file) {
   }
 }
 
+// Why a picked photo has no coordinates on it, which is four different problems
+// wearing the same silence, and the reason "it cannot read the location" has been
+// so hard to pin down. Counted per batch and reported, so the answer comes from
+// the phone that actually has the files rather than from guesswork.
+const LOC_WHY = {
+  ok: 'located',
+  heic: 'HEIC - this phone cannot read those here, your computer does it when it files them',
+  nogps: 'the file has EXIF but no GPS tags - the photo was taken without a location',
+  stripped: 'the file arrived with no EXIF at all - the phone removed it when handing it over',
+};
+
+function locKind(file, read) {
+  if (read && read.lat != null) return 'ok';
+  const heicish = /\.(heic|heif|avif)$/i.test(file.name)
+    || /heic|heif|avif/i.test(file.type || '');
+  if (heicish) return 'heic';
+  return read ? 'nogps' : 'stripped';
+}
+
 /** Read one picked file into the local queue. Nothing is sent yet.
  *
  *  Null when the bytes turn out to be ones this device has already handed over.
@@ -704,7 +798,8 @@ async function downscale(file) {
 async function stage(file) {
   const digest = await sha256Hex(await file.arrayBuffer());
   if (sent.has(hashKey(digest))) return null;
-  const meta = (typeof readExif === 'function' ? await readExif(file) : null) || {};
+  const read = (typeof readExif === 'function' ? await readExif(file) : null);
+  const meta = read || {};
   const proxy = await downscale(file);
   if (!proxy) throw new Error('could not read that photo');
   const ext = (file.name.match(/\.[A-Za-z0-9]+$/) || ['.jpg'])[0].toLowerCase();
@@ -720,6 +815,10 @@ async function stage(file) {
     taken_ts: meta.taken_ts ?? null,
     lat: meta.lat ?? null,
     lon: meta.lon ?? null,
+    // Why this photo has no position, which is otherwise a silence with four
+    // very different causes and four different answers. Recorded here because
+    // this is the only place that ever sees the original file.
+    loc: locKind(file, read),
     proxy,
     full: file,
     iid: null,
@@ -749,6 +848,9 @@ function paintUploads() {
     chip.className = 'chip warn';
   } else if (uploadsFull) {
     chip.textContent = 'Uploads paused - sync your computer';
+    chip.className = 'chip warn';
+  } else if (queued && meteredHold()) {
+    chip.textContent = `${fmtNum(queued)} waiting for Wi-Fi`;
     chip.className = 'chip warn';
   } else if (queued) {
     chip.textContent = `Uploading ${fmtNum(queued)}…`;
@@ -987,6 +1089,9 @@ function whyFailed(res) {
 async function drainUploads() {
   const summary = { sent:0, failed:0, stopped:false, fatal:null, reasons:new Map() };
   if (drainUploads.busy || !navigator.onLine) return summary;
+  // Held rather than failed: nothing is wrong with these photos or with the
+  // bucket, they are simply not going out over a phone plan.
+  if (meteredHold()) { summary.held = true; return summary; }
   drainUploads.busy = true;
 
   const note = (rec, reason) => {
@@ -1145,6 +1250,13 @@ $('addPhotos').onclick = async () => {
     toast(`Still reading the last batch - ${fmtNum(picking.total - picking.done)} to go`);
     return;
   }
+  // Reading a whole camera roll that cannot then be sent fills the phone with
+  // proxies and tells you nothing, so this is said before the picker opens.
+  if (meteredHold()) {
+    toast('On mobile data - photos are only uploaded on Wi-Fi. Change that in Settings, '
+          + 'or add them once you are back on Wi-Fi.', true);
+    return;
+  }
   const state = await importState();
   if (state && state.full) { announceFull(state.pending, state.quota); return; }
   // Warned early rather than at the moment of refusal, so a long batch does not
@@ -1233,9 +1345,10 @@ async function addFiles(files) {
       added += 1;
       paintUploads();
       if (queued() >= STAGE_AHEAD) {
-        fold(await drainUploads());
+        const pass = fold(await drainUploads());
         // Something is wrong with every upload, not with this photo. Reading on
         // would fill the phone with photos that have nowhere to go.
+        if (pass.held) fatal = 'on mobile data - the rest go when you are back on Wi-Fi';
         if (fatal) { left = files.length - i - 1; break; }
         if (queued() >= STAGE_AHEAD) { left = files.length - i - 1; break; }
       }
@@ -1264,10 +1377,16 @@ async function addFiles(files) {
   if (left) lines.push(`${fmtNum(left)} not reached - add them again once these have gone`);
   // The question this answers is "why is it not on the map?", and it is asked
   // the moment the panel appears rather than later.
-  const noPin = unplaced();
-  if (sent && noPin) {
-    lines.push(`${fmtNum(noPin)} have no location in the file itself, so they are not `
-      + 'pinned yet - your computer reads it when it files them');
+  // One line per reason rather than one number for all of them: "no location"
+  // covers a HEIC the computer will sort out and a photo that never had one,
+  // and those want opposite reactions.
+  if (added) {
+    const why = new Map();
+    uploads.forEach((u) => {
+      if (!u.loc || u.loc === 'ok') return;
+      why.set(u.loc, (why.get(u.loc) || 0) + 1);
+    });
+    why.forEach((n, kind) => lines.push(`${fmtNum(n)} without a pin - ${LOC_WHY[kind] || kind}`));
   }
   if (sent) lines.push('They join the library the next time Photo Map syncs on your computer.');
 
@@ -2939,7 +3058,12 @@ fetch('manifest.json', { cache:'no-cache' })
     fillAlbums();
     // Adding photos is off unless this snapshot came from a machine that opted
     // in, so an older snapshot simply has no button.
-    if (m.allow_import) $('addPhotos').classList.remove('hidden');
+    if (m.allow_import) {
+      $('addPhotos').classList.remove('hidden');
+      $('wifiRow').classList.remove('hidden');
+      loadUploadPrefs();
+      paintWifi();
+    }
     // Never fatal: a phone that refuses IndexedDB (private mode, storage
     // denied) still gets the whole viewer, just without adding photos.
     try {
