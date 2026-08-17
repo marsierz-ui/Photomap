@@ -47,7 +47,7 @@ function entryInline(little, tag, type, count, raw) {
  * do not fit in four bytes.
  */
 function buildJpeg({ little = true, lat, lon, latRef = 'N', lonRef = 'E', dtOriginal,
-                     dtDigitized, dateTime } = {}) {
+                     dtDigitized, dateTime, negLon = false } = {}) {
   const heap = [];
   let heapAt = 0;
   const push = (bytes) => {
@@ -79,7 +79,11 @@ function buildJpeg({ little = true, lat, lon, latRef = 'N', lonRef = 'E', dtOrig
     gps.push(['ref1', 2, 2, new TextEncoder().encode(`${latRef}\0`), true]);
     gps.push(['lat', 5, 3, rational(dms(Math.abs(lat)))]);
     gps.push(['ref3', 2, 2, new TextEncoder().encode(`${lonRef}\0`), true]);
-    gps.push(['lon', 5, 3, rational(dms(Math.abs(lon)))]);
+    // negLon writes the degree as a two's-complement negative into the unsigned
+    // field, which is what an encoder that thinks in signed decimals produces.
+    const lonDms = dms(Math.abs(lon));
+    if (negLon) lonDms[0] = [(lonDms[0][0] * -1) >>> 0, 1];
+    gps.push(['lon', 5, 3, rational(lonDms)]);
   }
   const sub = [];
   if (dtOriginal) sub.push([36867, 2, dtOriginal.length + 1, str(dtOriginal)]);
@@ -222,17 +226,28 @@ check('HEIC declines cleanly rather than guessing', parseExifBuffer(heic.buffer)
 // out of a picker. Both have no coordinates; only the second has no block, and
 // only the second is worth telling anyone to do something about.
 const located = parseExifBuffer(buildJpeg({ lat: 51.5074, lon: 0.1278 }));
-check('a located photo reports its GPS block', located?.gps === true);
+check('a located photo reports its block as ok', located?.gps === 'ok');
 const noBlock = parseExifBuffer(buildJpeg({ dtOriginal: '2021:06:04 15:00:00' }));
-check('EXIF with no GPS block at all says so', noBlock !== null && noBlock.gps === false,
+check('EXIF with no GPS block at all says absent', noBlock?.gps === 'absent',
       JSON.stringify(noBlock));
 check('and that is not confused with having no coordinates',
       noBlock?.lat === null && located?.lat !== null);
-// Null island is a missing fix written into a block that IS present, which is
-// exactly the case that must not look like a picker stripping the location.
-const nullIsland = parseExifBuffer(buildJpeg({ lat: 0, lon: 0 }));
-check('a rejected fix still counts as a block being there',
-      nullIsland?.lat === null && nullIsland?.gps === true, JSON.stringify(nullIsland));
+// Zeros in a block that is present are the signature of a location blanked in
+// place - which is what Android does on the way to an app - and must never be
+// reported as the same thing as a block that was never written.
+const zeroed = parseExifBuffer(buildJpeg({ lat: 0, lon: 0 }));
+check('a blanked block is called out as zeroed',
+      zeroed?.lat === null && zeroed?.gps === 'zeroed', JSON.stringify(zeroed));
+
+// A west longitude written as a negative degree. The field is unsigned, so it
+// arrives just under 2^32 and used to sink the whole fix as out of range - both
+// coordinates, since one bad number fails the pair.
+const negative = parseExifBuffer(buildJpeg({ lat: 53.3549, lon: 6.2662, lonRef: 'W', negLon: true }));
+check('a negative degree still reads as its hemisphere',
+      negative?.lat !== null && Math.abs(negative.lon + 6.2662) < 1e-3,
+      JSON.stringify(negative));
+check('and the latitude beside it survives',
+      negative !== null && Math.abs(negative.lat - 53.3549) < 1e-3, JSON.stringify(negative));
 
 console.log();
 const failed = results.filter((x) => !x.ok);

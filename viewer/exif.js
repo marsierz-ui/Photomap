@@ -101,12 +101,21 @@ function readIfd(view, tiff, offset, little) {
   return out;
 }
 
-/** deg + min/60 + sec/3600, as photometa._to_degrees does it. */
+/** deg + min/60 + sec/3600, as photometa._to_degrees does it.
+ *
+ *  Returned as a magnitude, with the hemisphere left to the Ref tags, which is
+ *  what the format intends: a GPS rational is unsigned and "west" lives in
+ *  GPSLongitudeRef, not in a minus sign. Some encoders write a negative degree
+ *  anyway, and since the field is unsigned that arrives as a number just under
+ *  2^32 - which sails past every range check as nonsense rather than as the
+ *  west it meant. Reading it back as signed costs nothing for a correct file,
+ *  where no component is ever anywhere near that big. */
 function toDegrees(value) {
   if (!Array.isArray(value) || value.length < 3) return null;
-  const [d, m, s] = value;
+  const signed = (n) => (n >= 2147483648 ? n - 4294967296 : n);
+  const [d, m, s] = value.map(signed);
   if (![d, m, s].every((n) => typeof n === 'number' && Number.isFinite(n))) return null;
-  return d + m / 60 + s / 3600;
+  return Math.abs(d) + Math.abs(m) / 60 + Math.abs(s) / 3600;
 }
 
 /**
@@ -162,19 +171,31 @@ function parseExifBuffer(buffer) {
   const sub = ifd0[EXIF_IFD] ? readIfd(view, tiff, tiff + ifd0[EXIF_IFD], little) : {};
   const gps = ifd0[GPS_IFD] ? readIfd(view, tiff, tiff + ifd0[GPS_IFD], little) : {};
 
-  // `gps` is not a value, it is evidence: whether the file carries a GPS block
-  // at all. A photo taken without a fix has the block with nothing usable in it;
-  // a photo whose location was removed on the way out of a picker has no block.
-  // Both read as "no coordinates", and they want completely different answers,
-  // so the difference is reported rather than flattened.
-  const out = { lat: null, lon: null, altitude: null, taken_ts: null, gps: false };
+  // `gps` is not a value, it is evidence about why there is no value:
+  //
+  //   absent      no GPS block at all - nothing ever wrote one
+  //   zeroed      the block is there and its coordinates are exactly 0/0
+  //   unreadable  the block is there and the coordinates would not parse
+  //   ok          real coordinates, whatever the sanity checks then make of them
+  //
+  // `zeroed` is the one that names a cause. A camera does not write zeros, and a
+  // photo taken without a fix does not get a block; zeros in place are what a
+  // system writes when it blanks a location but must leave every byte offset in
+  // the file where it was. That is exactly what Android does to a photo handed to
+  // an app that may not see locations, and it is indistinguishable from "no fix"
+  // unless the difference is looked for.
+  const out = { lat: null, lon: null, altitude: null, taken_ts: null, gps: 'absent' };
   out.taken_ts = parseDT(sub[TAG_DT_ORIGINAL])
     ?? parseDT(sub[TAG_DT_DIGITIZED])
     ?? parseDT(ifd0[TAG_DATETIME]);
 
-  out.gps = Object.keys(gps).length > 0;
   let lat = toDegrees(gps[2]);
   let lon = toDegrees(gps[4]);
+  if (!Object.keys(gps).length) out.gps = 'absent';
+  else if (lat === null || lon === null) out.gps = 'unreadable';
+  else if (lat === 0 && lon === 0) out.gps = 'zeroed';
+  else out.gps = 'ok';
+
   if (lat !== null && lon !== null) {
     if (String(gps[1] || 'N').trim().toUpperCase().startsWith('S')) lat = -lat;
     if (String(gps[3] || 'E').trim().toUpperCase().startsWith('W')) lon = -lon;

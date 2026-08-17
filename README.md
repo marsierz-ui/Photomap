@@ -520,23 +520,37 @@ this phone cannot read but the computer can; it has a GPS block with no fix in i
 was taken without a location; it has EXIF but *no GPS block at all*; or it has no EXIF
 whatsoever.
 
-The third of those is the one worth knowing about, and the distinction is what makes it
-diagnosable. A camera does not write a file with the GPS block missing - a photo taken
-without a fix still has the block, empty - so a *missing* block means something removed
-it in transit. That something is the phone's own photo picker: **Android redacts the
-location from every photo it hands an app that cannot ask for it**, which includes the
-browser. The file on the phone still has its coordinates; the copy the page receives
-does not, and no amount of reading it harder will find them.
-
-So there are two ways in. **+ Add photos** is the photo picker: convenient, and on
-Android the location is stripped. **+ From files** is the same flow through an input with
-no `accept` at all, which sends the chooser to the file browser instead - a photo read as
-a document arrives whole. Which one your phone needs is not a guess any more: add a few
-either way and the result panel says whether they came through located.
+The distinction that matters is between a block that is **absent** and one that is
+**zeroed**, because only one of them names a cause. A camera does not write zeros, and a
+photo taken without a fix does not get a block at all - so coordinates of exactly 0/0 in
+a block that is present are what a system writes when it blanks a location while leaving
+every byte offset in the file where it was. That is what **Android does to a photo handed
+to an app that cannot ask for locations**, the browser included. The file on the phone
+keeps its coordinates; the copy the page is given has them overwritten, and reading it
+harder will never find them. It survives both the photo picker and the file browser,
+since both go through the same layer.
 
 `viewer/exif.js` was measured against 40 real photos out of this library - Samsung,
-HONOR, FOSSiBOT - and agreed with Pillow on every one to within 1e-4 degrees, which is
-how the picker rather than the parser was identified as the thing losing them.
+HONOR, FOSSiBOT - and agreed with Pillow on every one to within 1e-4 degrees. The reader
+was never the problem, which is what pointed at the copy instead.
+
+**A .zip is the way past it.** An archive is not an image, so nothing on the path
+inspects it or rewrites anything inside: zip the photos with any file manager, add the
+.zip with **+ From files or .zip**, and they arrive exactly as they sit on the phone.
+The archive is unpacked in the browser, straight from the central directory, so a large
+one costs one small read rather than a pass over the whole thing - and stored entries,
+which is what a zip of JPEGs almost always holds since they do not compress, are handed
+on as slices of the file the browser already has rather than as copies. Deflated entries
+go through `DecompressionStream`. Both were tested against real located photos out of
+this library and came back byte-exact with their coordinates intact.
+
+One reader fix came out of the same hunt. A GPS rational is unsigned and the hemisphere
+belongs to the Ref tag, but some encoders write a negative degree for a west longitude
+anyway, which arrives as a number just under 2**32 - not a coordinate in the wrong place
+but nonsense large enough to fail the range check and take the latitude down with it, so
+the whole fix vanished. Both readers now interpret such a component as signed and treat
+the result as a magnitude, letting the Ref decide the sign. A correct file is unaffected:
+no real component comes near 2**31.
 
 **Collecting carries on with the app closed.** `collect.py` is one pass - look, sync if
 there is anything new, exit - and `python collect.py --install` registers a Windows

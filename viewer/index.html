@@ -406,7 +406,7 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
        Add button and the upload state used to sit. -->
   <div class="addrow" id="addrow">
     <button id="addPhotos" class="hidden">+ Add photos</button>
-    <button id="addFiles" class="hidden" title="Browse files instead of the photo picker - keeps the location on the photo">+ From files</button>
+    <button id="addFiles" class="hidden" title="Browse files, or add a .zip of photos - the way past a phone that blanks the location">+ From files or .zip</button>
     <span id="upstate" class="chip hidden"></span>
   </div>
   <label class="small muted hidden" id="wifiRow">
@@ -784,10 +784,13 @@ async function downscale(file) {
 const LOC_WHY = {
   ok: 'located',
   heic: 'HEIC - this phone cannot read those here, your computer does it when it files them',
-  nogps: 'the file has a GPS block with no fix in it - taken without a location',
-  redacted: 'the picker removed the location before the app saw it - use "+ From files" '
-    + 'and browse to your photos instead, which hands them over whole',
-  stripped: 'the file arrived with no EXIF at all - the picker stripped it',
+  blanked: 'the coordinates were blanked to 0 on the way out of the phone. The file on '
+    + 'the phone still has them - put the photos in a .zip with a file manager and add '
+    + 'the .zip, which is not an image and so is handed over untouched',
+  removed: 'the GPS block was taken out of the copy the app was given',
+  unreadable: 'the GPS block is there but its coordinates would not parse',
+  rejected: 'the coordinates are outside the possible range and were refused',
+  stripped: 'the file arrived with no EXIF at all',
 };
 
 /** Which of four different silences this photo is.
@@ -804,7 +807,8 @@ function locKind(file, read) {
     || /heic|heif|avif/i.test(file.type || '');
   if (heicish) return 'heic';
   if (!read) return 'stripped';
-  return read.gps ? 'nogps' : 'redacted';
+  return { zeroed:'blanked', absent:'removed', unreadable:'unreadable', ok:'rejected' }[read.gps]
+    || 'unreadable';
 }
 
 /** Read one picked file into the local queue. Nothing is sent yet.
@@ -1293,6 +1297,114 @@ $('addPhotos').onclick = async () => {
   $('picker').click();
 };
 
+// --------------------------------------------------------------- zip archives
+//
+// The way past a phone that blanks coordinates on the way out. A .zip is not an
+// image, so nothing along the path inspects it or rewrites anything inside it -
+// the photos come through exactly as they sit on the phone, EXIF and all. Zip
+// them with any file manager, add the .zip, and it is unpacked here.
+//
+// Stored entries, which is what a zip of JPEGs almost always contains since they
+// do not compress, cost nothing to unpack: the entry is a slice of the file the
+// browser already has, not a copy. Deflated ones go through DecompressionStream,
+// which is the platform's own inflate.
+
+const ZIP_EOCD = 0x06054b50;
+const ZIP_ENTRY = 0x02014b50;
+const ZIP_LOCAL = 0x04034b50;
+const IMAGE_IN_ZIP = /\.(jpe?g|png|tiff?|webp|bmp|gif|heic|heif|avif)$/i;
+
+/** DOS date and time, which is what a zip records, as an epoch. */
+function dosStamp(date, time) {
+  if (!date) return Date.now();
+  return Date.UTC(1980 + (date >> 9), ((date >> 5) & 15) - 1 || 0, (date & 31) || 1,
+    time >> 11, (time >> 5) & 63, (time & 31) * 2);
+}
+
+/** The central directory, which is the only part of a zip worth reading to find
+ *  out what is in one. Read from the end, so a 3GB archive costs one small
+ *  slice rather than a pass over the whole thing. */
+async function zipEntries(file) {
+  const tailLen = Math.min(file.size, 66000);
+  const tail = new DataView(await file.slice(file.size - tailLen).arrayBuffer());
+  let at = -1;
+  for (let i = tail.byteLength - 22; i >= 0; i -= 1) {
+    if (tail.getUint32(i, true) === ZIP_EOCD) { at = i; break; }
+  }
+  if (at < 0) throw new Error('not a zip archive');
+  const count = tail.getUint16(at + 10, true);
+  const size = tail.getUint32(at + 12, true);
+  const offset = tail.getUint32(at + 16, true);
+  if (offset === 0xFFFFFFFF || count === 0xFFFF) {
+    throw new Error('zip64 archives are not supported here - zip in smaller batches');
+  }
+
+  const dir = new DataView(await file.slice(offset, offset + size).arrayBuffer());
+  const out = [];
+  let p = 0;
+  for (let i = 0; i < count && p + 46 <= dir.byteLength; i += 1) {
+    if (dir.getUint32(p, true) !== ZIP_ENTRY) break;
+    const nameLen = dir.getUint16(p + 28, true);
+    const entry = {
+      method: dir.getUint16(p + 10, true),
+      time: dir.getUint16(p + 12, true),
+      date: dir.getUint16(p + 14, true),
+      packed: dir.getUint32(p + 20, true),
+      local: dir.getUint32(p + 42, true),
+      name: new TextDecoder().decode(
+        new Uint8Array(dir.buffer, dir.byteOffset + p + 46, nameLen)),
+    };
+    out.push(entry);
+    p += 46 + nameLen + dir.getUint16(p + 30, true) + dir.getUint16(p + 32, true);
+  }
+  return out;
+}
+
+/** One entry as a File, named as it was inside the archive. */
+async function zipFile(archive, entry) {
+  const head = new DataView(await archive.slice(entry.local, entry.local + 30).arrayBuffer());
+  if (head.getUint32(0, true) !== ZIP_LOCAL) throw new Error('damaged entry');
+  // The local header repeats the name and extra fields, and its own lengths are
+  // the ones that count: some writers pad the extra field differently here.
+  const start = entry.local + 30 + head.getUint16(26, true) + head.getUint16(28, true);
+  const raw = archive.slice(start, start + entry.packed);
+  let body = raw;
+  if (entry.method === 8) {
+    body = await new Response(raw.stream().pipeThrough(new DecompressionStream('deflate-raw'))).blob();
+  } else if (entry.method !== 0) {
+    throw new Error(`unsupported compression (method ${entry.method})`);
+  }
+  const name = entry.name.split('/').pop();
+  return new File([body], name, { lastModified: dosStamp(entry.date, entry.time) });
+}
+
+/** Replace any archive in a selection with the photos inside it. */
+async function expandZips(files) {
+  const out = [];
+  for (const file of files) {
+    if (!/\.zip$/i.test(file.name)) { out.push(file); continue; }
+    try {
+      const entries = (await zipEntries(file)).filter((e) =>
+        !e.name.endsWith('/') && !e.name.startsWith('__MACOSX/') && IMAGE_IN_ZIP.test(e.name));
+      if (!entries.length) {
+        toast(`${file.name} has no photos in it`, true);
+        continue;
+      }
+      step(`Opening ${file.name}…`, 0, 0);
+      for (const entry of entries) {
+        try {
+          out.push(await zipFile(file, entry));
+        } catch (err) {
+          toast(`${entry.name}: ${err.message}`, true);
+        }
+      }
+    } catch (err) {
+      toast(`Could not open ${file.name}: ${err.message}`, true);
+    }
+  }
+  return out;
+}
+
 $('picker').onchange = async (e) => {
   const files = [...e.target.files];
   e.target.value = '';
@@ -1330,8 +1442,21 @@ $('pickerFiles').onchange = async (e) => {
  *  instead of filling the phone with photos that have nowhere to go. What was
  *  not reached is reported, and picking again costs nothing, since by then
  *  everything sent is skipped on sight. */
-async function addFiles(files) {
-  if (!files.length) return;
+async function addFiles(chosen) {
+  if (!chosen.length) return;
+  // Unpacked here rather than at the picker, so there is no way into this that
+  // skips it: an archive reaching the staging loop would be read as a photo,
+  // fail to decode, and be reported as an unreadable image.
+  let files = chosen;
+  if (chosen.some((f) => /\.zip$/i.test(f.name))) {
+    startProgress('Opening archive…');
+    try {
+      files = await expandZips(chosen);
+    } finally {
+      endProgress();
+    }
+    if (!files.length) return;
+  }
   const queued = () => uploads.filter((u) => u.state === 'queued' || u.state === 'sent').length;
   let added = 0;
   let skipped = 0;

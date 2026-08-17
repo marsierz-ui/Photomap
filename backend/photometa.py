@@ -77,11 +77,26 @@ def wall_ts(dt: datetime.datetime) -> int:
 
 
 def _to_degrees(value) -> float | None:
+    """Degrees, minutes and seconds as a magnitude - the hemisphere is the Ref
+    tag's job, which is what the format intends.
+
+    A GPS rational is unsigned, and an encoder that writes a negative degree for
+    a west longitude leaves a number just under 2**32 in the field. Read plainly
+    that is not a coordinate at all, it is nonsense large enough to fail the
+    range check and take the latitude down with it, so the fix disappears
+    entirely rather than landing in the wrong hemisphere. Reading it back as
+    signed costs a correct file nothing: no real component comes near 2**31.
+
+    Mirrored in viewer/exif.js - see the note at the top of that file.
+    """
+    def signed(number: float) -> float:
+        return number - 4294967296.0 if number >= 2147483648.0 else number
+
     try:
-        deg, minute, sec = value
-        return float(deg) + float(minute) / 60.0 + float(sec) / 3600.0
+        deg, minute, sec = (signed(float(part)) for part in value)
     except (TypeError, ValueError, ZeroDivisionError):
         return None
+    return abs(deg) + abs(minute) / 60.0 + abs(sec) / 3600.0
 
 
 def _gps(gps_ifd: dict) -> tuple[float | None, float | None, float | None]:
