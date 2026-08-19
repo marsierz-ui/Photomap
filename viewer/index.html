@@ -78,6 +78,13 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
 .box-select { position:absolute; z-index:800; border:1px dashed var(--accent);
               background:rgba(74,163,255,.15); pointer-events:none; }
 .selecting, .selecting .leaflet-grab { cursor:crosshair; }
+/* Selecting an area of the gallery. touch-action goes to none only while it is
+   armed: a drag over the grid is how you scroll it the rest of the time, and
+   taking that away permanently to support an occasional gesture would be a poor
+   trade on the device where scrolling is the whole interface. */
+.gridctl { position:absolute; top:10px; right:44px; z-index:640; }
+#gallery.picking { touch-action:none; cursor:crosshair; }
+#gallery.picking .tile { cursor:crosshair; }
 .globe-tip { position:absolute; top:0; left:0; z-index:600; pointer-events:none;
              background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
              padding:6px; box-shadow:0 6px 18px rgba(0,0,0,.55); }
@@ -282,7 +289,7 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
   .bar { padding:0; border-bottom:0; }
   #chips { position:fixed; top:calc(var(--top) + 8px); left:50%;
            transform:translateX(-50%); z-index:1500; }
-  .controls { top:calc(10px + var(--top)); }
+  .controls, .gridctl { top:calc(10px + var(--top)); }
   .leaflet-top, .maplibregl-ctrl-top-left { margin-top:var(--top); }
   .rail { top:var(--top); }
   #gallery { padding-top:calc(8px + var(--top)); }
@@ -360,6 +367,9 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
   <div id="insights" class="hidden"></div>
   <div id="globe" class="hidden"></div>
   <div id="rail" class="rail hidden"></div>
+  <div class="gridctl hidden" id="gridCtl">
+    <button id="gridSelect" title="Drag a box across the photos to select them">Select area</button>
+  </div>
   <div id="railBubble" class="railbubble hidden"></div>
   <div class="controls" id="mapControls">
     <div class="seg" id="mode">
@@ -2488,6 +2498,7 @@ $('gallery').addEventListener('scroll', () => {
 });
 $('gallery').addEventListener('load', (e) => e.target.classList.add('on'), true);
 $('gallery').addEventListener('click', (e) => {
+  if (justBoxed) return;
   const tile = e.target.closest('.tile');
   if (!tile) return;
   const id = Number(tile.dataset.id);
@@ -2499,6 +2510,186 @@ $('gallery').addEventListener('click', (e) => {
   }
   openPhoto(Number(tile.dataset.i));
 });
+
+// ------------------------------------------------- selecting an area of grid
+//
+// The rectangle is answered with arithmetic rather than by asking the document
+// what is inside it, and that is not an optimisation: the grid is virtualised,
+// so only the screenful under the drag exists as elements. A tile's box is its
+// position times the stride whether or not that tile was ever rendered, which is
+// what lets one gesture take in thousands of photos - the same property that
+// makes the date rail possible.
+
+let gridArmed = false;
+let justBoxed = false;   // a click is arriving from a drag that was just handled
+
+/** Every position in galleryIdx whose tile overlaps a rectangle, given in
+ *  #gsizer's own coordinates. */
+function tilesInBox(ax, ay, bx, by) {
+  const left = Math.min(ax, bx);
+  const right = Math.max(ax, bx);
+  const top = Math.min(ay, by);
+  const bottom = Math.max(ay, by);
+  const rows = Math.ceil(galleryIdx.length / geo.cols);
+  const firstRow = Math.max(0, Math.floor(top / geo.stride));
+  const lastRow = Math.min(rows - 1, Math.floor(bottom / geo.stride));
+  const out = [];
+  for (let row = firstRow; row <= lastRow; row += 1) {
+    // A tile is tileW across in a stride-wide cell, so the gap after it is not
+    // part of it: a box that lands only in the gutter selects nothing.
+    const ty = row * geo.stride;
+    if (ty > bottom || ty + geo.tileW < top) continue;
+    const firstCol = Math.max(0, Math.floor(left / geo.stride));
+    const lastCol = Math.min(geo.cols - 1, Math.floor(right / geo.stride));
+    for (let col = firstCol; col <= lastCol; col += 1) {
+      const tx = col * geo.stride;
+      if (tx > right || tx + geo.tileW < left) continue;
+      const k = row * geo.cols + col;
+      if (k < galleryIdx.length) out.push(k);
+    }
+  }
+  return out;
+}
+
+/** Repaint the tiles that happen to be on screen. The selection itself is a set
+ *  of ids, so everything off screen is already correct and gets its class when
+ *  it is next built. */
+function paintTileSelection() {
+  liveTiles.forEach((node, k) => {
+    node.classList.toggle('sel', selection.has(M.ids[galleryIdx[k]]));
+  });
+}
+
+function armGrid(on) {
+  gridArmed = on;
+  $('gridSelect').classList.toggle('active', on);
+  $('gallery').classList.toggle('picking', on);
+}
+
+function wireGridSelect() {
+  const g = $('gallery');
+  const sizer = $('gsizer');
+  let from = null;
+  let box = null;
+  let pointer = null;
+  let client = null;
+  let scrolling = null;
+
+  const local = () => {
+    const r = sizer.getBoundingClientRect();
+    return { x: client.x - r.left, y: client.y - r.top };
+  };
+
+  const drawBox = () => {
+    const now = local();
+    box.style.left = `${Math.min(from.x, now.x)}px`;
+    box.style.top = `${Math.min(from.y, now.y)}px`;
+    box.style.width = `${Math.abs(now.x - from.x)}px`;
+    box.style.height = `${Math.abs(now.y - from.y)}px`;
+  };
+
+  /** Dragging to the edge keeps going. Without this a gesture can only ever
+   *  reach as far as one screenful, which for a grid this tall is most of the
+   *  reason to have it. */
+  const follow = () => {
+    if (from === null) return;
+    const r = g.getBoundingClientRect();
+    const margin = 56;
+    let dy = 0;
+    if (client.y < r.top + margin) dy = -Math.ceil((r.top + margin - client.y) / 3);
+    else if (client.y > r.bottom - margin) dy = Math.ceil((client.y - (r.bottom - margin)) / 3);
+    if (dy) {
+      const before = g.scrollTop;
+      g.scrollTop += dy;
+      if (g.scrollTop !== before) drawBox();
+    }
+    scrolling = requestAnimationFrame(follow);
+  };
+
+  const stopFollowing = () => {
+    if (scrolling !== null) cancelAnimationFrame(scrolling);
+    scrolling = null;
+  };
+
+  g.addEventListener('pointerdown', (e) => {
+    if (view !== 'gallery' || from !== null) return;
+    // Armed by the button, or shift-dragged with a mouse - the same two ways in
+    // that the map offers.
+    if (!gridArmed && !e.shiftKey) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    e.preventDefault();
+    pointer = e.pointerId;
+    client = { x: e.clientX, y: e.clientY };
+    from = local();
+    box = document.createElement('div');
+    box.className = 'box-select';
+    sizer.appendChild(box);
+    try {
+      g.setPointerCapture(pointer);
+    } catch {
+      /* the pointer went away between the event and here */
+    }
+    scrolling = requestAnimationFrame(follow);
+  });
+
+  g.addEventListener('pointermove', (e) => {
+    if (from === null || e.pointerId !== pointer) return;
+    e.preventDefault();
+    client = { x: e.clientX, y: e.clientY };
+    drawBox();
+  });
+
+  const finish = (e) => {
+    if (from === null || (e && e.pointerId !== pointer)) return;
+    stopFollowing();
+    // A pointer sequence still ends in a click on whatever was underneath, and
+    // preventDefault on pointerdown does not reliably stop it for a mouse. The
+    // gallery's own click handler checks this before opening anything.
+    justBoxed = true;
+    setTimeout(() => { justBoxed = false; }, 0);
+    const start = from;
+    const end = local();
+    from = null;
+    box.remove();
+    box = null;
+    try {
+      g.releasePointerCapture(pointer);
+    } catch {
+      /* already released */
+    }
+    if (gridArmed) armGrid(false);
+
+    // Barely moved: that was a tap, and a tap on a photo in this mode is the
+    // one-at-a-time selection it would have been anyway.
+    if (Math.abs(end.x - start.x) < 6 && Math.abs(end.y - start.y) < 6) {
+      const [k] = tilesInBox(end.x, end.y, end.x, end.y);
+      if (k !== undefined) {
+        const id = M.ids[galleryIdx[k]];
+        if (selection.has(id)) selection.delete(id); else selection.add(id);
+        paintTileSelection();
+        paintSel();
+      }
+      return;
+    }
+
+    const hits = tilesInBox(start.x, start.y, end.x, end.y);
+    if (!hits.length) { toast('No photos in that area'); return; }
+    const before = selection.size;
+    hits.forEach((k) => selection.add(M.ids[galleryIdx[k]]));
+    paintTileSelection();
+    paintSel();
+    const added = selection.size - before;
+    toast(added === hits.length
+      ? `${fmtNum(added)} photos selected`
+      : `${fmtNum(hits.length)} in the box · ${fmtNum(added)} newly selected`);
+  };
+
+  g.addEventListener('pointerup', finish);
+  g.addEventListener('pointercancel', finish);
+}
+wireGridSelect();
+
+$('gridSelect').onclick = () => armGrid(!gridArmed);
 
 function paintSel() {
   $('selbar').classList.toggle('hidden', selection.size === 0);
@@ -2933,6 +3124,7 @@ function setView(name) {
   $('panel').classList.toggle('hidden', name !== 'panel');
   $('insights').classList.toggle('hidden', name !== 'insights');
   $('mapControls').classList.toggle('hidden', name !== 'map');
+  $('gridCtl').classList.toggle('hidden', name !== 'gallery');
   // The globe is its own element rather than a layer, so leaving the map has to
   // put it away explicitly or it stays painted over whatever comes next. The
   // layers go with it: a hidden map is a zero-size container, and leaflet.heat

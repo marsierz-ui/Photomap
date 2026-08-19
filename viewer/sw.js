@@ -30,7 +30,7 @@
 importScripts('./uploadq.js');
 // Bumped when the shell's contents change: activate drops every cache not in
 // KEEP, so an installed app cannot keep serving the previous page offline.
-const SHELL_CACHE = 'photomap-shell-v12';
+const SHELL_CACHE = 'photomap-shell-v13';
 const THUMB_CACHE = 'photomap-thumbs-v1';
 const KEEP = [SHELL_CACHE, THUMB_CACHE];
 

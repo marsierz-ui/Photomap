@@ -392,6 +392,18 @@ drag - a scrub across ten years would otherwise ask for a thumbnail from every m
 crossed - so the window is drawn when you let go. It follows the filters like everything
 else: narrowing to an album or a date range rebuilds the rail around what is left.
 
+**Select area** takes a whole block of photos in one gesture rather than one tap each.
+Press it and drag a box across the grid, or shift-drag with a mouse without pressing
+anything, the same two ways in that the map's box select offers. The rectangle is
+answered by arithmetic, not by asking the document what is inside it, and here that is
+not an optimisation but the only way it can work at all: the grid is virtualised, so only
+the screenful under your finger exists as elements, and a tile's box is its position
+times the stride whether or not it was ever rendered. So a drag that runs off the bottom
+edge keeps scrolling and keeps selecting, and takes in photos that have never been built.
+It adds to the selection rather than replacing it, a drag that barely moves is treated as
+the tap it was, and it disarms itself afterwards - a grid you cannot scroll is a bad
+thing to leave a phone in.
+
 Below 768px the viewer rearranges: the view tabs move to a bottom bar within thumb
 reach, filters slide up as a sheet over the map (so the map keeps redrawing behind them
 while you drag the time range), and the delete confirmation goes edge to edge. The top
