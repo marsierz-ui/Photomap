@@ -183,8 +183,23 @@ it follows you to the phone, and mirrored into `localStorage`, so the page can s
 with it - a black map under a white UI reads as a bug.
 
 **Timeline** - histogram across the bottom, always live. Bright bars are photos with
-GPS, dim bars are the rest. Drag to select a date range and everything else filters to
-it; `▶` sweeps a moving window across the whole library and animates the map.
+GPS, dim bars are the rest. Drag on empty space to select a date range and everything
+else filters to it; `▶` sweeps a moving window across the whole library and animates the
+map.
+
+**The selected window is a thing you can take hold of.** Grab the middle and slide it and
+the same span of time moves somewhere else, keeping its width and stopping at the ends
+rather than crumpling against them; grab either edge and it resizes, the opposite edge
+staying put. The map refilters while you drag rather than when you let go, so moving the
+window across a year is the same sweep `▶` performs, at whatever pace your hand chooses -
+which was the gap, since a moving window was previously something you could only watch.
+The refilter is throttled to about 150ms, since each one re-queries; the canvas itself
+follows the pointer at screen speed, and the exact range is applied once on release. The
+edges are drawn as grips and the cursor says which of the three things a press would do,
+because a gesture nobody knows is there may as well not exist.
+
+Touching the timeline at all stops playback. Dragging while it played used to do nothing
+you could see - the timer simply overwrote the range on its next tick.
 
 **Gallery** - infinite grid, adjustable tile size, five sort orders. Click opens the
 lightbox, ctrl-click toggles selection, shift-click selects a range. The selection bar

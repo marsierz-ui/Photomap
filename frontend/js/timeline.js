@@ -12,19 +12,38 @@ let lastKey = null;
 let hover = null;
 let drag = null;
 let playTimer = null;
+// The range as the hand is holding it, before it has been applied. Drawing from
+// this rather than from the filters is what lets the shading follow a drag at
+// screen speed while the map behind it refilters at its own, slower, pace.
+let preview = null;
+let liveAt = 0;
 
 const PAD = { l: 8, r: 8, t: 8, b: 16 };
+// How near an edge counts as taking hold of it rather than starting a new range.
+const EDGE_PX = 7;
+// A drag refilters at most this often. The map answers from SQLite and drops
+// stale replies by token, so the cost of going faster is wasted queries rather
+// than a wrong picture - but it is still waste. Play moves every 450ms; this is
+// three times livelier, which is about where a drag stops feeling detached.
+const LIVE_MS = 150;
 
 export function initTimeline() {
   new ResizeObserver(draw).observe(canvas);
   // Pointer events so brushing works with a mouse, a finger or a pen alike.
   canvas.addEventListener('pointerdown', (e) => {
-    canvas.setPointerCapture(e.pointerId);
+    // Capture first, but never at the cost of the drag itself: this throws if
+    // the pointer is already gone by the time it is called, and it used to take
+    // onDown down with it - leaving a press that did nothing at all.
+    try {
+      canvas.setPointerCapture(e.pointerId);
+    } catch {
+      /* no capture; the drag still works, it just ends if the pointer leaves */
+    }
     onDown(e);
   });
   canvas.addEventListener('pointermove', onMove);
   canvas.addEventListener('pointerup', onUp);
-  canvas.addEventListener('pointercancel', () => { drag = null; draw(); });
+  canvas.addEventListener('pointercancel', () => { drag = null; preview = null; draw(); });
   canvas.addEventListener('pointerleave', () => { hover = null; draw(); });
   canvas.addEventListener('dblclick', clearRange);
 
@@ -86,9 +105,9 @@ function draw() {
   const barW = Math.max(1, (w * bucketSeconds(bucketName)) / span - 0.5);
 
   // selected range shading
-  const from = state.filters.from ?? domain[0];
-  const to = state.filters.to ?? domain[1];
-  const hasRange = state.filters.from != null || state.filters.to != null;
+  const from = preview ? preview.from : (state.filters.from ?? domain[0]);
+  const to = preview ? preview.to : (state.filters.to ?? domain[1]);
+  const hasRange = preview != null || state.filters.from != null || state.filters.to != null;
   if (hasRange) {
     ctx.fillStyle = 'rgba(0,0,0,.45)';
     ctx.fillRect(PAD.l, PAD.t, Math.max(0, x(from) - PAD.l), h);
@@ -125,7 +144,23 @@ function draw() {
     ctx.fillText(label, tx, PAD.t + h + 12);
   }
 
-  if (drag) {
+  // The edges of a range are drawn as grips. Nothing else says that the window
+  // can be taken hold of and moved, and a control that only responds to a
+  // gesture nobody knows is there may as well not respond.
+  if (hasRange) {
+    const grip = (gx) => {
+      ctx.fillStyle = '#4aa3ff';
+      ctx.fillRect(gx - 1.5, PAD.t, 3, h);
+      ctx.fillRect(gx - 4.5, PAD.t + h / 2 - 9, 9, 18);
+      ctx.fillStyle = '#06121f';
+      ctx.fillRect(gx - 1.5, PAD.t + h / 2 - 5, 1, 10);
+      ctx.fillRect(gx + 0.5, PAD.t + h / 2 - 5, 1, 10);
+    };
+    grip(Math.max(PAD.l + 1, x(from)));
+    grip(Math.min(PAD.l + w - 1, x(to)));
+  }
+
+  if (drag && drag.mode === 'new') {
     ctx.fillStyle = 'rgba(74,163,255,.2)';
     ctx.strokeStyle = '#4aa3ff';
     const [a, b] = drag.a < drag.b ? [drag.a, drag.b] : [drag.b, drag.a];
@@ -160,38 +195,120 @@ function tsAt(clientX) {
   return domain[0] + Math.min(1, Math.max(0, frac)) * (domain[1] - domain[0]);
 }
 
+/** Where a moment sits across the canvas, in the canvas's own pixels. The
+ *  inverse of tsAt, and the thing that lets a pointer be tested against the
+ *  edges of the current range. */
+function xAt(ts) {
+  const rect = canvas.getBoundingClientRect();
+  const w = rect.width - PAD.l - PAD.r;
+  return PAD.l + ((ts - domain[0]) / (domain[1] - domain[0])) * w;
+}
+
+/** Which part of an existing range a pointer is on: an edge, the middle, or
+ *  nothing, in which case the drag starts a new range as it always did. */
+function grabAt(px) {
+  if (state.filters.from == null && state.filters.to == null) return null;
+  const from = state.filters.from ?? domain[0];
+  const to = state.filters.to ?? domain[1];
+  const fx = xAt(from);
+  const tx = xAt(to);
+  let mode = null;
+  if (Math.abs(px - fx) <= EDGE_PX) mode = 'from';
+  else if (Math.abs(px - tx) <= EDGE_PX) mode = 'to';
+  else if (px > fx && px < tx) mode = 'move';
+  return mode ? { mode, from, to } : null;
+}
+
+/** Push the range being dragged out to everything else, but not on every pixel.
+ *  The map re-queries on each one of these. */
+function live() {
+  const now = Date.now();
+  if (!preview || now - liveAt < LIVE_MS) return;
+  liveAt = now;
+  setFilters({ from: Math.floor(preview.from), to: Math.ceil(preview.to) });
+}
+
 function onDown(e) {
   if (!buckets.length) return;
+  // A hand on the timeline takes it off the timer, wherever it landed. Playing
+  // and dragging at once is two things fighting over one range, and the timer
+  // wins every tick - so a range picked during playback was overwritten before
+  // it could be looked at.
+  stopPlay();
   const rect = canvas.getBoundingClientRect();
-  drag = { a: e.clientX - rect.left, b: e.clientX - rect.left, ts: tsAt(e.clientX) };
+  const px = e.clientX - rect.left;
+
+  const hold = grabAt(px);
+  if (hold) {
+    drag = { ...hold, grabTs: tsAt(e.clientX) };
+    preview = { from: hold.from, to: hold.to };
+    hover = null;
+    draw();
+    return;
+  }
+  drag = { mode: 'new', a: px, b: px, ts: tsAt(e.clientX) };
 }
 
 function onMove(e) {
   const rect = canvas.getBoundingClientRect();
-  if (drag) {
+  if (drag && drag.mode === 'new') {
     drag.b = e.clientX - rect.left;
+    hover = null;
+  } else if (drag) {
+    const ts = tsAt(e.clientX);
+    if (drag.mode === 'move') {
+      // The window keeps its width and stops at the ends rather than shrinking
+      // against them - it is the same span of time moved somewhere else.
+      const width = drag.to - drag.from;
+      const from = Math.max(domain[0], Math.min(domain[1] - width, drag.from + (ts - drag.grabTs)));
+      preview = { from, to: from + width };
+    } else if (drag.mode === 'from') {
+      preview = { from: Math.min(ts, drag.to), to: drag.to };
+    } else {
+      preview = { from: drag.from, to: Math.max(ts, drag.from) };
+    }
+    hover = null;
+    live();
   } else if (buckets.length) {
+    const px = e.clientX - rect.left;
     const ts = tsAt(e.clientX);
     const step = bucketSeconds(bucketName);
     const bucket = buckets.find((b) => ts >= b[0] && ts < b[0] + step);
-    hover = bucket ? { ts: bucket[0], count: bucket[1], x: e.clientX - rect.left } : null;
+    hover = bucket ? { ts: bucket[0], count: bucket[1], x: px } : null;
+    // Say what this pointer would do before it is pressed.
+    const hold = grabAt(px);
+    canvas.style.cursor = !hold ? 'crosshair'
+      : (hold.mode === 'move' ? 'grab' : 'ew-resize');
   }
   draw();
 }
 
 function onUp(e) {
   if (!drag) return;
-  const moved = Math.abs(drag.b - drag.a) > 4;
-  const endTs = tsAt(e.clientX);
-  const [from, to] = drag.ts < endTs ? [drag.ts, endTs] : [endTs, drag.ts];
-  drag = null;
-  if (moved) {
-    setFilters({ from: Math.floor(from), to: Math.ceil(to) });
+  const mode = drag.mode;
+
+  if (mode === 'new') {
+    const moved = Math.abs(drag.b - drag.a) > 4;
+    const endTs = tsAt(e.clientX);
+    const [from, to] = drag.ts < endTs ? [drag.ts, endTs] : [endTs, drag.ts];
+    drag = null;
+    if (moved) {
+      setFilters({ from: Math.floor(from), to: Math.ceil(to) });
+    } else {
+      const step = bucketSeconds(bucketName);
+      const bucket = buckets.find((b) => from >= b[0] && from < b[0] + step);
+      if (bucket) setFilters({ from: bucket[0], to: bucket[0] + step - 1 });
+    }
   } else {
-    const step = bucketSeconds(bucketName);
-    const bucket = buckets.find((b) => from >= b[0] && from < b[0] + step);
-    if (bucket) setFilters({ from: bucket[0], to: bucket[0] + step - 1 });
+    // The throttle means the last thing applied is usually a little behind
+    // where the hand stopped, so the exact range is set once here.
+    const { from, to } = preview;
+    drag = null;
+    preview = null;
+    setFilters({ from: Math.floor(from), to: Math.ceil(to) });
   }
+
+  preview = null;
   emit('rangeChanged');
   draw();
 }
