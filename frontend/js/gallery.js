@@ -36,6 +36,8 @@ export function initGallery() {
     if (grid.scrollTop + grid.clientHeight > grid.scrollHeight - 600) loadPage();
   });
   grid.addEventListener('click', onClick);
+  wireAreaSelect();
+  el('grid-select').addEventListener('click', () => armArea(!armed));
 
   let sizeTimer = null;
   el('grid-size').addEventListener('input', (e) => {
@@ -136,7 +138,156 @@ function append(rows) {
   syncRowHeight();
 }
 
+// ------------------------------------------------- selecting an area of grid
+//
+// Tiles here are real elements - this grid is paginated rather than virtualised
+// - so the rectangle is answered by testing them, which also means it selects
+// exactly what is loaded and nothing it has never heard of. Dragging to the
+// bottom edge scrolls, and scrolling is what fetches the next page, so a long
+// drag keeps finding more.
+
+let armed = false;
+let justDragged = false;   // a click is arriving from a drag already handled
+
+function armArea(on) {
+  armed = on;
+  el('grid-select').classList.toggle('active', on);
+  grid.classList.toggle('picking', on);
+}
+
+/** A tile's box in the grid's own scrolled coordinates. offsetLeft/Top are
+ *  relative to #grid, which is the offset parent now that it is positioned. */
+function tileBox(tile) {
+  return {
+    left: tile.offsetLeft,
+    top: tile.offsetTop,
+    right: tile.offsetLeft + tile.offsetWidth,
+    bottom: tile.offsetTop + tile.offsetHeight,
+  };
+}
+
+function wireAreaSelect() {
+  let from = null;
+  let band = null;
+  let pointer = null;
+  let client = null;
+  let scrolling = null;
+
+  const point = () => {
+    const r = grid.getBoundingClientRect();
+    return { x: client.x - r.left + grid.scrollLeft, y: client.y - r.top + grid.scrollTop };
+  };
+
+  const drawBand = () => {
+    const now = point();
+    band.style.left = `${Math.min(from.x, now.x)}px`;
+    band.style.top = `${Math.min(from.y, now.y)}px`;
+    band.style.width = `${Math.abs(now.x - from.x)}px`;
+    band.style.height = `${Math.abs(now.y - from.y)}px`;
+  };
+
+  /** Dragging at the edge keeps going, and because the grid loads the next page
+   *  as it scrolls, the drag reaches photos that were not fetched when it began. */
+  const follow = () => {
+    if (from === null) return;
+    const r = grid.getBoundingClientRect();
+    const margin = 56;
+    let dy = 0;
+    if (client.y < r.top + margin) dy = -Math.ceil((r.top + margin - client.y) / 3);
+    else if (client.y > r.bottom - margin) dy = Math.ceil((client.y - (r.bottom - margin)) / 3);
+    if (dy) {
+      const before = grid.scrollTop;
+      grid.scrollTop += dy;
+      if (grid.scrollTop !== before) drawBand();
+    }
+    scrolling = requestAnimationFrame(follow);
+  };
+
+  const stop = () => {
+    if (scrolling !== null) cancelAnimationFrame(scrolling);
+    scrolling = null;
+  };
+
+  grid.addEventListener('pointerdown', (e) => {
+    if (from !== null) return;
+    if (!armed && !e.shiftKey) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    e.preventDefault();
+    pointer = e.pointerId;
+    client = { x: e.clientX, y: e.clientY };
+    from = point();
+    band = document.createElement('div');
+    band.className = 'grid-band';
+    grid.appendChild(band);
+    try {
+      grid.setPointerCapture(pointer);
+    } catch {
+      /* the pointer ended before capture; the drag still works */
+    }
+    scrolling = requestAnimationFrame(follow);
+  });
+
+  grid.addEventListener('pointermove', (e) => {
+    if (from === null || e.pointerId !== pointer) return;
+    e.preventDefault();
+    client = { x: e.clientX, y: e.clientY };
+    drawBand();
+  });
+
+  const finish = (e) => {
+    if (from === null || (e && e.pointerId !== pointer)) return;
+    stop();
+    // The click that follows the release lands on whatever tile was underneath,
+    // and would otherwise open it in the lightbox.
+    justDragged = true;
+    setTimeout(() => { justDragged = false; }, 0);
+
+    const start = from;
+    const end = point();
+    from = null;
+    band.remove();
+    band = null;
+    try {
+      grid.releasePointerCapture(pointer);
+    } catch {
+      /* already released */
+    }
+    if (armed) armArea(false);
+
+    const box = {
+      left: Math.min(start.x, end.x),
+      right: Math.max(start.x, end.x),
+      top: Math.min(start.y, end.y),
+      bottom: Math.max(start.y, end.y),
+    };
+    const tiles = [...grid.querySelectorAll('.tile')];
+
+    // Barely moved: that was a tap, and it means the one photo under it.
+    if (box.right - box.left < 6 && box.bottom - box.top < 6) {
+      const hit = tiles.find((t) => {
+        const b = tileBox(t);
+        return box.left >= b.left && box.left <= b.right && box.top >= b.top && box.top <= b.bottom;
+      });
+      if (hit) emit('toggleSelect', Number(hit.dataset.id));
+      return;
+    }
+
+    const ids = tiles.filter((t) => {
+      const b = tileBox(t);
+      return b.left < box.right && box.left < b.right && b.top < box.bottom && box.top < b.bottom;
+    }).map((t) => Number(t.dataset.id));
+
+    if (!ids.length) { toast('No photos in that area'); return; }
+    emit('selectMany', ids);
+    toast(`${fmtNum(ids.length)} photos selected`);
+  };
+
+  grid.addEventListener('pointerup', finish);
+  grid.addEventListener('pointercancel', finish);
+}
+
 function onClick(e) {
+  if (justDragged) return;
   const tile = e.target.closest('.tile');
   if (!tile) return;
   const id = Number(tile.dataset.id);

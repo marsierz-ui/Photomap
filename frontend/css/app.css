@@ -318,6 +318,10 @@ button, input, select { font: inherit; color: inherit; }
 .grid {
   flex: 1;
   overflow-y: auto;
+  /* The containing block for the selection band, so the band is placed in
+     scrolled content coordinates and stays over the same photos as the grid
+     scrolls under a drag. No offsets, so nothing else moves. */
+  position: relative;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(var(--tile, 160px), 1fr));
   /* Row height is set in JS from the measured column width. `aspect-ratio: 1`
@@ -365,6 +369,19 @@ button, input, select { font: inherit; color: inherit; }
 .tile .flags .note-flag { font-size: 11px; line-height: 8px; color: #e6edf3; text-shadow: 0 0 3px rgba(0,0,0,.9); }
 .tile .nogeo { font-size: 10px; opacity: .8; }
 #grid-sentinel { height: 1px; }
+
+/* Selecting an area of the gallery. The band is a child of the scroller, so it
+   is positioned in scrolled content coordinates and stays over the same photos
+   when the drag runs off the edge and the grid scrolls under it. */
+.grid.picking { cursor: crosshair; }
+.grid.picking .tile { cursor: crosshair; }
+.grid-band {
+  position: absolute;
+  z-index: 5;
+  border: 1px dashed var(--accent, #4aa3ff);
+  background: rgba(74, 163, 255, .15);
+  pointer-events: none;
+}
 
 /* -------------------------------------------------------------- duplicates */
 #dup-list { flex: 1; overflow-y: auto; padding: 10px; }

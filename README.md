@@ -202,8 +202,20 @@ Touching the timeline at all stops playback. Dragging while it played used to do
 you could see - the timer simply overwrote the range on its next tick.
 
 **Gallery** - infinite grid, adjustable tile size, five sort orders. Click opens the
-lightbox, ctrl-click toggles selection, shift-click selects a range. The selection bar
-adds to albums, favourites, shows on the map, or deletes.
+lightbox, ctrl-click toggles selection, shift-click selects a range. **Select area** drags
+a box across the grid instead - or shift-drag, without pressing anything - and takes
+everything it touches, which is the difference between picking sixty photos and clicking
+sixty times. Dragging to the bottom edge keeps scrolling, and since scrolling is what
+fetches the next page, a long drag reaches photos that had not been loaded when it
+started. It adds to the selection rather than replacing it, and disarms when the drag
+ends. The selection bar adds to albums, favourites, shows on the map, or deletes.
+
+The published phone viewer has the same gesture, answered differently: its grid is
+virtualised, so there are no elements to test and the rectangle is turned into rows and
+columns arithmetically - which is also why a drag there can take in thousands of photos
+that were never rendered. This grid is paginated rather than virtualised, so its tiles
+are real and testing them is both simpler and more honest: it selects exactly what has
+been loaded.
 
 **Globe** - a fourth map mode rendering the same points on a 3D globe, on MapLibre GL
 JS's globe projection. Hover a point for its thumbnail, click to open it. Capped at
