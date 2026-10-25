@@ -238,12 +238,12 @@ you could see - the timer simply overwrote the range on its next tick.
 lightbox, ctrl-click toggles selection, shift-click selects a range. **Dragging with a mouse**
 draws a selection box across the grid, with nothing to press first, and takes
 everything it touches. A plain click still opens the photo: nothing starts until the
-pointer has moved a few pixels. On a touch screen dragging is how the grid scrolls, so
-there **Select area** still has to be pressed first. A box is the difference between
-picking sixty photos and clicking sixty times. Dragging to the bottom edge keeps scrolling, and since scrolling is what
-fetches the next page, a long drag reaches photos that had not been loaded when it
-started. It adds to the selection rather than replacing it, and disarms when the drag
-ends. The selection bar adds to albums, favourites, shows on the map, or deletes.
+pointer has moved a few pixels, and shift-drag works too. On a touch screen dragging is
+how the grid scrolls, so there is no box: tap photos to select them. A box is the
+difference between picking sixty photos and clicking sixty times. Dragging to the bottom
+edge keeps scrolling, and since scrolling is what fetches the next page, a long drag
+reaches photos that had not been loaded when it started. It adds to the selection rather
+than replacing it. The selection bar adds to albums, favourites, shows on the map, or deletes.
 
 The published phone viewer has the same gesture, answered differently: its grid is
 virtualised, so there are no elements to test and the rectangle is turned into rows and
@@ -570,17 +570,16 @@ drag - a scrub across ten years would otherwise ask for a thumbnail from every m
 crossed - so the window is drawn when you let go. It follows the filters like everything
 else: narrowing to an album or a date range rebuilds the rail around what is left.
 
-**Select area** takes a whole block of photos in one gesture rather than one tap each.
-With a mouse just drag a box across the grid; on a touch screen press the button first
-(or shift-drag, with a mouse, which also works). The rectangle is
+**Dragging a box** takes a whole block of photos in one gesture rather than one tap
+each, with a mouse and nothing to press first. There is no box on a touch screen, where
+a drag is how the grid scrolls. The rectangle is
 answered by arithmetic, not by asking the document what is inside it, and here that is
 not an optimisation but the only way it can work at all: the grid is virtualised, so only
 the screenful under your finger exists as elements, and a tile's box is its position
 times the stride whether or not it was ever rendered. So a drag that runs off the bottom
 edge keeps scrolling and keeps selecting, and takes in photos that have never been built.
 It adds to the selection rather than replacing it, a drag that barely moves is treated as
-the tap it was, and it disarms itself afterwards - a grid you cannot scroll is a bad
-thing to leave a phone in.
+the tap it was.
 
 Below 768px the viewer rearranges: the view tabs move to a bottom bar within thumb
 reach, filters slide up as a sheet over the map (so the map keeps redrawing behind them

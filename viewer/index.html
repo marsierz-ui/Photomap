@@ -82,10 +82,7 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
    armed: a drag over the grid is how you scroll it the rest of the time, and
    taking that away permanently to support an occasional gesture would be a poor
    trade on the device where scrolling is the whole interface. */
-.gridctl { position:absolute; top:10px; right:44px; z-index:640; }
 #gallery { user-select:none; -webkit-user-select:none; }
-#gallery.picking { touch-action:none; cursor:crosshair; }
-#gallery.picking .tile { cursor:crosshair; }
 .globe-tip { position:absolute; top:0; left:0; z-index:600; pointer-events:none;
              background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
              padding:6px; box-shadow:0 6px 18px rgba(0,0,0,.55); }
@@ -299,7 +296,7 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
   .bar { padding:0; border-bottom:0; }
   #chips { position:fixed; top:calc(var(--top) + 8px); left:50%;
            transform:translateX(-50%); z-index:1500; }
-  .controls, .gridctl { top:calc(10px + var(--top)); }
+  .controls { top:calc(10px + var(--top)); }
   .leaflet-top, .maplibregl-ctrl-top-left { margin-top:var(--top); }
   .rail { top:var(--top); }
   #gallery { padding-top:calc(8px + var(--top)); }
@@ -409,9 +406,6 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
   <div id="insights" class="hidden"></div>
   <div id="globe" class="hidden"></div>
   <div id="rail" class="rail hidden"></div>
-  <div class="gridctl hidden" id="gridCtl">
-    <button id="gridSelect" title="Drag a box across the photos to select them">Select area</button>
-  </div>
   <div id="railBubble" class="railbubble hidden"></div>
   <div class="controls" id="mapControls">
     <div class="seg" id="mode">
@@ -2782,7 +2776,6 @@ $('gallery').addEventListener('click', (e) => {
 // what lets one gesture take in thousands of photos - the same property that
 // makes the date rail possible.
 
-let gridArmed = false;
 let justBoxed = false;   // a click is arriving from a drag that was just handled
 
 /** Every position in galleryIdx whose tile overlaps a rectangle, given in
@@ -2822,11 +2815,7 @@ function paintTileSelection() {
   });
 }
 
-function armGrid(on) {
-  gridArmed = on;
-  $('gridSelect').classList.toggle('active', on);
-  $('gallery').classList.toggle('picking', on);
-}
+
 
 function wireGridSelect() {
   const g = $('gallery');
@@ -2897,7 +2886,7 @@ function wireGridSelect() {
   g.addEventListener('pointerdown', (e) => {
     if (view !== 'gallery' || from !== null) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
-    if (gridArmed || e.shiftKey) {
+    if (e.shiftKey) {
       e.preventDefault();
       begin(e.pointerId, e.clientX, e.clientY);
       return;
@@ -2942,7 +2931,6 @@ function wireGridSelect() {
     } catch {
       /* already released */
     }
-    if (gridArmed) armGrid(false);
 
     // Barely moved: that was a tap, and a tap on a photo in this mode is the
     // one-at-a-time selection it would have been anyway.
@@ -2974,7 +2962,6 @@ function wireGridSelect() {
 }
 wireGridSelect();
 
-$('gridSelect').onclick = () => armGrid(!gridArmed);
 
 function paintSel() {
   $('selbar').classList.toggle('hidden', selection.size === 0);
@@ -3918,7 +3905,6 @@ function setView(name) {
   $('journal').classList.toggle('hidden', name !== 'journal');
   $('insights').classList.toggle('hidden', name !== 'insights');
   $('mapControls').classList.toggle('hidden', name !== 'map');
-  $('gridCtl').classList.toggle('hidden', name !== 'gallery');
   // The globe is its own element rather than a layer, so leaving the map has to
   // put it away explicitly or it stays painted over whatever comes next. The
   // layers go with it: a hidden map is a zero-size container, and leaflet.heat

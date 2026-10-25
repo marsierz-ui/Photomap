@@ -383,8 +383,6 @@ button, input, select { font: inherit; color: inherit; }
 /* A mouse drag across the grid draws a selection box, so it must not also start
    selecting text or dragging a picture off. */
 .grid { user-select: none; -webkit-user-select: none; }
-.grid.picking { cursor: crosshair; }
-.grid.picking .tile { cursor: crosshair; }
 .grid-band {
   position: absolute;
   z-index: 5;

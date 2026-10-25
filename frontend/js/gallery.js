@@ -49,7 +49,6 @@ export function initGallery() {
   });
   grid.addEventListener('click', onClick);
   wireAreaSelect();
-  el('grid-select').addEventListener('click', () => armArea(!armed));
 
   let sizeTimer = null;
   el('grid-size').addEventListener('input', (e) => {
@@ -159,14 +158,7 @@ function append(rows) {
 // bottom edge scrolls, and scrolling is what fetches the next page, so a long
 // drag keeps finding more.
 
-let armed = false;
 let justDragged = false;   // a click is arriving from a drag already handled
-
-function armArea(on) {
-  armed = on;
-  el('grid-select').classList.toggle('active', on);
-  grid.classList.toggle('picking', on);
-}
 
 /** A tile's box in the grid's own scrolled coordinates. offsetLeft/Top are
  *  relative to #grid, which is the offset parent now that it is positioned. */
@@ -245,12 +237,12 @@ function wireAreaSelect() {
   grid.addEventListener('pointerdown', (e) => {
     if (from !== null) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
-    if (armed || e.shiftKey) {
+    if (e.shiftKey) {
       e.preventDefault();
       begin(e.pointerId, e.clientX, e.clientY);
       return;
     }
-    // A touch drag is how the grid scrolls, so there the button still arms it.
+    // A touch drag is how the grid scrolls, so touch has no box.
     if (e.pointerType !== 'mouse') return;
     // The scrollbar sits inside the grid's box; pressing it is not a drag.
     if (e.clientX > grid.getBoundingClientRect().left + grid.clientWidth) return;
@@ -291,7 +283,6 @@ function wireAreaSelect() {
     } catch {
       /* already released */
     }
-    if (armed) armArea(false);
 
     const box = {
       left: Math.min(start.x, end.x),
