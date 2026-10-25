@@ -592,18 +592,22 @@ def set_location(photo_id: int, body: dict = Body(...)):
     row = conn.execute("SELECT path FROM photos WHERE id=?", (photo_id,)).fetchone()
     if not row:
         raise HTTPException(404, "Not found")
+    # A position taken from a neighbouring photo's suggestion is tagged as such,
+    # the same as the batch fix, so one filter lists everything copied that way.
+    method = "NEIGHBOUR" if body.get("method") == "NEIGHBOUR" else "MANUAL"
     with db.write_lock:
         conn.execute(
-            "INSERT INTO location_fixes(path, lat, lon) VALUES (?,?,?)"
-            " ON CONFLICT(path) DO UPDATE SET lat=excluded.lat, lon=excluded.lon",
-            (row["path"], lat, lon),
+            "INSERT INTO location_fixes(path, lat, lon, method) VALUES (?,?,?,?)"
+            " ON CONFLICT(path) DO UPDATE SET lat=excluded.lat, lon=excluded.lon,"
+            " method=excluded.method",
+            (row["path"], lat, lon, method),
         )
         conn.execute(
-            "UPDATE photos SET lat=?, lon=?, gps_method='MANUAL' WHERE id=?",
-            (lat, lon, photo_id),
+            "UPDATE photos SET lat=?, lon=?, gps_method=? WHERE id=?",
+            (lat, lon, method, photo_id),
         )
         conn.commit()
-    return {"lat": lat, "lon": lon}
+    return {"lat": lat, "lon": lon, "method": method}
 
 
 # The window for copying a position from a neighbouring photo in bulk. Tighter than

@@ -267,6 +267,17 @@ index(dated)
 check("a rescan keeps it, though the file still says 2015", day(dated).year == 2020, str(day(dated)))
 check("an unknown photo is reported as such", scanner.set_taken(conn, 999999, 0) is False)
 
+# ------------------------------- a suggestion taken one photo at a time is tagged too
+single = photo(LIB / "single" / "cell.jpg", "2026:12:01 10:00:00", 52.0, -9.0, "CELLID")
+index(single)
+main.set_location(row(single)["id"], {"lat": 53.0, "lon": -9.5, "method": "NEIGHBOUR"})
+check("a suggestion accepted in the lightbox is tagged as from a neighbour",
+      row(single)["gps_method"] == "NEIGHBOUR", str(row(single)["gps_method"]))
+index(single)
+check("and stays tagged after a rescan", row(single)["gps_method"] == "NEIGHBOUR")
+main.set_location(row(single)["id"], {"lat": 54.0, "lon": -9.5})
+check("a position picked on the map is not", row(single)["gps_method"] == "MANUAL")
+
 print()
 print(f"{len(failures)} FAILED" if failures else "ALL FIX CHECKS PASSED")
 sys.exit(1 if failures else 0)

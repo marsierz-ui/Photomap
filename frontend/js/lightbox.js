@@ -64,7 +64,8 @@ export function initLightbox() {
     } else if (act === 'fixloc') {
       showSuggestions();
     } else if (act === 'usesug') {
-      saveLocation(Number(e.target.dataset.lat), Number(e.target.dataset.lon));
+      saveLocation(Number(e.target.dataset.lat), Number(e.target.dataset.lon),
+        undefined, 'NEIGHBOUR');
     } else if (act === 'pickloc') {
       const photo = current;
       close();
@@ -183,10 +184,10 @@ async function showSuggestions() {
     + ' <button data-act="pickloc">Pick on the map</button>';
 }
 
-async function saveLocation(lat, lon, id = current && current.id) {
+async function saveLocation(lat, lon, id = current && current.id, method = 'MANUAL') {
   if (id == null) return;
   try {
-    await api.post(`/api/photos/${id}/location`, { lat, lon });
+    await api.post(`/api/photos/${id}/location`, { lat, lon, method });
     relocated = true;
     toast('Location corrected');
     if (current && current.id === id) show();
