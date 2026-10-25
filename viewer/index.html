@@ -3550,6 +3550,7 @@ async function saveMyDays() {
 }
 
 async function showJournal() {
+  warmFix();
   if (!days) {
     $('journal').innerHTML = '<div class="muted">Loading the journal…</div>';
     await loadDays();
@@ -3664,6 +3665,14 @@ $('journal').addEventListener('input', (e) => {
   }, JOURNAL_SAVE_MS);
 });
 
+// Starting to write today's entry is the natural moment to ask for the position,
+// once: the prompt then appears where the reason for it is on screen, and every
+// later entry is located with no further asking.
+$('journal').addEventListener('focusin', (e) => {
+  if (!e.target.classList.contains('day-text')) return;
+  if (e.target.closest('.day').dataset.day === todayKey()) currentFix();
+});
+
 $('journal').addEventListener('focusout', (e) => {
   if (!e.target.classList.contains('day-text')) return;
   clearTimeout(journalTimer);
@@ -3712,27 +3721,55 @@ function locateDay(card) {
   );
 }
 
-/** Quiet, and never twice: if the browser has been told no once, it is not
- *  asked again, and the computer places the day by the photo nearest it in time
- *  instead. */
-async function autoLocate() {
-  if (!navigator.geolocation) return null;
+// Where this device is, kept for a while. Asking takes seconds on a phone that has
+// not used its GPS recently, and an entry must not wait for that - so the position
+// is fetched ahead of time and an entry written today takes the one already held.
+const FIX_FRESH_MS = 30 * 60 * 1000;
+let lastFix = null;                 // {lat, lon, at}
+let locating = null;                // the request in flight, shared by every caller
+
+const freshFix = () => (lastFix && Date.now() - lastFix.at < FIX_FRESH_MS ? lastFix : null);
+
+async function geoPermission() {
+  if (!navigator.geolocation) return 'denied';
   try {
-    const permission = await navigator.permissions?.query({ name: 'geolocation' });
-    if (permission?.state === 'denied') return null;
-  } catch { /* no permissions API: just ask */ }
-  return new Promise((resolve) => {
-    // `timeout` covers acquiring a position, not answering the permission
-    // prompt - so a prompt nobody taps leaves this pending for the life of the
-    // page. The wait below is the only thing that ends that.
-    const giveUp = setTimeout(() => resolve(null), 20000);
-    const answer = (value) => { clearTimeout(giveUp); resolve(value); };
-    navigator.geolocation.getCurrentPosition(
-      (pos) => answer({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
-      () => answer(null),
-      { timeout: 6000, maximumAge: 300000 },
-    );
-  });
+    const status = await navigator.permissions?.query({ name: 'geolocation' });
+    return status ? status.state : 'prompt';
+  } catch {
+    return 'prompt';              // no permissions API: asking is the only way to know
+  }
+}
+
+/** A position for now. Never asks again once the browser has been told no, and
+ *  never twice at once. */
+async function currentFix() {
+  const held = freshFix();
+  if (held) return held;
+  if (await geoPermission() === 'denied') return null;
+  if (!locating) {
+    locating = new Promise((resolve) => {
+      // `timeout` covers acquiring a position, not answering the permission
+      // prompt - so a prompt nobody taps would leave this pending for the life of
+      // the page. The wait below is what ends that.
+      const giveUp = setTimeout(() => resolve(null), 30000);
+      const answer = (value) => { clearTimeout(giveUp); resolve(value); };
+      navigator.geolocation.getCurrentPosition(
+        (pos) => answer({ lat: pos.coords.latitude, lon: pos.coords.longitude, at: Date.now() }),
+        () => answer(null),
+        // A cold GPS can take well over the old six seconds, and a failure here
+        // is not retried for a minute.
+        { timeout: 20000, maximumAge: 300000 },
+      );
+    }).then((fix) => { if (fix) lastFix = fix; return fix; })
+      .finally(() => { locating = null; });
+  }
+  return locating;
+}
+
+/** Fetch the position quietly, but only where it cannot raise a prompt: once
+ *  permission has been granted, opening the journal is all it takes. */
+async function warmFix() {
+  if (await geoPermission() === 'granted') currentFix();
 }
 
 function flashDay(card, text) {
@@ -3745,9 +3782,10 @@ function flashDay(card, text) {
   }
 }
 
-// Days this session has already asked the device about, so a day nobody can
-// place is not asked about again on every keystroke.
-const locateAsked = new Set();
+// When each day was last located, so one that could not be placed is retried
+// after a minute rather than asked about on every keystroke - or never again.
+const locateTried = new Map();
+const LOCATE_RETRY_MS = 60 * 1000;
 
 async function saveDay(day, html, place) {
   const existing = dayEntry(day);
@@ -3758,6 +3796,14 @@ async function saveDay(day, html, place) {
   // photo, which would quietly undo one already set - on every edit to the text.
   if (!place && existing.lat != null) {
     place = { lat: existing.lat, lon: existing.lon, src: existing.loc_src };
+  }
+  // Today's entry is where the device is now, so it takes the position already
+  // held and is saved with it in one go. Any other day is not: writing up last
+  // Tuesday today says nothing about where Tuesday was, and the computer places
+  // those by the photos of that day.
+  if (!place && text && day === todayKey()) {
+    const held = freshFix();
+    if (held) place = { lat: held.lat, lon: held.lon, src: 'device' };
   }
 
   const card = $('journal').querySelector(`.day[data-day="${day}"]`);
@@ -3790,9 +3836,10 @@ async function saveDay(day, html, place) {
   // written must not sit unsaved behind that - so the entry is stored first and
   // the position lands on it in a second save. A day nobody can place is left
   // for the computer, which puts it where the nearest photo in time was.
-  if (text && !place && !locateAsked.has(day)) {
-    locateAsked.add(day);
-    const at = await autoLocate();
+  if (text && !place && day === todayKey()
+      && Date.now() - (locateTried.get(day) || 0) > LOCATE_RETRY_MS) {
+    locateTried.set(day, Date.now());
+    const at = await currentFix();
     if (at) await saveDay(day, text, { lat: at.lat, lon: at.lon, src: 'device' });
   }
 }

@@ -527,13 +527,23 @@ Two things are different, and both come from where it runs:
   pretending it reached the bucket. Favourites and albums still refuse offline: they
   are a tap, and a tap can be repeated.
 
-**Use my location works here, and only here.** A browser hands out a position only in a
-secure context, which over plain HTTP means this computer and nothing else - so the
-button that has never worked from a phone on the LAN works from the published viewer,
-which is served over HTTPS. It is asked after the entry is stored rather than before,
-because a permission prompt can go unanswered forever and what was just written must not
-wait behind it. A day nobody can place is left to the computer, which puts it where the
-photo nearest it in time was.
+**Location is automatic once it is allowed, and works here, only here.** A browser hands
+out a position only in a secure context, which over plain HTTP means this computer and
+nothing else - so what has never worked from a phone on the LAN works from the published
+viewer, which is served over HTTPS.
+
+Nothing needs pressing. Starting to write today's entry is when the browser is asked,
+once, so the prompt appears where the reason for it is on screen. After that the position
+is fetched ahead of time whenever the Journal opens, and an entry written today is saved
+with it in one go instead of waiting on a GPS that may take seconds to wake. If none is
+held yet the entry is stored first and the position lands on it in a second save, because
+a permission prompt can go unanswered forever and what was just written must not wait
+behind it. A lookup that failed is retried after a minute. **Use my location** is still
+there, to place a day by hand.
+
+Only today's entry is placed this way. Writing up last Tuesday today says nothing about
+where Tuesday was, so any other day is left to the computer, which puts it where the photo
+nearest it in time was. Where permission has been refused nothing is asked again.
 
 The journal is published as `days.json` beside the manifest rather than inside it: the
 viewer re-reads the manifest every twenty seconds while an upload is out, and a decade
