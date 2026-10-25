@@ -405,16 +405,20 @@ export function setPath(data, on, color) {
   if (!ready) return;
   const source = map.getSource('path');
   const n = data ? data.n : 0;
-  if (on && n > 1 && n <= MAX_PATH) {
-    const coords = new Array(n);
-    for (let i = 0; i < n; i += 1) coords[i] = [data.lon[i], data.lat[i]];
+  if (on && n > 1) {
+    // Past MAX_PATH the line runs through evenly spaced photos, ends kept, as on
+    // the flat map.
+    const step = n > MAX_PATH ? (n - 1) / (MAX_PATH - 1) : 1;
+    const count = Math.min(n, MAX_PATH);
+    const coords = new Array(count);
+    for (let i = 0; i < count; i += 1) {
+      const at = i === count - 1 ? n - 1 : Math.round(i * step);
+      coords[i] = [data.lon[at], data.lat[at]];
+    }
     map.setPaintProperty('path-line', 'line-color', color);
     source.setData({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } });
   } else {
     source.setData(EMPTY);
-    if (on && n > MAX_PATH) {
-      toast(`Path hidden: ${fmtNum(n)} points exceeds the ${fmtNum(MAX_PATH)} limit`);
-    }
   }
 }
 

@@ -284,12 +284,19 @@ function render() {
       + daySuffix(capped));
   }
 
-  if (showPath && n > 1 && n <= MAX_PATH) {
-    const line = new Array(n);
-    for (let i = 0; i < n; i += 1) line[i] = [lat[i], lon[i]];
+  if (showPath && n > 1) {
+    // Past MAX_PATH the line is drawn through evenly spaced photos, ends kept:
+    // thousands of vertices make the SVG line crawl, and the shape of a trip is
+    // the same at a fifth of the detail.
+    const step = n > MAX_PATH ? (n - 1) / (MAX_PATH - 1) : 1;
+    const count = Math.min(n, MAX_PATH);
+    const line = new Array(count);
+    for (let i = 0; i < count; i += 1) {
+      const at = i === count - 1 ? n - 1 : Math.round(i * step);
+      line[i] = [lat[at], lon[at]];
+    }
     pathLayer = L.polyline(line, { color, weight: 1.5, opacity: 0.6, dashArray: '4 4' }).addTo(map);
-  } else if (showPath && n > MAX_PATH) {
-    toast(`Path hidden: ${fmtNum(n)} points exceeds the ${fmtNum(MAX_PATH)} limit`);
+    if (n > MAX_PATH) toast(`Path drawn through ${fmtNum(MAX_PATH)} of ${fmtNum(n)} photos`);
   }
 }
 

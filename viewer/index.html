@@ -2010,6 +2010,13 @@ const located = (idx) => idx.filter((i) => M.lat[i] != null);
 const MAX_MARKERS = 60000;
 const MAX_POINTS = 120000;
 const MAX_PATH = 5000;
+/** Evenly spaced entries of an ordered list, first and last kept. */
+function thinPath(list) {
+  if (list.length <= MAX_PATH) return list;
+  const step = (list.length - 1) / (MAX_PATH - 1);
+  return Array.from({ length: MAX_PATH }, (_, i) =>
+    list[i === MAX_PATH - 1 ? list.length - 1 : Math.round(i * step)]);
+}
 const BASE_COLOR = '#4aa3ff';
 // Photos added on this device, everywhere they are drawn: the flat map, the
 // globe, and the border on the gallery tray's cards.
@@ -2234,13 +2241,15 @@ function drawMap() {
       + daySuffix(idx.slice(0, capped)) + tail);
   }
 
-  if (showPath && idx.length > 1 && idx.length <= MAX_PATH) {
+  if (showPath && idx.length > 1) {
     // Capture order, which is what makes the line a trip rather than a scribble.
-    const ordered = [...idx].sort((a, b) => (M.ts[a] || 0) - (M.ts[b] || 0));
+    // Past MAX_PATH it runs through evenly spaced photos, ends kept.
+    const ordered = thinPath([...idx].sort((a, b) => (M.ts[a] || 0) - (M.ts[b] || 0)));
     pathLayer = L.polyline(ordered.map((i) => [M.lat[i], M.lon[i]]),
       { color, weight:1.5, opacity:0.6, dashArray:'4 4' }).addTo(map);
-  } else if (showPath && idx.length > MAX_PATH) {
-    toast(`Path hidden: ${fmtNum(idx.length)} points exceeds the ${fmtNum(MAX_PATH)} limit`);
+    if (idx.length > MAX_PATH) {
+      toast(`Path drawn through ${fmtNum(MAX_PATH)} of ${fmtNum(idx.length)} photos`);
+    }
   }
 }
 
@@ -2518,16 +2527,13 @@ function globeSetPath(idx) {
   if (!G.ready) return;
   const source = G.map.getSource('path');
   if (!source) return;
-  if (showPath && idx.length > 1 && idx.length <= MAX_PATH) {
-    const ordered = [...idx].sort((a, b) => (M.ts[a] || 0) - (M.ts[b] || 0));
+  if (showPath && idx.length > 1) {
+    const ordered = thinPath([...idx].sort((a, b) => (M.ts[a] || 0) - (M.ts[b] || 0)));
     G.map.setPaintProperty('path-line', 'line-color', albumColor());
     source.setData({ type:'Feature', properties:{},
       geometry:{ type:'LineString', coordinates: ordered.map((i) => [M.lon[i], M.lat[i]]) } });
   } else {
     source.setData(GLOBE_EMPTY);
-    if (showPath && idx.length > MAX_PATH) {
-      toast(`Path hidden: ${fmtNum(idx.length)} points exceeds the ${fmtNum(MAX_PATH)} limit`);
-    }
   }
 }
 
