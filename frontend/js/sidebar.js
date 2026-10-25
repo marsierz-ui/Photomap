@@ -55,7 +55,10 @@ function summarize() {
   if (f.camera) bits.push(`camera: ${f.camera}`);
   if (f.q) bits.push(`"${f.q}"`);
   if (f.gps !== 'any') {
-    bits.push({ yes: 'with GPS', no: 'without GPS', approx: 'approximate location' }[f.gps]);
+    bits.push({
+      yes: 'with GPS', no: 'without GPS', approx: 'approximate location',
+      neighbour: 'location from a neighbour',
+    }[f.gps]);
   }
   if (f.fav) bits.push('favourites');
   if (state.followMap) bits.push('map viewport');

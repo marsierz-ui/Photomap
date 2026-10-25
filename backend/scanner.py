@@ -90,10 +90,10 @@ def _apply_fixes(conn, meta: dict) -> None:
     so applying a shift twice is not possible - it is applied to a fresh read.
     """
     fix = conn.execute(
-        "SELECT lat, lon FROM location_fixes WHERE path=?", (meta["path"],)
+        "SELECT lat, lon, method FROM location_fixes WHERE path=?", (meta["path"],)
     ).fetchone()
     if fix:
-        meta["lat"], meta["lon"], meta["gps_method"] = fix["lat"], fix["lon"], "MANUAL"
+        meta["lat"], meta["lon"], meta["gps_method"] = fix["lat"], fix["lon"], fix["method"]
 
     folder = meta["folder"].lower() + os.sep
     for shift in conn.execute("SELECT folder, offset_s, before_ts FROM date_shifts"):
@@ -104,10 +104,14 @@ def _apply_fixes(conn, meta: dict) -> None:
             break
 
 
-def shift_dates(conn, folder: str, to_day: str, before_ts: int = 1104537600) -> dict:
+def shift_dates(conn, folder: str, to_day: str, from_day: str | None = None,
+                before_ts: int = 1104537600) -> dict:
     """Move a folder's photos with a bogus camera clock to a real date.
 
-    The first affected photo's day becomes `to_day` (YYYY-MM-DD) and every other
+    `from_day` is the day on the camera's clock that really was `to_day`
+    (YYYY-MM-DD both); left out, it is the first affected photo's day. It is
+    needed when a few strays were taken long before the trip itself - anchoring on
+    the earliest photo would move the whole trip by the strays' distance. Every
     photo moves by the same whole number of days, so the gaps between them - and
     each photo's time of day - are kept. Only photos dated before `before_ts`
     (2005 by default) move; the rest of the folder already has real dates.
@@ -121,8 +125,11 @@ def shift_dates(conn, folder: str, to_day: str, before_ts: int = 1104537600) -> 
     ).fetchall()
     if not rows:
         return {"moved": 0}
-    first = min(r["taken_ts"] for r in rows)
-    first_day = datetime.datetime.fromtimestamp(first, datetime.UTC).date()
+    if from_day:
+        first_day = datetime.date.fromisoformat(from_day)
+    else:
+        first = min(r["taken_ts"] for r in rows)
+        first_day = datetime.datetime.fromtimestamp(first, datetime.UTC).date()
     target = datetime.date.fromisoformat(to_day)
     offset = (target - first_day).days * 86400
     with db.write_lock:

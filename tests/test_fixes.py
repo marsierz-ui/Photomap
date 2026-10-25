@@ -137,6 +137,86 @@ index(other)
 check("a folder that merely starts with the same letters is not shifted",
       day(other).year == 2001, str(day(other)))
 
+# ------------------------------------------------------ anchoring on a real day
+# A few strays long before the trip would drag it with them if the earliest photo
+# were the anchor, so the day that really was the first day can be named.
+school = LIB / "school"
+stray = photo(school / "stray.jpg", "2000:01:03 21:27:00")
+day1 = photo(school / "d1.jpg", "2000:01:21 09:00:00")
+day3 = photo(school / "d3.jpg", "2000:01:23 18:00:00")
+index(stray, day1, day3)
+scanner.shift_dates(conn, str(school), "2021-09-27", from_day="2000-01-21")
+check("the named clock day lands on the real day", day(day1).date().isoformat() == "2021-09-27",
+      str(day(day1)))
+check("the rest of the trip follows it", day(day3).date().isoformat() == "2021-09-29", str(day(day3)))
+check("a stray moves by the same offset rather than anchoring the trip",
+      day(stray).date().isoformat() == "2021-09-09", str(day(stray)))
+index(stray, day1, day3)
+check("and a rescan keeps that", day(day1).date().isoformat() == "2021-09-27", str(day(day1)))
+
+# --------------------------------------------- copying positions in bulk, 2 hours
+from backend import main  # noqa: E402
+
+batch = LIB / "batch"
+real1 = photo(batch / "real1.jpg", "2026:09:01 13:20:00", 53.12, -9.70, "GPS")
+near = photo(batch / "near.jpg", "2026:09:01 13:50:00", 52.0, -9.0, "CELLID")        # 30 min from real1
+chain = photo(batch / "chain.jpg", "2026:09:01 15:30:00", 52.0, -9.0, "CELLID")      # 2h10 from real1
+alone = photo(batch / "alone.jpg", "2026:09:01 20:00:00", 52.0, -9.0, "CELLID")      # hours from any fix
+steady = photo(batch / "steady.jpg", "2026:09:01 22:30:00", 53.2, -9.8, "GPS")       # not a tower guess, and 2.5 h from the next
+index(real1, near, chain, alone, steady)
+ids = [row(p)["id"] for p in (near, chain, alone, steady)]
+
+result = main.fix_locations({"ids": ids})
+check("a tower photo within 2 hours of a real fix is fixed", result["fixed"] >= 1, str(result))
+check("it takes the position of that photo", abs(row(near)["lat"] - 53.12) < 1e-6, str(row(near)["lat"]))
+check("and is tagged as copied from a neighbour", row(near)["gps_method"] == "NEIGHBOUR",
+      str(row(near)["gps_method"]))
+check("a photo 2h10 from the nearest real fix is left alone", row(chain)["lat"] == 52.0
+      and row(chain)["gps_method"] == "CELLID", str(dict(row(chain))))
+check("a fix copied onto one photo is not then copied onward to another",
+      row(chain)["gps_method"] != "NEIGHBOUR")
+check("a photo with no real fix anywhere near is left alone", row(alone)["gps_method"] == "CELLID")
+check("a photo that was never a tower guess is not touched",
+      row(steady)["lat"] == 53.2 and row(steady)["gps_method"] == "GPS")
+check("the counts say what happened",
+      (result["fixed"], result["no_neighbour"], result["skipped"]) == (1, 2, 1), str(result))
+check("the window is two hours", result["window_hours"] == 2)
+
+index(near)  # the file still says CELLID and the wrong position
+check("a rescan keeps the copied position and its tag",
+      abs(row(near)["lat"] - 53.12) < 1e-6 and row(near)["gps_method"] == "NEIGHBOUR",
+      f"{row(near)['lat']} {row(near)['gps_method']}")
+
+# ------------------------------------------- one position for a whole selection
+nowhere = photo(LIB / "multi" / "none.jpg", "2026:10:01 10:00:00")
+guessed = photo(LIB / "multi" / "guess.jpg", "2026:10:01 10:05:00", 52.0, -9.0, "CELLID")
+wrong = photo(LIB / "multi" / "wrong.jpg", "2026:10:01 10:10:00", 10.0, 10.0, "GPS")
+index(nowhere, guessed, wrong)
+picked = [row(p)["id"] for p in (nowhere, guessed, wrong)]
+
+result = main.set_locations({"ids": picked + [999999], "lat": 53.12, "lon": -9.7})
+check("every selected photo gets the position", result["changed"] == 3, str(result))
+check("a photo that had none now has one", abs(row(nowhere)["lat"] - 53.12) < 1e-6)
+check("a tower guess is replaced", abs(row(guessed)["lon"] + 9.7) < 1e-6)
+check("so is a real fix that was wrong", abs(row(wrong)["lat"] - 53.12) < 1e-6)
+check("all are marked as set by hand", {row(p)["gps_method"] for p in (nowhere, guessed, wrong)} == {"MANUAL"})
+index(nowhere, guessed, wrong)
+check("a rescan keeps it, for a photo that has none in the file as well",
+      abs(row(nowhere)["lat"] - 53.12) < 1e-6 and abs(row(guessed)["lat"] - 53.12) < 1e-6)
+for bad in ({"lat": 99, "lon": 0}, {"lat": "x", "lon": 0}, {"lon": 0}):
+    try:
+        main.set_locations({"ids": picked, **bad})
+        refused = False
+    except Exception:
+        refused = True
+    check(f"an impossible position {bad} is refused", refused)
+try:
+    main.set_locations({"ids": [], "lat": 1, "lon": 1})
+    refused = False
+except Exception:
+    refused = True
+check("an empty selection is refused", refused)
+
 print()
 print(f"{len(failures)} FAILED" if failures else "ALL FIX CHECKS PASSED")
 sys.exit(1 if failures else 0)

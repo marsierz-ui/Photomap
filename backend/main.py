@@ -94,6 +94,8 @@ def _filters(request: Request) -> tuple[str, list]:
         where.append("p.lat IS NOT NULL")
     elif gps == "no":
         where.append("p.lat IS NULL")
+    elif gps == "neighbour":
+        where.append("p.gps_method='NEIGHBOUR'")
     elif gps == "approx":
         # Positions guessed from towers or wifi, which are the ones worth fixing.
         marks = ",".join("?" * len(photometa.APPROX_METHODS))
@@ -555,12 +557,12 @@ def location_suggestions(photo_id: int):
     if not row or row["taken_ts"] is None:
         raise HTTPException(404, "Not found")
     ts = row["taken_ts"]
-    marks = ",".join("?" * len(photometa.APPROX_METHODS))
+    marks = ",".join("?" * len(photometa.ESTIMATED_METHODS))
     base = (
         "SELECT id, lat, lon, taken_ts FROM photos WHERE missing=0 AND id != ?"
         f" AND lat IS NOT NULL AND (gps_method IS NULL OR gps_method NOT IN ({marks}))"
     )
-    args = [photo_id, *photometa.APPROX_METHODS]
+    args = [photo_id, *photometa.ESTIMATED_METHODS]
     before = conn.execute(
         base + " AND taken_ts <= ? AND taken_ts >= ? ORDER BY taken_ts DESC LIMIT 1",
         args + [ts, ts - SUGGEST_WINDOW],
@@ -602,13 +604,111 @@ def set_location(photo_id: int, body: dict = Body(...)):
     return {"lat": lat, "lon": lon}
 
 
+# The window for copying a position from a neighbouring photo in bulk. Tighter than
+# the single-photo suggestions, which a person looks at before accepting.
+NEIGHBOUR_WINDOW = 2 * 3600
+BATCH_CAP = 5000
+
+
+@app.post("/api/photos/fix-locations")
+def fix_locations(body: dict = Body(...)):
+    """Give each selected cell-tower photo the position of the nearest photo with a
+    real GPS fix within two hours, before or after it.
+
+    Photos with none are left as they were, and photos that were never a tower
+    guess are not touched. What it changes is tagged NEIGHBOUR rather than MANUAL, so
+    the batch stays findable and is never used as the source for another fix.
+    """
+    ids = [int(i) for i in body.get("ids", [])]
+    if not ids or len(ids) > BATCH_CAP:
+        raise HTTPException(400, f"Between 1 and {BATCH_CAP} photos")
+    conn = db.connect()
+    approx = ",".join("?" * len(photometa.APPROX_METHODS))
+    estimated = ",".join("?" * len(photometa.ESTIMATED_METHODS))
+    fixed = no_neighbour = skipped = 0
+    for photo_id in ids:
+        row = conn.execute(
+            "SELECT path, taken_ts FROM photos WHERE id=? AND missing=0"
+            f" AND lat IS NOT NULL AND gps_method IN ({approx})",
+            [photo_id, *photometa.APPROX_METHODS],
+        ).fetchone()
+        if not row or row["taken_ts"] is None:
+            skipped += 1
+            continue
+        ts = row["taken_ts"]
+        near = conn.execute(
+            "SELECT lat, lon FROM photos WHERE missing=0 AND id != ? AND lat IS NOT NULL"
+            f" AND (gps_method IS NULL OR gps_method NOT IN ({estimated}))"
+            " AND taken_ts BETWEEN ? AND ? ORDER BY ABS(taken_ts - ?) LIMIT 1",
+            [photo_id, *photometa.ESTIMATED_METHODS, ts - NEIGHBOUR_WINDOW,
+             ts + NEIGHBOUR_WINDOW, ts],
+        ).fetchone()
+        if not near:
+            no_neighbour += 1
+            continue
+        with db.write_lock:
+            conn.execute(
+                "INSERT INTO location_fixes(path, lat, lon, method) VALUES (?,?,?,'NEIGHBOUR')"
+                " ON CONFLICT(path) DO UPDATE SET lat=excluded.lat, lon=excluded.lon,"
+                " method=excluded.method",
+                (row["path"], near["lat"], near["lon"]),
+            )
+            conn.execute(
+                "UPDATE photos SET lat=?, lon=?, gps_method='NEIGHBOUR' WHERE id=?",
+                (near["lat"], near["lon"], photo_id),
+            )
+            conn.commit()
+        fixed += 1
+    return {"fixed": fixed, "no_neighbour": no_neighbour, "skipped": skipped,
+            "window_hours": NEIGHBOUR_WINDOW // 3600}
+
+
+@app.post("/api/photos/set-location")
+def set_locations(body: dict = Body(...)):
+    """One position for every selected photo, whatever they had before - a photo
+    with none, a tower guess, or a real fix that was wrong. Kept as MANUAL in
+    location_fixes, like a single set_location, so a rescan does not undo it."""
+    ids = [int(i) for i in body.get("ids", [])]
+    try:
+        lat, lon = float(body["lat"]), float(body["lon"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(400, "lat and lon are required")
+    if not ids or len(ids) > BATCH_CAP:
+        raise HTTPException(400, f"Between 1 and {BATCH_CAP} photos")
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise HTTPException(400, "Not a position")
+    conn = db.connect()
+    changed = 0
+    with db.write_lock:
+        for photo_id in ids:
+            row = conn.execute(
+                "SELECT path FROM photos WHERE id=? AND missing=0", (photo_id,)
+            ).fetchone()
+            if not row:
+                continue
+            conn.execute(
+                "INSERT INTO location_fixes(path, lat, lon, method) VALUES (?,?,?,'MANUAL')"
+                " ON CONFLICT(path) DO UPDATE SET lat=excluded.lat, lon=excluded.lon,"
+                " method='MANUAL'",
+                (row["path"], lat, lon),
+            )
+            conn.execute(
+                "UPDATE photos SET lat=?, lon=?, gps_method='MANUAL' WHERE id=?",
+                (lat, lon, photo_id),
+            )
+            changed += 1
+        conn.commit()
+    return {"changed": changed, "lat": lat, "lon": lon}
+
+
 @app.post("/api/photos/shift-dates")
 def shift_dates(body: dict = Body(...)):
     folder = str(body.get("folder") or "").strip()
     day = str(body.get("to") or "")
-    if not folder or not days.valid_day(day):
+    start = body.get("from")
+    if not folder or not days.valid_day(day) or (start and not days.valid_day(str(start))):
         raise HTTPException(400, "folder and to (YYYY-MM-DD) are required")
-    return scanner.shift_dates(db.connect(), folder, day)
+    return scanner.shift_dates(db.connect(), folder, day, str(start) if start else None)
 
 
 @app.post("/api/photos/{photo_id}/note")

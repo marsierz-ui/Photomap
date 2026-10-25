@@ -215,7 +215,7 @@ async function show() {
   info.innerHTML = `
     <span><strong>${escapeHtml(data.filename)}</strong></span>
     <span><span class="k">Taken</span> ${fmtDateTime(data.taken_ts)}${data.taken_src === 'mtime' ? ' <span class="k">(file date)</span>' : ''}</span>
-    <span><span class="k">Where</span> ${data.lat == null ? 'no GPS' : `${data.lat.toFixed(5)}, ${data.lon.toFixed(5)}`}${isApprox(data) ? ' <span class="k">(approximate, from the network)</span>' : ''}${data.gps_method === 'MANUAL' ? ' <span class="k">(set by hand)</span>' : ''}</span>
+    <span><span class="k">Where</span> ${data.lat == null ? 'no GPS' : `${data.lat.toFixed(5)}, ${data.lon.toFixed(5)}`}${isApprox(data) ? ' <span class="k">(approximate, from the network)</span>' : ''}${data.gps_method === 'MANUAL' ? ' <span class="k">(set by hand)</span>' : ''}${data.gps_method === 'NEIGHBOUR' ? ' <span class="k">(copied from a neighbouring photo)</span>' : ''}</span>
     <span id="lb-suggest">${isApprox(data) ? '<button data-act="fixloc">Fix location</button>' : ''}</span>
     <span><span class="k">Camera</span> ${escapeHtml([data.camera_make, data.camera_model].filter(Boolean).join(' ') || '—')}</span>
     <span><span class="k">Size</span> ${data.width || '?'}×${data.height || '?'} · ${fmtBytes(data.filesize)}${video ? ` · ▶ ${data.duration ? clock(data.duration) : 'video'}` : ''}</span>

@@ -362,11 +362,30 @@ offered - one wrong position is not a fix for another. **Pick on the map** sets 
 hand instead. The position is stored in `location_fixes` rather than only in the photo's
 row, because a rescan reads the file again and the file still holds the wrong one.
 
+**In bulk.** With photos selected, the bar offers two actions:
+
+- **Fix locations...** gives each selected tower-guess photo the position of the nearest
+  photo with a real GPS fix within **2 hours**, before or after it. A photo with no such
+  neighbour is left as it was, and a photo that was never a tower guess is not touched.
+  What it changes is tagged `NEIGHBOUR`: gallery tiles say *from neighbour*, the lightbox
+  says the position was copied, and **Location: Set from a neighbouring photo** lists the
+  whole batch. A copied position is never used as the source for another, so one fix
+  cannot be carried further each time. To fix everything at once, filter by
+  *Approximate*, **Select all**, then **Fix locations...**.
+- **Set location...** gives every selected photo the same position, whatever it had -
+  none, a tower guess, or a real fix that was wrong. Type it as latitude then longitude
+  (`53.1234, -9.5678`, which is how a map copies it) or pick it on the map. These are
+  tagged `MANUAL`.
+
+Both survive a rescan, and neither writes to the photo files.
+
 **A camera clock that was never set** dates photos January 2000 or February 2001. The
 dates are not wrong in the file, they are what the camera believed, so a rescan would put
 them straight back. `POST /api/photos/shift-dates` with `{"folder": "...", "to":
 "2018-06-12"}` moves every photo under that folder dated before 2005 so that the first
-one lands on that day. Every other photo moves by the same whole number of days, so the
+one lands on that day. Add `"from": "2000-01-21"` to name the clock day that really was
+that day instead: a folder with a few strays taken weeks before the trip would otherwise
+drag the whole trip by the strays' distance. Every other photo moves by the same whole number of days, so the
 gaps between them and each one's time of day are kept, and photos in the same folder that
 already have a real date are left alone. The shift is recorded in `date_shifts` and
 applied again on every rescan. The files themselves are never written to.
@@ -1033,7 +1052,9 @@ player can seek; `/api/photos/<id>/original` still hands over the whole file for
 download.
 
 `GET /api/photos/<id>/location-suggestions` and `POST /api/photos/<id>/location`
-(`{"lat": ..., "lon": ...}`) back the lightbox's Fix location. Every filter also takes
+(`{"lat": ..., "lon": ...}`) back the lightbox's Fix location, and
+`POST /api/photos/fix-locations` and `/api/photos/set-location` (both take `ids`) back
+the selection bar. Every filter also takes
 `gps=approx`.
 
 Notes are written with `POST /api/photos/<id>/note` and a `{"note": "..."}` body; an

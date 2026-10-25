@@ -55,6 +55,7 @@
           <option value="yes">With GPS</option>
           <option value="no">Without GPS</option>
           <option value="approx">Approximate (cell tower)</option>
+          <option value="neighbour">Set from a neighbouring photo</option>
         </select>
       </div>
       <div class="row"><label>Camera</label><select id="f-camera"><option value="">Any</option></select></div>
@@ -197,6 +198,8 @@
   <button id="sel-map" class="btn tiny">Show on map</button>
   <button id="sel-album" class="btn tiny">Add to album…</button>
   <button id="sel-fav" class="btn tiny">Favourite</button>
+  <button id="sel-setloc" class="btn tiny" title="Give every selected photo the same location">Set location…</button>
+  <button id="sel-locfix" class="btn tiny" title="Copy the position of the nearest photo with a real GPS fix within 2 hours">Fix locations…</button>
   <button id="sel-delete" class="btn tiny danger">Delete…</button>
   <div class="spacer"></div>
   <button id="sel-clear" class="btn tiny ghost">Clear</button>

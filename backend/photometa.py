@@ -42,6 +42,9 @@ def is_video(path: str) -> bool:
 # towers or wifi rather than satellites. Such a fix can be tens of kilometres
 # out, which is how a photo taken on the Aran Islands ended up in Co. Clare.
 APPROX_METHODS = ("CELLID", "NETWORK", "WIFI")
+# A position copied from a neighbouring photo is itself an estimate, so it is never
+# used as the source for another - chains would carry one fix further each time.
+ESTIMATED_METHODS = APPROX_METHODS + ("NEIGHBOUR",)
 
 GPS_IFD = 0x8825
 EXIF_IFD = 0x8769

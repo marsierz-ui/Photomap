@@ -112,7 +112,8 @@ CREATE TABLE IF NOT EXISTS date_shifts (
 CREATE TABLE IF NOT EXISTS location_fixes (
     path TEXT PRIMARY KEY,
     lat  REAL NOT NULL,
-    lon  REAL NOT NULL
+    lon  REAL NOT NULL,
+    method TEXT NOT NULL DEFAULT 'MANUAL'
 );
 
 -- Cached content hash of each snapshot thumbnail, keyed by photo. Recomputed
@@ -182,6 +183,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if column not in existing:
             conn.execute(ddl)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_hash ON photos(content_hash)")
+    # Added after location_fixes first existed: whether a stored position was set
+    # by hand or copied from a neighbouring photo, which is worth telling apart.
+    fixes = {r["name"] for r in conn.execute("PRAGMA table_info(location_fixes)")}
+    if fixes and "method" not in fixes:
+        conn.execute("ALTER TABLE location_fixes ADD COLUMN method TEXT NOT NULL DEFAULT 'MANUAL'")
 
     # Trips were removed. Clear out what a previous version left behind - the
     # index has to go before the column it covers, or SQLite refuses the drop.
