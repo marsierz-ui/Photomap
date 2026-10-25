@@ -83,6 +83,7 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
    taking that away permanently to support an occasional gesture would be a poor
    trade on the device where scrolling is the whole interface. */
 .gridctl { position:absolute; top:10px; right:44px; z-index:640; }
+#gallery { user-select:none; -webkit-user-select:none; }
 #gallery.picking { touch-action:none; cursor:crosshair; }
 #gallery.picking .tile { cursor:crosshair; }
 .globe-tip { position:absolute; top:0; left:0; z-index:600; pointer-events:none;
@@ -2872,15 +2873,9 @@ function wireGridSelect() {
     scrolling = null;
   };
 
-  g.addEventListener('pointerdown', (e) => {
-    if (view !== 'gallery' || from !== null) return;
-    // Armed by the button, or shift-dragged with a mouse - the same two ways in
-    // that the map offers.
-    if (!gridArmed && !e.shiftKey) return;
-    if (e.pointerType === 'mouse' && e.button !== 0) return;
-    e.preventDefault();
-    pointer = e.pointerId;
-    client = { x: e.clientX, y: e.clientY };
+  const begin = (id, x, y) => {
+    pointer = id;
+    client = { x, y };
     from = local();
     box = document.createElement('div');
     box.className = 'box-select';
@@ -2891,9 +2886,37 @@ function wireGridSelect() {
       /* the pointer went away between the event and here */
     }
     scrolling = requestAnimationFrame(follow);
+  };
+
+  // With a mouse the box is on by default, but a plain click still has to open
+  // the photo, so nothing starts until the pointer has travelled far enough to be
+  // a drag. A touch drag is how the grid scrolls, so touch still arms it by button.
+  let pending = null;
+  const DRAG_PX = 6;
+
+  g.addEventListener('pointerdown', (e) => {
+    if (view !== 'gallery' || from !== null) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (gridArmed || e.shiftKey) {
+      e.preventDefault();
+      begin(e.pointerId, e.clientX, e.clientY);
+      return;
+    }
+    if (e.pointerType !== 'mouse') return;
+    // Pressing the scrollbar, or the date rail beside it, is not a drag.
+    if (e.clientX > g.getBoundingClientRect().left + g.clientWidth) return;
+    pending = { id: e.pointerId, x: e.clientX, y: e.clientY };
   });
 
+  g.addEventListener('dragstart', (e) => e.preventDefault());
+
   g.addEventListener('pointermove', (e) => {
+    if (pending && e.pointerId === pending.id && from === null) {
+      if (Math.hypot(e.clientX - pending.x, e.clientY - pending.y) < DRAG_PX) return;
+      const start = pending;
+      pending = null;
+      begin(start.id, start.x, start.y);
+    }
     if (from === null || e.pointerId !== pointer) return;
     e.preventDefault();
     client = { x: e.clientX, y: e.clientY };
@@ -2901,6 +2924,7 @@ function wireGridSelect() {
   });
 
   const finish = (e) => {
+    pending = null;
     if (from === null || (e && e.pointerId !== pointer)) return;
     stopFollowing();
     // A pointer sequence still ends in a click on whatever was underneath, and

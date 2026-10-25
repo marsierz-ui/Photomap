@@ -235,10 +235,12 @@ Touching the timeline at all stops playback. Dragging while it played used to do
 you could see - the timer simply overwrote the range on its next tick.
 
 **Gallery** - infinite grid, adjustable tile size, five sort orders. Click opens the
-lightbox, ctrl-click toggles selection, shift-click selects a range. **Select area** drags
-a box across the grid instead - or shift-drag, without pressing anything - and takes
-everything it touches, which is the difference between picking sixty photos and clicking
-sixty times. Dragging to the bottom edge keeps scrolling, and since scrolling is what
+lightbox, ctrl-click toggles selection, shift-click selects a range. **Dragging with a mouse**
+draws a selection box across the grid, with nothing to press first, and takes
+everything it touches. A plain click still opens the photo: nothing starts until the
+pointer has moved a few pixels. On a touch screen dragging is how the grid scrolls, so
+there **Select area** still has to be pressed first. A box is the difference between
+picking sixty photos and clicking sixty times. Dragging to the bottom edge keeps scrolling, and since scrolling is what
 fetches the next page, a long drag reaches photos that had not been loaded when it
 started. It adds to the selection rather than replacing it, and disarms when the drag
 ends. The selection bar adds to albums, favourites, shows on the map, or deletes.
@@ -569,8 +571,8 @@ crossed - so the window is drawn when you let go. It follows the filters like ev
 else: narrowing to an album or a date range rebuilds the rail around what is left.
 
 **Select area** takes a whole block of photos in one gesture rather than one tap each.
-Press it and drag a box across the grid, or shift-drag with a mouse without pressing
-anything, the same two ways in that the map's box select offers. The rectangle is
+With a mouse just drag a box across the grid; on a touch screen press the button first
+(or shift-drag, with a mouse, which also works). The rectangle is
 answered by arithmetic, not by asking the document what is inside it, and here that is
 not an optimisation but the only way it can work at all: the grid is virtualised, so only
 the screenful under your finger exists as elements, and a tile's box is its position

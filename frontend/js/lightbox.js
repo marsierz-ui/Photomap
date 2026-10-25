@@ -159,7 +159,18 @@ const gapText = (s) => (s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round
 async function showSuggestions() {
   const slot = el('lb-suggest');
   slot.innerHTML = '<span class="muted">Looking at the photos either side…</span>';
-  const found = await api.get(`/api/photos/${current.id}/location-suggestions`);
+  let found;
+  try {
+    found = await api.get(`/api/photos/${current.id}/location-suggestions`);
+  } catch (err) {
+    // Said rather than left as "Looking...": a server that predates this route
+    // answers 404, and the fix is to restart it, which nobody can guess from a
+    // message that never changes.
+    slot.innerHTML = `<span class="muted">Could not look: ${escapeHtml(err.message)}. `
+      + 'If the app was started before this update, restart it.</span>'
+      + ' <button data-act="pickloc">Pick on the map</button>';
+    return;
+  }
   const options = [['before', 'earlier'], ['after', 'later']]
     .filter(([key]) => found[key])
     .map(([key, label]) => {

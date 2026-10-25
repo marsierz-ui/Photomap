@@ -380,6 +380,9 @@ button, input, select { font: inherit; color: inherit; }
 /* Selecting an area of the gallery. The band is a child of the scroller, so it
    is positioned in scrolled content coordinates and stays over the same photos
    when the drag runs off the edge and the grid scrolls under it. */
+/* A mouse drag across the grid draws a selection box, so it must not also start
+   selecting text or dragging a picture off. */
+.grid { user-select: none; -webkit-user-select: none; }
 .grid.picking { cursor: crosshair; }
 .grid.picking .tile { cursor: crosshair; }
 .grid-band {

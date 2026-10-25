@@ -221,13 +221,9 @@ function wireAreaSelect() {
     scrolling = null;
   };
 
-  grid.addEventListener('pointerdown', (e) => {
-    if (from !== null) return;
-    if (!armed && !e.shiftKey) return;
-    if (e.pointerType === 'mouse' && e.button !== 0) return;
-    e.preventDefault();
-    pointer = e.pointerId;
-    client = { x: e.clientX, y: e.clientY };
+  const begin = (id, x, y) => {
+    pointer = id;
+    client = { x, y };
     from = point();
     band = document.createElement('div');
     band.className = 'grid-band';
@@ -238,9 +234,38 @@ function wireAreaSelect() {
       /* the pointer ended before capture; the drag still works */
     }
     scrolling = requestAnimationFrame(follow);
+  };
+
+  // A mouse press that has not moved yet. With a mouse the box is on by default,
+  // but a plain click still has to open the photo, so nothing starts until the
+  // pointer has travelled far enough to be a drag rather than a click.
+  let pending = null;
+  const DRAG_PX = 6;
+
+  grid.addEventListener('pointerdown', (e) => {
+    if (from !== null) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (armed || e.shiftKey) {
+      e.preventDefault();
+      begin(e.pointerId, e.clientX, e.clientY);
+      return;
+    }
+    // A touch drag is how the grid scrolls, so there the button still arms it.
+    if (e.pointerType !== 'mouse') return;
+    // The scrollbar sits inside the grid's box; pressing it is not a drag.
+    if (e.clientX > grid.getBoundingClientRect().left + grid.clientWidth) return;
+    pending = { id: e.pointerId, x: e.clientX, y: e.clientY };
   });
 
+  grid.addEventListener('dragstart', (e) => e.preventDefault());
+
   grid.addEventListener('pointermove', (e) => {
+    if (pending && e.pointerId === pending.id && from === null) {
+      if (Math.hypot(e.clientX - pending.x, e.clientY - pending.y) < DRAG_PX) return;
+      const start = pending;
+      pending = null;
+      begin(start.id, start.x, start.y);
+    }
     if (from === null || e.pointerId !== pointer) return;
     e.preventDefault();
     client = { x: e.clientX, y: e.clientY };
@@ -248,6 +273,7 @@ function wireAreaSelect() {
   });
 
   const finish = (e) => {
+    pending = null;
     if (from === null || (e && e.pointerId !== pointer)) return;
     stop();
     // The click that follows the release lands on whatever tile was underneath,
