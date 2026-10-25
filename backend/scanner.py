@@ -95,6 +95,13 @@ def _apply_fixes(conn, meta: dict) -> None:
     if fix:
         meta["lat"], meta["lon"], meta["gps_method"] = fix["lat"], fix["lon"], fix["method"]
 
+    exact = conn.execute(
+        "SELECT taken_ts FROM date_fixes WHERE path=?", (meta["path"],)
+    ).fetchone()
+    if exact:
+        meta["taken_ts"], meta["taken_src"] = exact["taken_ts"], "manual"
+        return
+
     folder = meta["folder"].lower() + os.sep
     for shift in conn.execute("SELECT folder, offset_s, before_ts FROM date_shifts"):
         under = (shift["folder"].lower() + os.sep)
@@ -102,6 +109,25 @@ def _apply_fixes(conn, meta: dict) -> None:
             meta["taken_ts"] += shift["offset_s"]
             meta["taken_src"] = "manual"
             break
+
+
+def set_taken(conn, photo_id: int, taken_ts: int) -> bool:
+    """Set one photo's capture time. Kept in date_fixes so a rescan - which reads
+    the camera's date out of the file again - does not put the old one back."""
+    row = conn.execute("SELECT path FROM photos WHERE id=?", (photo_id,)).fetchone()
+    if not row:
+        return False
+    with db.write_lock:
+        conn.execute(
+            "INSERT INTO date_fixes(path, taken_ts) VALUES (?,?)"
+            " ON CONFLICT(path) DO UPDATE SET taken_ts=excluded.taken_ts",
+            (row["path"], taken_ts),
+        )
+        conn.execute(
+            "UPDATE photos SET taken_ts=?, taken_src='manual' WHERE id=?", (taken_ts, photo_id)
+        )
+        conn.commit()
+    return True
 
 
 def shift_dates(conn, folder: str, to_day: str, from_day: str | None = None,

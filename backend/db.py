@@ -108,6 +108,12 @@ CREATE TABLE IF NOT EXISTS date_shifts (
     offset_s INTEGER NOT NULL,
     before_ts INTEGER NOT NULL
 );
+-- One photo's capture time set by hand, for a clock that was wrong by an amount
+-- no folder-wide shift describes (a phone that reset itself to 1 January 2015).
+CREATE TABLE IF NOT EXISTS date_fixes (
+    path     TEXT PRIMARY KEY,
+    taken_ts INTEGER NOT NULL
+);
 -- A position set by hand, for a photo whose own was a cell-tower guess.
 CREATE TABLE IF NOT EXISTS location_fixes (
     path TEXT PRIMARY KEY,

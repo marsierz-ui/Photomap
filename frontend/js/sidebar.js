@@ -57,7 +57,7 @@ function summarize() {
   if (f.gps !== 'any') {
     bits.push({
       yes: 'with GPS', no: 'without GPS', approx: 'approximate location',
-      neighbour: 'location from a neighbour',
+      neighbour: 'location from a neighbour', manual: 'location set by hand',
     }[f.gps]);
   }
   if (f.fav) bits.push('favourites');

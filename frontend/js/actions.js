@@ -66,6 +66,30 @@ export function setLocationDialog(ids) {
   });
 }
 
+/** Put selected photos back to the position their own file holds. */
+export function undoLocationDialog(ids) {
+  modal(`
+    <h3>Undo location changes on ${fmtNum(ids.length)} selected photo${ids.length === 1 ? '' : 's'}</h3>
+    <p>Each photo whose location was set here - by hand, in bulk, or copied from a
+    neighbouring photo - goes back to the location stored in the photo file itself, which
+    may be none, or the original tower guess.</p>
+    <p class="muted small">Photos you have not changed are left alone.</p>
+    <div class="actions">
+      <button class="btn" data-act="cancel">Cancel</button>
+      <button class="btn danger" data-act="ok">Undo</button>
+    </div>`, (box, close) => {
+    box.querySelector('[data-act=cancel]').onclick = close;
+    box.querySelector('[data-act=ok]').onclick = async () => {
+      close();
+      const res = await guard(api.post('/api/photos/undo-location', { ids }), 'Undo failed');
+      toast(`${fmtNum(res.restored)} restored · ${fmtNum(res.unchanged)} had no change to undo`
+        + (res.unreadable ? ` · ${fmtNum(res.unreadable)} files could not be read` : ''));
+      emit('dataChanged');
+      emit('filters');
+    };
+  });
+}
+
 /** Copy a real position onto cell-tower photos from the nearest photo in time. */
 export function fixLocationsDialog(ids) {
   modal(`

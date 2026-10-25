@@ -379,6 +379,13 @@ row, because a rescan reads the file again and the file still holds the wrong on
 
 Both survive a rescan, and neither writes to the photo files.
 
+**Undo location changes...** puts the selected photos back to the position their own file
+holds - none, or the original tower guess - and drops the stored fix. It reads the file
+again rather than remembering what was there, so two fixes in a row are undone in one
+step. Photos that were never changed are left alone. The selection is kept after a
+batch, so pressing Undo straight away reverts exactly that batch; otherwise filter by
+*Set from a neighbouring photo* or *Set by hand*, **Select all**, then Undo.
+
 **A camera clock that was never set** dates photos January 2000 or February 2001. The
 dates are not wrong in the file, they are what the camera believed, so a rescan would put
 them straight back. `POST /api/photos/shift-dates` with `{"folder": "...", "to":
@@ -389,6 +396,11 @@ drag the whole trip by the strays' distance. Every other photo moves by the same
 gaps between them and each one's time of day are kept, and photos in the same folder that
 already have a real date are left alone. The shift is recorded in `date_shifts` and
 applied again on every rescan. The files themselves are never written to.
+
+One photo's date is set with `POST /api/photos/<id>/taken` and `{"taken": "2020-01-01
+01:02:14"}`, for a clock that was wrong by an amount no folder shift describes (a phone
+that reset itself to 1 January 2015). It is stored in `date_fixes` and wins over any
+folder shift.
 
 ## How dates are handled
 
@@ -1053,8 +1065,8 @@ download.
 
 `GET /api/photos/<id>/location-suggestions` and `POST /api/photos/<id>/location`
 (`{"lat": ..., "lon": ...}`) back the lightbox's Fix location, and
-`POST /api/photos/fix-locations` and `/api/photos/set-location` (both take `ids`) back
-the selection bar. Every filter also takes
+`POST /api/photos/fix-locations`, `/api/photos/set-location` and
+`/api/photos/undo-location` (all take `ids`) back the selection bar. Every filter also takes
 `gps=approx`.
 
 Notes are written with `POST /api/photos/<id>/note` and a `{"note": "..."}` body; an

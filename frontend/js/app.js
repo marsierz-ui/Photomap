@@ -12,7 +12,7 @@ import { initCloud } from './cloud.js';
 import { initDupes } from './dupes.js';
 import { initJournal } from './journal.js';
 import { initTheme } from './theme.js';
-import { setFavorite, deleteDialog, fixLocationsDialog, setLocationDialog } from './actions.js';
+import { setFavorite, deleteDialog, fixLocationsDialog, setLocationDialog, undoLocationDialog } from './actions.js';
 
 // ------------------------------------------------------------------- views
 
@@ -76,6 +76,7 @@ function wireSelection() {
   el('sel-fav').onclick = () => setFavorite([...state.selection], true);
   el('sel-locfix').onclick = () => fixLocationsDialog([...state.selection]);
   el('sel-setloc').onclick = () => setLocationDialog([...state.selection]);
+  el('sel-undoloc').onclick = () => undoLocationDialog([...state.selection]);
   el('sel-delete').onclick = () => deleteDialog([...state.selection]);
   el('sel-map').onclick = () => {
     showView('map');

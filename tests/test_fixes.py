@@ -217,6 +217,56 @@ except Exception:
     refused = True
 check("an empty selection is refused", refused)
 
+# ------------------------------------------------------------------- undoing it
+u_real = photo(LIB / "undo" / "real.jpg", "2026:11:01 13:20:00", 53.12, -9.70, "GPS")
+u_cell = photo(LIB / "undo" / "cell.jpg", "2026:11:01 13:50:00", 52.0, -9.0, "CELLID")
+u_none = photo(LIB / "undo" / "none.jpg", "2026:11:01 14:00:00")
+u_plain = photo(LIB / "undo" / "plain.jpg", "2026:11:01 14:10:00", 51.0, -8.0, "CELLID")
+index(u_real, u_cell, u_none, u_plain)
+main.fix_locations({"ids": [row(u_cell)["id"]]})
+main.set_locations({"ids": [row(u_none)["id"]], "lat": 50.0, "lon": -7.0})
+check("the batch fix did change it", row(u_cell)["gps_method"] == "NEIGHBOUR")
+
+result = main.undo_locations({"ids": [row(p)["id"] for p in (u_cell, u_none, u_plain)]})
+check("a copied position goes back to the tower guess in the file",
+      row(u_cell)["gps_method"] == "CELLID" and abs(row(u_cell)["lat"] - 52.0) < 1e-6,
+      f"{row(u_cell)['gps_method']} {row(u_cell)['lat']}")
+check("a position given to a photo with none goes back to none",
+      row(u_none)["lat"] is None and row(u_none)["gps_method"] is None)
+check("a photo that was never changed is left alone",
+      row(u_plain)["gps_method"] == "CELLID" and abs(row(u_plain)["lat"] - 51.0) < 1e-6)
+check("the counts say so", (result["restored"], result["unchanged"]) == (2, 1), str(result))
+index(u_cell, u_none)
+check("and a rescan no longer re-applies it",
+      row(u_cell)["gps_method"] == "CELLID" and row(u_none)["lat"] is None)
+check("the fix records are gone",
+      conn.execute("SELECT COUNT(*) FROM location_fixes WHERE path IN (?,?)",
+                   (u_cell, u_none)).fetchone()[0] == 0)
+
+# a second fix on top of a first, then one undo, must reach the file's own value
+main.set_locations({"ids": [row(u_cell)["id"]], "lat": 40.0, "lon": -5.0})
+main.set_locations({"ids": [row(u_cell)["id"]], "lat": 41.0, "lon": -6.0})
+main.undo_locations({"ids": [row(u_cell)["id"]]})
+check("two fixes in a row are undone in one step",
+      row(u_cell)["gps_method"] == "CELLID" and abs(row(u_cell)["lat"] - 52.0) < 1e-6)
+check("the set-by-hand filter finds photos changed by hand",
+      conn.execute("SELECT COUNT(*) FROM photos WHERE gps_method='MANUAL'").fetchone()[0] > 0)
+
+# ------------------------------------------------------- one photo's own date
+dated = photo(LIB / "reset" / "20150101_010214 (2023_02_22 20_13_06 UTC).jpg", "2015:01:01 01:02:14")
+index(dated)
+check("a phone that reset itself reads as 2015",
+      day(dated).year == 2015, str(day(dated)))
+target = photometa.wall_ts(datetime.datetime(2020, 1, 1, 1, 2, 14))
+check("the date can be set", scanner.set_taken(conn, row(dated)["id"], target))
+check("only the year moves", (day(dated).year, day(dated).month, day(dated).day,
+                              day(dated).hour, day(dated).minute, day(dated).second)
+      == (2020, 1, 1, 1, 2, 14), str(day(dated)))
+check("it is marked as set by hand", row(dated)["taken_src"] == "manual")
+index(dated)
+check("a rescan keeps it, though the file still says 2015", day(dated).year == 2020, str(day(dated)))
+check("an unknown photo is reported as such", scanner.set_taken(conn, 999999, 0) is False)
+
 print()
 print(f"{len(failures)} FAILED" if failures else "ALL FIX CHECKS PASSED")
 sys.exit(1 if failures else 0)

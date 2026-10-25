@@ -94,6 +94,8 @@ def _filters(request: Request) -> tuple[str, list]:
         where.append("p.lat IS NOT NULL")
     elif gps == "no":
         where.append("p.lat IS NULL")
+    elif gps == "manual":
+        where.append("p.gps_method='MANUAL'")
     elif gps == "neighbour":
         where.append("p.gps_method='NEIGHBOUR'")
     elif gps == "approx":
@@ -699,6 +701,56 @@ def set_locations(body: dict = Body(...)):
             changed += 1
         conn.commit()
     return {"changed": changed, "lat": lat, "lon": lon}
+
+
+@app.post("/api/photos/undo-location")
+def undo_locations(body: dict = Body(...)):
+    """Put selected photos back to the position their own file holds.
+
+    Reads the file again rather than remembering what was there: the file is the
+    one place the original is guaranteed to still be, whatever number of fixes
+    were made on top of it since. Photos with no stored fix are left as they are.
+    """
+    ids = [int(i) for i in body.get("ids", [])]
+    if not ids or len(ids) > BATCH_CAP:
+        raise HTTPException(400, f"Between 1 and {BATCH_CAP} photos")
+    conn = db.connect()
+    restored = unchanged = unreadable = 0
+    for photo_id in ids:
+        row = conn.execute(
+            "SELECT p.path FROM photos p JOIN location_fixes f ON f.path = p.path"
+            " WHERE p.id=? AND p.missing=0",
+            (photo_id,),
+        ).fetchone()
+        if not row:
+            unchanged += 1
+            continue
+        if not os.path.exists(row["path"]):
+            unreadable += 1
+            continue
+        meta = photometa.read(row["path"])
+        with db.write_lock:
+            conn.execute("DELETE FROM location_fixes WHERE path=?", (row["path"],))
+            conn.execute(
+                "UPDATE photos SET lat=?, lon=?, gps_method=? WHERE id=?",
+                (meta["lat"], meta["lon"], meta.get("gps_method"), photo_id),
+            )
+            conn.commit()
+        restored += 1
+    return {"restored": restored, "unchanged": unchanged, "unreadable": unreadable}
+
+
+@app.post("/api/photos/{photo_id}/taken")
+def set_taken(photo_id: int, body: dict = Body(...)):
+    """Set one photo's capture time, as a wall clock: YYYY-MM-DD HH:MM:SS."""
+    try:
+        when = datetime.datetime.strptime(str(body.get("taken", "")), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        raise HTTPException(400, "taken must be YYYY-MM-DD HH:MM:SS")
+    ts = photometa.wall_ts(when)
+    if not scanner.set_taken(db.connect(), photo_id, ts):
+        raise HTTPException(404, "Not found")
+    return {"taken_ts": ts}
 
 
 @app.post("/api/photos/shift-dates")
