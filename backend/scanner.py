@@ -1,4 +1,5 @@
 """Background library scan: walk roots, read EXIF, upsert into the index."""
+import datetime
 import os
 import threading
 import time
@@ -82,6 +83,63 @@ def _walk(roots: list[str]) -> list[str]:
     return found
 
 
+def _apply_fixes(conn, meta: dict) -> None:
+    """Put hand-made corrections over what the file says.
+
+    Idempotent, which matters: a rescan always starts from the file's own values,
+    so applying a shift twice is not possible - it is applied to a fresh read.
+    """
+    fix = conn.execute(
+        "SELECT lat, lon FROM location_fixes WHERE path=?", (meta["path"],)
+    ).fetchone()
+    if fix:
+        meta["lat"], meta["lon"], meta["gps_method"] = fix["lat"], fix["lon"], "MANUAL"
+
+    folder = meta["folder"].lower() + os.sep
+    for shift in conn.execute("SELECT folder, offset_s, before_ts FROM date_shifts"):
+        under = (shift["folder"].lower() + os.sep)
+        if folder.startswith(under) and meta["taken_ts"] is not None                 and meta["taken_ts"] < shift["before_ts"]:
+            meta["taken_ts"] += shift["offset_s"]
+            meta["taken_src"] = "manual"
+            break
+
+
+def shift_dates(conn, folder: str, to_day: str, before_ts: int = 1104537600) -> dict:
+    """Move a folder's photos with a bogus camera clock to a real date.
+
+    The first affected photo's day becomes `to_day` (YYYY-MM-DD) and every other
+    photo moves by the same whole number of days, so the gaps between them - and
+    each photo's time of day - are kept. Only photos dated before `before_ts`
+    (2005 by default) move; the rest of the folder already has real dates.
+    Recorded in date_shifts so a rescan does the same thing again.
+    """
+    like = folder.rstrip("/\\") + os.sep
+    rows = conn.execute(
+        "SELECT id, path, taken_ts FROM photos WHERE missing=0 AND taken_ts < ?"
+        " AND substr(lower(path), 1, ?) = lower(?)",
+        (before_ts, len(like), like),
+    ).fetchall()
+    if not rows:
+        return {"moved": 0}
+    first = min(r["taken_ts"] for r in rows)
+    first_day = datetime.datetime.fromtimestamp(first, datetime.UTC).date()
+    target = datetime.date.fromisoformat(to_day)
+    offset = (target - first_day).days * 86400
+    with db.write_lock:
+        conn.execute(
+            "INSERT INTO date_shifts(folder, offset_s, before_ts) VALUES (?,?,?)"
+            " ON CONFLICT(folder) DO UPDATE SET offset_s=excluded.offset_s,"
+            " before_ts=excluded.before_ts",
+            (folder.rstrip("/\\"), offset, before_ts),
+        )
+        conn.executemany(
+            "UPDATE photos SET taken_ts=taken_ts+?, taken_src='manual' WHERE id=?",
+            [(offset, r["id"]) for r in rows],
+        )
+        conn.commit()
+    return {"moved": len(rows), "offset_days": offset // 86400}
+
+
 def upsert(conn, meta: dict, now: int) -> tuple[int, bool]:
     """Insert or refresh one photo row. Returns (photo_id, was_created).
 
@@ -91,18 +149,19 @@ def upsert(conn, meta: dict, now: int) -> tuple[int, bool]:
     ordering in the codebase means the two paths cannot drift apart.
     """
     row = conn.execute("SELECT id FROM photos WHERE path=?", (meta["path"],)).fetchone()
+    _apply_fixes(conn, meta)
     values = (
         meta["path"], meta["folder"], meta["filename"], meta["ext"],
         meta["taken_ts"], meta["taken_src"], meta["lat"], meta["lon"],
         meta["altitude"], meta["width"], meta["height"], meta["orientation"],
         meta["camera_make"], meta["camera_model"], meta["filesize"], meta["mtime"],
-        meta.get("duration"),
+        meta.get("duration"), meta.get("gps_method"),
     )
     if row:
         conn.execute(
             "UPDATE photos SET path=?, folder=?, filename=?, ext=?, taken_ts=?,"
             " taken_src=?, lat=?, lon=?, altitude=?, width=?, height=?, orientation=?,"
-            " camera_make=?, camera_model=?, filesize=?, mtime=?, duration=?, missing=0"
+            " camera_make=?, camera_model=?, filesize=?, mtime=?, duration=?, gps_method=?, missing=0"
             " WHERE id=?",
             values + (row["id"],),
         )
@@ -110,8 +169,8 @@ def upsert(conn, meta: dict, now: int) -> tuple[int, bool]:
     cur = conn.execute(
         "INSERT INTO photos(path, folder, filename, ext, taken_ts, taken_src,"
         " lat, lon, altitude, width, height, orientation, camera_make,"
-        " camera_model, filesize, mtime, duration, added_ts, missing)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",
+        " camera_model, filesize, mtime, duration, gps_method, added_ts, missing)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",
         values + (now,),
     )
     return cur.lastrowid, True

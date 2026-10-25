@@ -346,6 +346,31 @@ Two modes, chosen every time:
 
 Nothing is ever hard-deleted.
 
+## Correcting a wrong location or date
+
+**A position can be a guess.** A phone with no satellite fix works out a position from
+mobile towers or wifi and writes it into the photo like any other, tagged
+`GPSProcessingMethod = CELLID` (or `NETWORK`, `WIFI`). Such a fix can be tens of
+kilometres out: a photo taken on the Aran Islands was filed in Co. Clare. The index keeps
+that tag (`photos.gps_method`), **Location → Approximate (cell tower)** in the filters
+lists exactly those photos, and their gallery tiles say *approx.*
+
+Open one in the lightbox and press **Fix location**. It offers the position of the
+nearest photo before and after it in time that has a real GPS fix, within 12 hours, and
+says how long apart they were taken. Photos that were themselves a tower guess are never
+offered - one wrong position is not a fix for another. **Pick on the map** sets it by
+hand instead. The position is stored in `location_fixes` rather than only in the photo's
+row, because a rescan reads the file again and the file still holds the wrong one.
+
+**A camera clock that was never set** dates photos January 2000 or February 2001. The
+dates are not wrong in the file, they are what the camera believed, so a rescan would put
+them straight back. `POST /api/photos/shift-dates` with `{"folder": "...", "to":
+"2018-06-12"}` moves every photo under that folder dated before 2005 so that the first
+one lands on that day. Every other photo moves by the same whole number of days, so the
+gaps between them and each one's time of day are kept, and photos in the same folder that
+already have a real date are left alone. The shift is recorded in `date_shifts` and
+applied again on every rescan. The files themselves are never written to.
+
 ## How dates are handled
 
 EXIF capture times carry no timezone. A photo taken at 15:00 in Tokyo and one taken at
@@ -983,7 +1008,7 @@ data/            photomap.db + thumbs/ (created on first run, safe to delete)
 
 Run the tests with `.venv\Scripts\python.exe tests\test_sync.py`,
 `tests\test_writeback.py`, `tests\test_nametime.py`, `tests\test_dupes.py`,
-`tests\test_videometa.py`, `node tests\test_worker.mjs`, `node tests\test_exif.mjs`,
+`tests\test_videometa.py`, `tests\test_fixes.py`, `node tests\test_worker.mjs`, `node tests\test_exif.mjs`,
 `node tests\test_uploadq.mjs`, `node tests\test_sw.mjs`, and (after
 `pip install botocore`) `tests\test_sigv4.py`.
 
@@ -1006,6 +1031,10 @@ path or the note.
 A video plays from `/api/photos/<id>/video`, which answers `Range` requests so a
 player can seek; `/api/photos/<id>/original` still hands over the whole file for a
 download.
+
+`GET /api/photos/<id>/location-suggestions` and `POST /api/photos/<id>/location`
+(`{"lat": ..., "lon": ...}`) back the lightbox's Fix location. Every filter also takes
+`gps=approx`.
 
 Notes are written with `POST /api/photos/<id>/note` and a `{"note": "..."}` body; an
 empty string clears it. Journal days are `GET /api/days` and

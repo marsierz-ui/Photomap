@@ -54,7 +54,9 @@ function summarize() {
   if (f.album) bits.push(`album: ${state.albums.find((a) => a.id === Number(f.album))?.name ?? f.album}`);
   if (f.camera) bits.push(`camera: ${f.camera}`);
   if (f.q) bits.push(`"${f.q}"`);
-  if (f.gps !== 'any') bits.push(f.gps === 'yes' ? 'with GPS' : 'without GPS');
+  if (f.gps !== 'any') {
+    bits.push({ yes: 'with GPS', no: 'without GPS', approx: 'approximate location' }[f.gps]);
+  }
   if (f.fav) bits.push('favourites');
   if (state.followMap) bits.push('map viewport');
   el('filter-summary').textContent = bits.join(' · ');

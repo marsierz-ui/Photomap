@@ -94,6 +94,11 @@ def _filters(request: Request) -> tuple[str, list]:
         where.append("p.lat IS NOT NULL")
     elif gps == "no":
         where.append("p.lat IS NULL")
+    elif gps == "approx":
+        # Positions guessed from towers or wifi, which are the ones worth fixing.
+        marks = ",".join("?" * len(photometa.APPROX_METHODS))
+        where.append(f"p.lat IS NOT NULL AND p.gps_method IN ({marks})")
+        params.extend(photometa.APPROX_METHODS)
 
     box = _bbox(q.get("bbox"))
     if box:
@@ -377,7 +382,7 @@ def list_photos(request: Request, limit: int = 200, offset: int = 0, sort: str =
     rows = conn.execute(
         f"SELECT p.id, p.filename, p.path, p.ext, p.taken_ts, p.taken_src, p.lat, p.lon,"
         f" p.width, p.height, p.favorite, p.filesize, p.camera_make, p.camera_model,"
-        f" p.note, p.duration"
+        f" p.note, p.duration, p.gps_method"
         f" FROM photos p WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
         params + [min(limit, 1000), offset],
     ).fetchall()
@@ -531,6 +536,79 @@ def photo_reveal(photo_id: int):
     else:
         subprocess.Popen(["xdg-open", os.path.dirname(path)])
     return {"ok": True}
+
+
+# How far either side of a photo to look for one with a trustworthy position.
+# Past half a day it says nothing about where this one was taken.
+SUGGEST_WINDOW = 12 * 3600
+
+
+@app.get("/api/photos/{photo_id}/location-suggestions")
+def location_suggestions(photo_id: int):
+    """The nearest photos in time, before and after, that have a real GPS fix.
+
+    Photos whose own position was a tower guess are not offered: suggesting one
+    wrong position as the fix for another would only move the error.
+    """
+    conn = db.connect()
+    row = conn.execute("SELECT taken_ts FROM photos WHERE id=?", (photo_id,)).fetchone()
+    if not row or row["taken_ts"] is None:
+        raise HTTPException(404, "Not found")
+    ts = row["taken_ts"]
+    marks = ",".join("?" * len(photometa.APPROX_METHODS))
+    base = (
+        "SELECT id, lat, lon, taken_ts FROM photos WHERE missing=0 AND id != ?"
+        f" AND lat IS NOT NULL AND (gps_method IS NULL OR gps_method NOT IN ({marks}))"
+    )
+    args = [photo_id, *photometa.APPROX_METHODS]
+    before = conn.execute(
+        base + " AND taken_ts <= ? AND taken_ts >= ? ORDER BY taken_ts DESC LIMIT 1",
+        args + [ts, ts - SUGGEST_WINDOW],
+    ).fetchone()
+    after = conn.execute(
+        base + " AND taken_ts >= ? AND taken_ts <= ? ORDER BY taken_ts ASC LIMIT 1",
+        args + [ts, ts + SUGGEST_WINDOW],
+    ).fetchone()
+    shape = lambda r: None if r is None else {  # noqa: E731
+        "id": r["id"], "lat": r["lat"], "lon": r["lon"], "gap": abs(r["taken_ts"] - ts)}
+    return {"before": shape(before), "after": shape(after)}
+
+
+@app.post("/api/photos/{photo_id}/location")
+def set_location(photo_id: int, body: dict = Body(...)):
+    """Set a position by hand. Kept in location_fixes so a rescan - which reads
+    the file again, and the file still holds the wrong one - does not undo it."""
+    try:
+        lat, lon = float(body["lat"]), float(body["lon"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(400, "lat and lon are required")
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise HTTPException(400, "Not a position")
+    conn = db.connect()
+    row = conn.execute("SELECT path FROM photos WHERE id=?", (photo_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Not found")
+    with db.write_lock:
+        conn.execute(
+            "INSERT INTO location_fixes(path, lat, lon) VALUES (?,?,?)"
+            " ON CONFLICT(path) DO UPDATE SET lat=excluded.lat, lon=excluded.lon",
+            (row["path"], lat, lon),
+        )
+        conn.execute(
+            "UPDATE photos SET lat=?, lon=?, gps_method='MANUAL' WHERE id=?",
+            (lat, lon, photo_id),
+        )
+        conn.commit()
+    return {"lat": lat, "lon": lon}
+
+
+@app.post("/api/photos/shift-dates")
+def shift_dates(body: dict = Body(...)):
+    folder = str(body.get("folder") or "").strip()
+    day = str(body.get("to") or "")
+    if not folder or not days.valid_day(day):
+        raise HTTPException(400, "folder and to (YYYY-MM-DD) are required")
+    return scanner.shift_dates(db.connect(), folder, day)
 
 
 @app.post("/api/photos/{photo_id}/note")

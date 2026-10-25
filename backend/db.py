@@ -96,6 +96,25 @@ CREATE TABLE IF NOT EXISTS import_seen (
     first_ts INTEGER NOT NULL
 );
 
+-- Corrections that have to survive a rescan, which re-reads the file and would
+-- otherwise put the wrong value straight back. Both are keyed by something that
+-- identifies the photo rather than by id: a rescan can recreate a row.
+--
+-- A folder whose camera clock was never set: every photo under it dated before
+-- `before_ts` is moved by `offset_s`. The cut-off is what leaves the folder's
+-- other photos alone - they carry real dates and must not move.
+CREATE TABLE IF NOT EXISTS date_shifts (
+    folder   TEXT PRIMARY KEY,
+    offset_s INTEGER NOT NULL,
+    before_ts INTEGER NOT NULL
+);
+-- A position set by hand, for a photo whose own was a cell-tower guess.
+CREATE TABLE IF NOT EXISTS location_fixes (
+    path TEXT PRIMARY KEY,
+    lat  REAL NOT NULL,
+    lon  REAL NOT NULL
+);
+
 -- Cached content hash of each snapshot thumbnail, keyed by photo. Recomputed
 -- only when the source file's mtime moves, so repeat syncs stay cheap.
 CREATE TABLE IF NOT EXISTS snapshot_thumbs (
@@ -156,6 +175,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # Seconds, and NULL for a photo. It is the one fact a video has that a
         # photo does not, and the one the gallery has to draw on the tile.
         ("duration", "ALTER TABLE photos ADD COLUMN duration REAL"),
+        # What produced the position: GPS, or a guess from the network. See
+        # photometa.APPROX_METHODS.
+        ("gps_method", "ALTER TABLE photos ADD COLUMN gps_method TEXT"),
     ):
         if column not in existing:
             conn.execute(ddl)

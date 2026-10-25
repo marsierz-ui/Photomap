@@ -105,7 +105,7 @@ export function pickLocation() {
     if (picking) picking(null);
     picking = resolve;
     map.getContainer().classList.add('selecting');
-    setStatus('Click the map to place this day · Esc to cancel');
+    setStatus('Click the map to place it there · Esc to cancel');
   });
 }
 

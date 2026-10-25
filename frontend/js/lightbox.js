@@ -2,8 +2,8 @@ import { api, previewUrl } from './api.js';
 import { state, on, emit, fmtDateTime, fmtBytes, fmtNum } from './state.js';
 import { el, escapeHtml, toast } from './ui.js';
 import { setFavorite, deleteDialog } from './actions.js';
-import { isVideo, clock } from './gallery.js';
-import { flyToPhoto } from './mapview.js';
+import { isVideo, isApprox, clock } from './gallery.js';
+import { flyToPhoto, pickLocation } from './mapview.js';
 
 const box = el('lightbox');
 const img = el('lb-img');
@@ -25,6 +25,7 @@ function stopPlayer() {
 let ids = [];
 let index = 0;
 let current = null;
+let relocated = false;   // a position changed, so the views behind need redrawing
 
 export function initLightbox() {
   on('openPhoto', ({ id, ids: list }) => open(id, list));
@@ -60,6 +61,17 @@ export function initLightbox() {
       close();
       emit('showMap');
       flyToPhoto(current.lat, current.lon);
+    } else if (act === 'fixloc') {
+      showSuggestions();
+    } else if (act === 'usesug') {
+      saveLocation(Number(e.target.dataset.lat), Number(e.target.dataset.lon));
+    } else if (act === 'pickloc') {
+      const photo = current;
+      close();
+      emit('showMap');
+      const at = await pickLocation();
+      emit('openPhoto', { id: photo.id, ids });
+      if (at) saveLocation(at.lat, at.lng, photo.id);
     } else if (act === 'reveal') {
       await api.post(`/api/photos/${current.id}/reveal`);
     } else if (act === 'delete') {
@@ -112,6 +124,7 @@ function open(id, list) {
 
 function close() {
   saveNote();
+  if (relocated) { relocated = false; emit('filters'); }
   box.classList.add('hidden');
   img.removeAttribute('src');
   stopPlayer();
@@ -137,6 +150,38 @@ function saveNote() {
   api.post(`/api/photos/${photo.id}/note`, { note: value })
     .then(() => toast(value ? 'Note saved' : 'Note cleared'))
     .catch((err) => toast(`Could not save the note: ${err.message}`, true));
+}
+
+const gapText = (s) => (s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min`
+  : `${(s / 3600).toFixed(1)} h`);
+
+/** Offer the position of the nearest photos in time that have a real GPS fix. */
+async function showSuggestions() {
+  const slot = el('lb-suggest');
+  slot.innerHTML = '<span class="muted">Looking at the photos either side…</span>';
+  const found = await api.get(`/api/photos/${current.id}/location-suggestions`);
+  const options = [['before', 'earlier'], ['after', 'later']]
+    .filter(([key]) => found[key])
+    .map(([key, label]) => {
+      const s = found[key];
+      return `<button data-act="usesug" data-lat="${s.lat}" data-lon="${s.lon}">
+        Use the photo taken ${gapText(s.gap)} ${label} · ${s.lat.toFixed(4)}, ${s.lon.toFixed(4)}</button>`;
+    });
+  slot.innerHTML = (options.length ? options.join(' ')
+    : '<span class="muted">No photo with a real GPS fix within 12 hours.</span>')
+    + ' <button data-act="pickloc">Pick on the map</button>';
+}
+
+async function saveLocation(lat, lon, id = current && current.id) {
+  if (id == null) return;
+  try {
+    await api.post(`/api/photos/${id}/location`, { lat, lon });
+    relocated = true;
+    toast('Location corrected');
+    if (current && current.id === id) show();
+  } catch (err) {
+    toast(`Could not save the location: ${err.message}`, true);
+  }
 }
 
 async function show() {
@@ -170,7 +215,8 @@ async function show() {
   info.innerHTML = `
     <span><strong>${escapeHtml(data.filename)}</strong></span>
     <span><span class="k">Taken</span> ${fmtDateTime(data.taken_ts)}${data.taken_src === 'mtime' ? ' <span class="k">(file date)</span>' : ''}</span>
-    <span><span class="k">Where</span> ${data.lat == null ? 'no GPS' : `${data.lat.toFixed(5)}, ${data.lon.toFixed(5)}`}</span>
+    <span><span class="k">Where</span> ${data.lat == null ? 'no GPS' : `${data.lat.toFixed(5)}, ${data.lon.toFixed(5)}`}${isApprox(data) ? ' <span class="k">(approximate, from the network)</span>' : ''}${data.gps_method === 'MANUAL' ? ' <span class="k">(set by hand)</span>' : ''}</span>
+    <span id="lb-suggest">${isApprox(data) ? '<button data-act="fixloc">Fix location</button>' : ''}</span>
     <span><span class="k">Camera</span> ${escapeHtml([data.camera_make, data.camera_model].filter(Boolean).join(' ') || '—')}</span>
     <span><span class="k">Size</span> ${data.width || '?'}×${data.height || '?'} · ${fmtBytes(data.filesize)}${video ? ` · ▶ ${data.duration ? clock(data.duration) : 'video'}` : ''}</span>
     ${albums ? `<span><span class="k">Albums</span> ${albums}</span>` : ''}

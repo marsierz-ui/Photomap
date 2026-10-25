@@ -38,6 +38,11 @@ def is_video(path: str) -> bool:
     return os.path.splitext(path)[1].lower() in VIDEO_EXTS
 
 
+# GPSProcessingMethod values that mean the position was worked out from mobile
+# towers or wifi rather than satellites. Such a fix can be tens of kilometres
+# out, which is how a photo taken on the Aran Islands ended up in Co. Clare.
+APPROX_METHODS = ("CELLID", "NETWORK", "WIFI")
+
 GPS_IFD = 0x8825
 EXIF_IFD = 0x8769
 
@@ -136,6 +141,16 @@ def _gps(gps_ifd: dict) -> tuple[float | None, float | None, float | None]:
     return lat, lon, alt
 
 
+def _gps_method(gps_ifd: dict) -> str | None:
+    """Tag 27 is an undefined-type blob: an 8-byte character code ("ASCII" padded
+    with zeros) followed by the text."""
+    raw = gps_ifd.get(27)
+    if isinstance(raw, bytes):
+        raw = raw[8:] if len(raw) > 8 else raw
+    text = _clean(raw)
+    return text.upper() if text else None
+
+
 def read(path: str) -> dict:
     """Return metadata for one file. Never raises.
 
@@ -164,6 +179,7 @@ def read(path: str) -> dict:
         "camera_make": None,
         "camera_model": None,
         "duration": None,
+        "gps_method": None,
         "error": None,
     }
 
@@ -206,6 +222,8 @@ def read(path: str) -> dict:
                 gps_ifd = {}
             if gps_ifd:
                 meta["lat"], meta["lon"], meta["altitude"] = _gps(gps_ifd)
+                if meta["lat"] is not None:
+                    meta["gps_method"] = _gps_method(gps_ifd)
         except Exception as exc:
             meta["error"] = meta["error"] or f"exif: {exc}"
 

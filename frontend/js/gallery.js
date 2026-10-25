@@ -5,6 +5,9 @@ import { el, toast } from './ui.js';
 // Videos are ordinary library rows with an ordinary place and time; the only
 // thing the grid does differently is say which ones they are.
 const VIDEO_EXTS = new Set(['.mp4', '.m4v', '.mov', '.3gp', '.3g2']);
+// GPSProcessingMethod values that mean a guess from towers or wifi. Mirrors
+// photometa.APPROX_METHODS on the server.
+export const isApprox = (row) => ['CELLID', 'NETWORK', 'WIFI'].includes(row.gps_method);
 export const isVideo = (row) => VIDEO_EXTS.has(String(row.ext || '').toLowerCase());
 export const clock = (seconds) => {
   const whole = Math.round(Number(seconds) || 0);
@@ -140,7 +143,7 @@ function append(rows) {
       <img loading="lazy" src="${thumbUrl(row.id, size)}" alt="">
       <span class="pick"></span>
       <span class="flags">${row.note ? '<span class="note-flag" title="Has a note">✎</span>' : ''}${row.favorite ? '<span class="dot" style="background:#ffd166"></span>' : ''}${dots}</span>
-      <span class="meta">${fmtDate(row.taken_ts)}${row.lat == null ? ' <span class="nogeo">· no GPS</span>' : ''}</span>
+      <span class="meta">${fmtDate(row.taken_ts)}${row.lat == null ? ' <span class="nogeo">· no GPS</span>' : ''}${isApprox(row) ? ' <span class="nogeo">· approx.</span>' : ''}</span>
       ${isVideo(row) ? `<span class="vidmark">▶ ${row.duration ? clock(row.duration) : 'video'}</span>` : ''}
     </div>`;
   }).join('');
