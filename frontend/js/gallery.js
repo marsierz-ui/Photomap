@@ -2,6 +2,15 @@ import { api, thumbUrl } from './api.js';
 import { state, params, emit, on, fmtDate, fmtNum } from './state.js';
 import { el, toast } from './ui.js';
 
+// Videos are ordinary library rows with an ordinary place and time; the only
+// thing the grid does differently is say which ones they are.
+const VIDEO_EXTS = new Set(['.mp4', '.m4v', '.mov', '.3gp', '.3g2']);
+export const isVideo = (row) => VIDEO_EXTS.has(String(row.ext || '').toLowerCase());
+export const clock = (seconds) => {
+  const whole = Math.round(Number(seconds) || 0);
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`;
+};
+
 const PAGE = 120;
 // Served thumbnail sizes. Pick the first that covers the displayed box at the
 // screen's pixel density, so tiles are never upscaled.
@@ -132,6 +141,7 @@ function append(rows) {
       <span class="pick"></span>
       <span class="flags">${row.note ? '<span class="note-flag" title="Has a note">✎</span>' : ''}${row.favorite ? '<span class="dot" style="background:#ffd166"></span>' : ''}${dots}</span>
       <span class="meta">${fmtDate(row.taken_ts)}${row.lat == null ? ' <span class="nogeo">· no GPS</span>' : ''}</span>
+      ${isVideo(row) ? `<span class="vidmark">▶ ${row.duration ? clock(row.duration) : 'video'}</span>` : ''}
     </div>`;
   }).join('');
   grid.insertAdjacentHTML('beforeend', html);

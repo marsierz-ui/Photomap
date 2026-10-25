@@ -2,11 +2,25 @@ import { api, previewUrl } from './api.js';
 import { state, on, emit, fmtDateTime, fmtBytes, fmtNum } from './state.js';
 import { el, escapeHtml, toast } from './ui.js';
 import { setFavorite, deleteDialog } from './actions.js';
+import { isVideo, clock } from './gallery.js';
 import { flyToPhoto } from './mapview.js';
 
 const box = el('lightbox');
 const img = el('lb-img');
+const player = el('lb-video');
 const info = el('lb-info');
+
+/** Stop whatever is playing and let go of the file.
+ *
+ *  Clearing the source matters as much as pausing: a paused <video> with a src
+ *  still holds an open connection to the range endpoint, so stepping through a
+ *  folder of clips would leave one per photo behind it. */
+function stopPlayer() {
+  if (!player.getAttribute('src')) return;
+  player.pause();
+  player.removeAttribute('src');
+  player.load();
+}
 
 let ids = [];
 let index = 0;
@@ -100,6 +114,7 @@ function close() {
   saveNote();
   box.classList.add('hidden');
   img.removeAttribute('src');
+  stopPlayer();
   current = null;
 }
 
@@ -126,11 +141,25 @@ function saveNote() {
 
 async function show() {
   const id = ids[index];
+  // The still first, whatever this turns out to be: the thumbnail is already
+  // cached, and a clip's poster frame is the right thing to show while its
+  // details are being fetched.
+  stopPlayer();
+  img.classList.remove('hidden');
+  player.classList.add('hidden');
   img.src = previewUrl(id);
   info.innerHTML = '<span class="muted">Loading…</span>';
   const data = await api.get(`/api/photos/${id}`);
   if (ids[index] !== id) return;
   current = data;
+
+  const video = isVideo(data);
+  if (video) {
+    img.classList.add('hidden');
+    player.classList.remove('hidden');
+    player.poster = previewUrl(id);
+    player.src = `/api/photos/${id}/video`;
+  }
 
   const albums = (data.albums || [])
     .map((aid) => state.albums.find((a) => a.id === aid))
@@ -143,7 +172,7 @@ async function show() {
     <span><span class="k">Taken</span> ${fmtDateTime(data.taken_ts)}${data.taken_src === 'mtime' ? ' <span class="k">(file date)</span>' : ''}</span>
     <span><span class="k">Where</span> ${data.lat == null ? 'no GPS' : `${data.lat.toFixed(5)}, ${data.lon.toFixed(5)}`}</span>
     <span><span class="k">Camera</span> ${escapeHtml([data.camera_make, data.camera_model].filter(Boolean).join(' ') || '—')}</span>
-    <span><span class="k">Size</span> ${data.width || '?'}×${data.height || '?'} · ${fmtBytes(data.filesize)}</span>
+    <span><span class="k">Size</span> ${data.width || '?'}×${data.height || '?'} · ${fmtBytes(data.filesize)}${video ? ` · ▶ ${data.duration ? clock(data.duration) : 'video'}` : ''}</span>
     ${albums ? `<span><span class="k">Albums</span> ${albums}</span>` : ''}
     <textarea id="lb-note" class="lb-note" rows="1" maxlength="1000" spellcheck="false"
       placeholder="Add a note… (searchable)">${escapeHtml(data.note || '')}</textarea>

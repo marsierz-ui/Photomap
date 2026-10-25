@@ -15,7 +15,8 @@
       "files": [
         {
           "name": "files",
-          "accept": ["image/*", "application/zip", "application/x-zip-compressed", ".zip"]
+          "accept": ["image/*", "video/*", "application/zip",
+                     "application/x-zip-compressed", ".zip"]
         }
       ]
     }

@@ -153,6 +153,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("content_hash", "ALTER TABLE photos ADD COLUMN content_hash TEXT"),
         ("hashed_mtime", "ALTER TABLE photos ADD COLUMN hashed_mtime REAL"),
         ("note", "ALTER TABLE photos ADD COLUMN note TEXT"),
+        # Seconds, and NULL for a photo. It is the one fact a video has that a
+        # photo does not, and the one the gallery has to draw on the tile.
+        ("duration", "ALTER TABLE photos ADD COLUMN duration REAL"),
     ):
         if column not in existing:
             conn.execute(ddl)

@@ -61,7 +61,7 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
 .tabs button.on { background:var(--panel-2); border-color:var(--line); color:var(--text); }
 
 .view { position:relative; min-height:0; overflow:hidden; }
-#map, #gallery, #panel, #insights, #globe { position:absolute; inset:0; }
+#map, #gallery, #panel, #insights, #globe, #journal { position:absolute; inset:0; }
 #map { background:#0b0e13; }
 #globe { background:#080b11; }
 /* Leaflet keeps its zoom and attribution controls above everything in its pane,
@@ -100,6 +100,9 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
            --tile:130px; --gap:4px; }
 #gsizer { position:relative; }
 #panel, #insights { overflow-y:auto; padding:12px; }
+/* The journal scrolls like the panels, with room at the bottom for the tab bar
+   and, on a phone that draws edge to edge, for the home indicator under it. */
+#journal { overflow-y:auto; padding:12px 12px calc(24px + var(--bottom)); }
 
 /* Date rail: a scrollbar that knows what month it is on. Dragging it scrubs the
    gallery. Labels sit at the offset of the first photo of each year, and months
@@ -150,6 +153,12 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
 .tile.sel .pick { background:var(--accent); border-color:#fff; }
 .tile .star { position:absolute; top:4px; right:5px; font-size:12px; color:#ffd166; }
 .tile .dots { position:absolute; bottom:4px; left:5px; display:flex; gap:3px; }
+/* A video is an ordinary tile - the thumbnail is its poster frame - with a badge
+   saying so, because the one thing a still cannot show is that it moves. */
+.tile .vid, .upcard .vid { position:absolute; right:5px; bottom:5px;
+      background:rgba(6,8,12,.74); border-radius:99px; padding:1px 6px;
+      font:600 10px/1.7 system-ui; color:#e6edf3; pointer-events:none; }
+.upcard { position:relative; }
 .tile .dots i { width:8px; height:8px; border-radius:50%; box-shadow:0 0 0 1px rgba(0,0,0,.5); }
 
 .controls { position:absolute; top:10px; right:10px; z-index:500; display:flex;
@@ -294,6 +303,11 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
   .rail { top:var(--top); }
   #gallery { padding-top:calc(8px + var(--top)); }
   #panel, #insights { padding-top:calc(12px + var(--top)); }
+  #journal { padding-top:calc(12px + var(--top)); }
+  /* Six tabs rather than five: the labels give up a little room so none
+     of them wraps on a narrow phone. */
+  .tabbar button { font-size:10px; }
+  .tabbar .ico { font-size:16px; }
 
   /* Filters slide up over the map rather than taking the screen, so the map
      keeps redrawing behind them while the time range moves. */
@@ -321,6 +335,29 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
   #confirm .box { width:100%; height:100%; max-height:none; border-radius:0;
                   padding:18px; padding-top:calc(18px + var(--top)); }
 }
+
+/* Daily notes. One card per day, and every day exists whether or not anything
+   was written in it, so the list runs backwards without end - today at the top,
+   then a month at a time as you scroll. */
+.jbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+.jbar input[type=date] { background:var(--panel-2); border:1px solid var(--line);
+      border-radius:var(--radius); padding:4px 8px; }
+.day { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+       padding:10px; margin-bottom:8px; }
+.day.today { border-color:var(--accent); }
+.day.empty { background:transparent; }
+.day > header { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:6px; }
+.day h4 { margin:0; font-size:13px; font-weight:600; }
+.day .btn { font-size:11px; padding:3px 8px; }
+/* contenteditable, not a textarea: entries are rich text, and the same tag
+   whitelist the desktop uses is applied to everything that goes in or out. */
+.day-text { min-height:1.5em; outline:0; padding:2px 0; overflow-wrap:anywhere; }
+.day-text:empty::before { content:attr(data-placeholder); color:var(--muted); }
+.day-text:focus { border-bottom:1px solid var(--line); }
+.day-text ul, .day-text ol { margin:4px 0; padding-left:22px; }
+.day-divider { display:flex; align-items:center; gap:8px; color:var(--muted);
+      font-size:11px; margin:14px 0 8px; }
+.day-divider::before, .day-divider::after { content:''; flex:1; height:1px; background:var(--line); }
 </style>
 </head>
 <body>
@@ -330,6 +367,7 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
   <div class="tabs seg">
     <button data-view="map" class="on">Map</button>
     <button data-view="gallery">Gallery</button>
+    <button data-view="journal">Journal</button>
     <button data-view="panel">Albums</button>
     <button data-view="insights">Insights</button>
   </div>
@@ -349,7 +387,9 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
        (exif.js is JPEG APP1 only), so a HEIC gets its pin when the computer
        files it rather than the moment it is picked. A photo with a real
        location a minute later beats one with none at all. -->
-  <input id="picker" type="file" accept="image/*,.heic,.heif,.HEIC,.HEIF" multiple hidden>
+  <input id="picker" type="file"
+         accept="image/*,video/*,.heic,.heif,.HEIC,.HEIF,.mov,.MOV,.mp4,.MP4,.m4v,.3gp"
+         multiple hidden>
   <!-- The same job with no `accept` at all, which is the whole point. An accept
        of image types sends Android to its photo picker, and a photo that leaves
        through the photo picker has had its GPS removed by the system before the
@@ -364,6 +404,7 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
   <div id="map"></div>
   <div id="gallery" class="hidden"><div id="uptray"></div><div id="gsizer"></div></div>
   <div id="panel" class="hidden"></div>
+  <div id="journal" class="hidden"></div>
   <div id="insights" class="hidden"></div>
   <div id="globe" class="hidden"></div>
   <div id="rail" class="rail hidden"></div>
@@ -415,7 +456,7 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
        meant to be showing - next to the map's own controls, which is where the
        Add button and the upload state used to sit. -->
   <div class="addrow" id="addrow">
-    <button id="addPhotos" class="hidden">+ Add photos</button>
+    <button id="addPhotos" class="hidden">+ Add photos or video</button>
     <button id="addFiles" class="hidden" title="Browse files, or add a .zip of photos - the way past a phone that blanks the location">+ From files or .zip</button>
     <span id="upstate" class="chip hidden"></span>
   </div>
@@ -429,6 +470,7 @@ button.danger { border-color:#5c2a2c; color:#ff9ea1; }
 <nav class="tabbar" id="tabbar">
   <button data-view="map"><span class="ico">🗺</span>Map</button>
   <button data-view="gallery"><span class="ico">▦</span>Gallery</button>
+  <button data-view="journal"><span class="ico">✎</span>Journal</button>
   <button data-view="panel"><span class="ico">☰</span>Albums</button>
   <button data-view="insights"><span class="ico">▤</span>Insights</button>
   <button id="filterBtn"><span class="ico">⚙</span>Settings</button>
@@ -777,6 +819,85 @@ async function downscale(file) {
   }
 }
 
+// A video's preview is a frame rather than a downscale, and that frame is worth
+// more than a preview: the desktop keeps it as the clip's thumbnail. Pulling a
+// frame out of a container needs a decoder, and the one this app can count on is
+// the one already in the phone playing the video - `ffmpeg` is not a dependency
+// on the computer and may not be there at all.
+const POSTER_AT = 1;            // seconds in, past the black frame clips open on
+const POSTER_TIMEOUT = 20000;
+
+/** A drawn tile, for a clip whose first frame cannot be had.
+ *
+ *  Never nothing: the Worker will not accept an import without a preview, and
+ *  refusing the upload over a missing thumbnail would lose the recording over a
+ *  picture of it. The computer replaces this with a real frame if it can. */
+function drawnPoster() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 320;
+  canvas.height = 320;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#1a1e26';
+  ctx.fillRect(0, 0, 320, 320);
+  ctx.fillStyle = '#788494';
+  ctx.beginPath();
+  ctx.moveTo(132, 114);
+  ctx.lineTo(132, 206);
+  ctx.lineTo(210, 160);
+  ctx.closePath();
+  ctx.fill();
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.8));
+}
+
+async function posterFrame(file) {
+  const url = URL.createObjectURL(file);
+  const video = document.createElement('video');
+  // Muted and inline, which is what lets a phone decode a frame without being
+  // asked to play anything: iOS refuses to load a video that would need sound.
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = 'metadata';
+  try {
+    await new Promise((resolve, reject) => {
+      const giveUp = setTimeout(() => reject(new Error('reading that video timed out')),
+        POSTER_TIMEOUT);
+      video.onloadeddata = () => { clearTimeout(giveUp); resolve(); };
+      video.onerror = () => {
+        clearTimeout(giveUp);
+        reject(new Error('this device cannot read that video'));
+      };
+      video.src = url;
+    });
+    // A clip long enough to have one gets a frame from a second in; a very short
+    // one keeps the frame it opened on rather than seeking past its own end.
+    if (Number.isFinite(video.duration) && video.duration > POSTER_AT * 1.5) {
+      await new Promise((resolve) => {
+        const settle = () => { clearTimeout(timer); resolve(); };
+        const timer = setTimeout(settle, 5000);
+        video.onseeked = settle;
+        video.currentTime = POSTER_AT;
+      });
+    }
+    const w = video.videoWidth;
+    const h = video.videoHeight;
+    if (!w || !h) return drawnPoster();
+    const scale = Math.min(1, PROXY_EDGE / Math.max(w, h));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(w * scale));
+    canvas.height = Math.max(1, Math.round(h * scale));
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+    const frame = await new Promise((resolve) =>
+      canvas.toBlob(resolve, 'image/jpeg', PROXY_QUALITY));
+    return frame || drawnPoster();
+  } catch {
+    return drawnPoster();
+  } finally {
+    URL.revokeObjectURL(url);
+    video.removeAttribute('src');
+    video.load();
+  }
+}
+
 // Why a picked photo has no coordinates on it, which is four different problems
 // wearing the same silence, and the reason "it cannot read the location" has been
 // so hard to pin down. Counted per batch and reported, so the answer comes from
@@ -791,6 +912,10 @@ const LOC_WHY = {
   unreadable: 'the GPS block is there but its coordinates would not parse',
   rejected: 'the coordinates are outside the possible range and were refused',
   stripped: 'the file arrived with no EXIF at all',
+  novideo: 'this phone would not open the clip to read it - your computer reads '
+    + 'it when it files it',
+  novid: 'the clip has no location box - recorded with location off, or the '
+    + 'phone removed it on the way out',
 };
 
 /** Which of four different silences this photo is.
@@ -803,6 +928,13 @@ const LOC_WHY = {
  *  on the phone is untouched; only the copy is stripped. */
 function locKind(file, read) {
   if (read && read.lat != null) return 'ok';
+  // A clip carries its position in the container rather than in EXIF, so the
+  // four silences are three: unreadable here, blanked to zero, or never there.
+  if (Q.isVideo(file)) {
+    if (!read) return 'novideo';
+    return { zeroed:'blanked', absent:'novid', unreadable:'unreadable', ok:'rejected' }[read.gps]
+      || 'novid';
+  }
   const heicish = /\.(heic|heif|avif)$/i.test(file.name)
     || /heic|heif|avif/i.test(file.type || '');
   if (heicish) return 'heic';
@@ -818,35 +950,30 @@ function locKind(file, read) {
  *  answer costs a read rather than a re-encode - and it is the check that
  *  catches a phone which hands over the same photo under a new name each time,
  *  which the cheap fingerprint cannot see. */
+const videoMaxMb = () => Number(M && M.video_max_mb) || 256;
+
 async function stage(file) {
-  const digest = await sha256Hex(await file.arrayBuffer());
+  const video = Q.isVideo(file);
+  if (video && file.size > videoMaxMb() * 1024 * 1024) {
+    throw new Error(`it is larger than ${videoMaxMb()}MB, which is the limit for a clip`);
+  }
+  // Hashed a slice at a time rather than in one go: a 200MB clip read whole
+  // would be held in memory twice over, once here and once by the upload.
+  const digest = await Q.sha256Blob(file);
   if (sent.has(hashKey(digest))) return null;
-  const read = (typeof readExif === 'function' ? await readExif(file) : null);
-  const meta = read || {};
-  const proxy = await downscale(file);
-  if (!proxy) throw new Error('could not read that photo');
-  const ext = (file.name.match(/\.[A-Za-z0-9]+$/) || ['.jpg'])[0].toLowerCase();
-  const rec = {
-    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    queued_ts: Date.now(),
-    name: file.name,
-    file_key: fileKey(file),
-    ext,
-    bytes: file.size,
-    sha256: digest,
-    proxy_sha256: await sha256Hex(await proxy.arrayBuffer()),
-    taken_ts: meta.taken_ts ?? null,
-    lat: meta.lat ?? null,
-    lon: meta.lon ?? null,
-    // Why this photo has no position, which is otherwise a silence with four
-    // very different causes and four different answers. Recorded here because
-    // this is the only place that ever sees the original file.
-    loc: locKind(file, read),
+  const read = video
+    ? (typeof readVideoMeta === 'function' ? await readVideoMeta(file) : null)
+    : (typeof readExif === 'function' ? await readExif(file) : null);
+  const proxy = video ? await posterFrame(file) : await downscale(file);
+  if (!proxy) throw new Error(video ? 'could not read that video' : 'could not read that photo');
+  const rec = Q.record(file, {
+    digest,
     proxy,
-    full: file,
-    iid: null,
-    state: 'queued',
-  };
+    proxyDigest: await sha256Hex(await proxy.arrayBuffer()),
+    read,
+    loc: locKind(file, read),
+  });
+  if (read && read.duration) rec.duration = Math.round(read.duration);
   uploads.push(rec);
   await saveUpload(rec);
   return rec;
@@ -1164,9 +1291,17 @@ async function drainUploads() {
       }
 
       if (rec.full) {
-        const res = await sendBytes(Q.fullPath(rec.iid),
-          rec.full, { sha256: rec.sha256 },
-          (loaded, total) => at(rec, loaded, total, ''));
+        // One request, or one per part when the file is larger than a Worker can
+        // receive - which every video of any length is. The progress bar counts
+        // the whole file either way, so a clip going up in thirty-two pieces
+        // still reads as one thing moving.
+        let base = 0;
+        const post = (path, body, meta) => sendBytes(path, body, meta,
+          (loaded, total) => at(rec, base + loaded, rec.bytes || total, ''));
+        const res = Q.inParts(rec.full)
+          ? await Q.sendParts(updb, rec, post, (n) => { base = (n - 1) * Q.PART_BYTES; })
+          : await sendBytes(Q.fullPath(rec.iid), rec.full, { sha256: rec.sha256 },
+            (loaded, total) => at(rec, loaded, total, ''));
         if (res.status === 507) {
           announceFull(res.data.pending, res.data.quota);
           summary.fatal = res.data.error
@@ -1178,16 +1313,26 @@ async function drainUploads() {
           // The phone keeps nothing but the record: the bytes are in the bucket
           // now, and holding a 50MB copy per photo fills the device.
           rec.full = null;
+          rec.parts = null;
           rec.state = 'done';
           summary.sent += 1;
         } else if (res.status === 413) {
-          // Too big to send. The proxy is already across, so the photo still
-          // lands - at proxy resolution - and the original stays on the phone.
+          if (rec.parts) await Q.abortParts(rec, post);
+          rec.parts = null;
           rec.full = null;
-          rec.state = 'done';
-          rec.proxy_only = true;
-          summary.sent += 1;
-          summary.reasons.set(`${rec.name} was too large to send in full - the smaller copy was added`, 1);
+          if (rec.video) {
+            // A poster is not the clip, and the computer will not file one as
+            // though it were - so this is a failure, not a smaller copy.
+            note(rec, `${rec.name} is too large to send - clips are limited to `
+              + `${videoMaxMb()}MB`);
+          } else {
+            // Too big to send. The proxy is already across, so the photo still
+            // lands - at proxy resolution - and the original stays on the phone.
+            rec.state = 'done';
+            rec.proxy_only = true;
+            summary.sent += 1;
+            summary.reasons.set(`${rec.name} was too large to send in full - the smaller copy was added`, 1);
+          }
         } else {
           // The proxy is across, so the photo is not lost either way; the
           // original is worth another pass rather than a failure.
@@ -1253,15 +1398,81 @@ function reportDrain(summary, title) {
  *  exists and silently nothing where it does not, which is why the page still
  *  drains on its own as well. */
 async function handOver() {
-  if (!uploads.some((u) => u.state !== 'done')) return false;
+  // Registered whenever there might be anything at all to do - a staged photo, a
+  // file nobody has read yet, an edit with nowhere to go. A sync event that
+  // finds nothing costs one wake-up and does nothing, which is far cheaper than
+  // a queue that sits still because the page it belonged to went away.
+  if (!('serviceWorker' in navigator)) return false;
   try {
-    const reg = await navigator.serviceWorker.ready;
-    if (!reg.sync) return false;
+    // Raced against a wait, because `ready` does not reject: where registering
+    // the worker failed - private browsing, storage refused, a browser that has
+    // none - it simply never resolves. Awaiting it plainly would leave whoever
+    // called this hanging for the life of the page, and one of the callers is a
+    // journal entry being saved, which would sit on screen saying "Saving…"
+    // having in fact already been written.
+    const reg = await Promise.race([
+      navigator.serviceWorker.ready,
+      new Promise((resolve) => setTimeout(() => resolve(null), 2000)),
+    ]);
+    if (!reg || !reg.sync) return false;
     await reg.sync.register(Q.SYNC_TAG);
     return true;
   } catch {
     return false;   // permission refused, or no Background Sync here
   }
+}
+
+// How much of an unread selection is worth keeping on the phone. The point of
+// holding any of it is that a batch survives the screen going off; the point of
+// a limit is that a five thousand photo roll is several gigabytes, and parking
+// that is the phone's storage quota rather than anything this app can apologise
+// for. Whatever a browser does with a picked File - some hold a reference to
+// the file on disk, some copy the bytes - this is the worst case.
+const HOLD_MAX_BYTES = 1024 * 1024 * 1024;
+
+/** Keep what was picked but never read, so something else can get to it.
+ *
+ *  This is what makes "it carries on with the screen off" true of a whole
+ *  selection rather than of the handful that happened to be staged: the service
+ *  worker reads the next one itself and sends it. Returns how many were kept. */
+async function holdRest(rest) {
+  if (!updb) return 0;
+  let kept = 0;
+  let bytes = 0;
+  for (const file of rest) {
+    if (alreadyMine(file) || inLibrary(file)) continue;
+    if (bytes + file.size > HOLD_MAX_BYTES) break;
+    try {
+      await Q.hold(updb, file);
+    } catch {
+      break;    // storage refused it; what is already held still goes
+    }
+    bytes += file.size;
+    kept += 1;
+  }
+  if (kept) await handOver();
+  return kept;
+}
+
+/** Take back whatever is still held and carry on reading it.
+ *
+ *  Called when the app comes back, because the worker only stages what the
+ *  bitmap decoder will open: a HEIC or a video is left for the page, which has
+ *  a document behind it and can decode both. */
+async function resumeHeld() {
+  if (!updb || picking) return;
+  let rows = [];
+  try {
+    rows = await Q.held(updb);
+    if (!rows.length) return;
+    await Q.clearHold(updb);
+  } catch {
+    return;
+  }
+  const files = rows.map((r) => r.file).filter(Boolean);
+  // addFiles holds back whatever it cannot reach this time round, so nothing is
+  // lost by taking the lot out first.
+  if (files.length) await addFiles(files);
 }
 
 /** Photos sent to the app from somewhere else - a file manager, a gallery - which
@@ -1343,7 +1554,9 @@ $('addPhotos').onclick = async () => {
 const ZIP_EOCD = 0x06054b50;
 const ZIP_ENTRY = 0x02014b50;
 const ZIP_LOCAL = 0x04034b50;
-const IMAGE_IN_ZIP = /\.(jpe?g|png|tiff?|webp|bmp|gif|heic|heif|avif)$/i;
+// Clips too: a .zip is the way past a phone that blanks coordinates, and a
+// video's location is blanked by the same layer that blanks a photo's.
+const MEDIA_IN_ZIP = /\.(jpe?g|png|tiff?|webp|bmp|gif|heic|heif|avif|mp4|m4v|mov|3gp|3g2)$/i;
 
 /** DOS date and time, which is what a zip records, as an epoch. */
 function dosStamp(date, time) {
@@ -1416,9 +1629,9 @@ async function expandZips(files) {
     if (!/\.zip$/i.test(file.name)) { out.push(file); continue; }
     try {
       const entries = (await zipEntries(file)).filter((e) =>
-        !e.name.endsWith('/') && !e.name.startsWith('__MACOSX/') && IMAGE_IN_ZIP.test(e.name));
+        !e.name.endsWith('/') && !e.name.startsWith('__MACOSX/') && MEDIA_IN_ZIP.test(e.name));
       if (!entries.length) {
-        toast(`${file.name} has no photos in it`, true);
+        toast(`${file.name} has no photos or videos in it`, true);
         continue;
       }
       step(`Opening ${file.name}…`, 0, 0);
@@ -1490,6 +1703,7 @@ async function addFiles(chosen) {
   }
   const queued = () => uploads.filter((u) => u.state === 'queued' || u.state === 'sent').length;
   let added = 0;
+  let clips = 0;
   let skipped = 0;
   let sent = 0;
   let left = 0;
@@ -1510,7 +1724,7 @@ async function addFiles(chosen) {
   };
 
   picking = { done: 0, total: files.length };
-  startProgress(`Reading ${fmtNum(files.length)} photos…`);
+  startProgress(`Reading ${fmtNum(files.length)} file${files.length === 1 ? '' : 's'}…`);
   paintUploads();
   try {
     for (const [i, file] of files.entries()) {
@@ -1538,6 +1752,7 @@ async function addFiles(chosen) {
       if (rec === null) { skipped += 1; continue; }
 
       added += 1;
+      if (rec.video) clips += 1;
       paintUploads();
       if (queued() >= STAGE_AHEAD) {
         const pass = fold(await drainUploads());
@@ -1559,8 +1774,18 @@ async function addFiles(chosen) {
     endProgress();
   }
 
-  // Hand whatever is left to the service worker, so closing the app is no longer
-  // the same as stopping the upload.
+  // Whatever was picked and never read is kept rather than reported as lost -
+  // unless Stop was pressed, which is a decision and not an interruption.
+  let heldBack = 0;
+  if (left && !stopped) {
+    try {
+      heldBack = await holdRest(files.slice(files.length - left));
+    } catch {
+      /* nothing kept; the line below says so rather than promising otherwise */
+    }
+  }
+  // Hand whatever is left to the service worker, so closing the app - or the
+  // screen going off - is no longer the same as stopping the upload.
   await handOver();
 
   const stillQueued = queued();
@@ -1571,9 +1796,16 @@ async function addFiles(chosen) {
   // Ahead of the count of what was skipped over, because it is why they were.
   if (fatal && !failures.has(fatal)) lines.unshift(fatal);
   if (stillQueued && !left) {
-    lines.push(`${fmtNum(stillQueued)} still queued - they go when you next open the app`);
+    lines.push(`${fmtNum(stillQueued)} still queued - they go on their own, even with `
+      + 'the app shut');
   }
-  if (left) lines.push(`${fmtNum(left)} not reached - add them again once these have gone`);
+  if (heldBack) {
+    lines.push(`${fmtNum(heldBack)} not read yet - they are kept here and go by `
+      + 'themselves, screen off or not');
+  }
+  if (left > heldBack) {
+    lines.push(`${fmtNum(left - heldBack)} not reached - add them again once these have gone`);
+  }
   // The question this answers is "why is it not on the map?", and it is asked
   // the moment the panel appears rather than later.
   // One line per reason rather than one number for all of them: "no location"
@@ -1596,7 +1828,7 @@ async function addFiles(chosen) {
   else if (stopped) title = `Stopped · ${fmtNum(sent)} of ${fmtNum(added)} sent`;
   else if (!added) title = skipped ? 'Nothing new to add' : 'Nothing added';
   else if (stillQueued) title = `${fmtNum(sent)} of ${fmtNum(added)} sent · ${fmtNum(stillQueued)} still to go`;
-  else title = `${fmtNum(sent)} photo${sent === 1 ? '' : 's'} added`;
+  else title = `${fmtNum(sent)} ${clips ? 'item' : 'photo'}${sent === 1 ? '' : 's'} added`;
 
   showResult(title, lines, bad, uploads.some((u) => u.state === 'failed'));
   paintUploads();
@@ -1607,6 +1839,7 @@ async function addFiles(chosen) {
 // drains by itself the moment the signal returns is the app working, not news.
 window.addEventListener('online', async () => {
   uploadsFull = false;
+  await flushParked();
   reportDrain(await drainUploads(), null);
 });
 
@@ -1920,9 +2153,11 @@ function bindPhotoEvents(layer) {
  *  something. Photos with no date share the fallback colour and are not days. */
 function daySuffix(idx) {
   if (!byDay) return '';
-  const days = new Set();
-  idx.forEach((i) => { if (M.ts[i]) days.add(Math.floor(M.ts[i] / 86400)); });
-  return ` · ${fmtNum(days.size)} day${days.size === 1 ? '' : 's'}`;
+  // `seen`, not `days`: the journal owns that name at the top level now, and a
+  // local shadowing it would be a trap rather than a saving.
+  const seen = new Set();
+  idx.forEach((i) => { if (M.ts[i]) seen.add(Math.floor(M.ts[i] / 86400)); });
+  return ` · ${fmtNum(seen.size)} day${seen.size === 1 ? '' : 's'}`;
 }
 
 function drawMap() {
@@ -2384,6 +2619,24 @@ function place(node, k) {
   node.style.height = `${geo.tileW}px`;
 }
 
+/** Which positions in the snapshot are clips, and how long each one runs.
+ *  Published sparsely - a library is mostly photos - so it is unpacked once. */
+let videoAt = new Set();
+let videoLen = {};
+
+function readVideoIndex() {
+  videoAt = new Set(M.vids || []);
+  videoLen = M.dur || {};
+}
+
+const clock = (seconds) => {
+  const whole = Math.round(Number(seconds) || 0);
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`;
+};
+
+const videoTag = (i) => (videoAt.has(i)
+  ? `<span class="vid">▶ ${videoLen[i] ? clock(videoLen[i]) : 'video'}</span>` : '');
+
 function makeTile(k) {
   const i = galleryIdx[k];
   const id = M.ids[i];
@@ -2397,6 +2650,7 @@ function makeTile(k) {
     <span class="pick"></span>
     ${M.fav[i] ? '<span class="star">★</span>' : ''}
     ${noteOf(i) ? '<span class="pen" title="Has a note">✎</span>' : ''}
+    ${videoTag(i)}
     <span class="dots">${dots}</span>`;
   place(node, k);
   return node;
@@ -2470,6 +2724,7 @@ function drawUploadTray() {
       const src = u.proxy ? trayUrls.get(u.id) : '';
       return `<figure class="upcard${u.state === 'failed' ? ' bad' : ''}">
       ${src ? `<img alt="" src="${src}">` : '<div class="upblank"></div>'}
+      ${u.video ? `<span class="vid">▶ ${u.duration ? clock(u.duration) : 'video'}</span>` : ''}
       <figcaption>${escapeHtml(u.name)}<br><span class="muted">${escapeHtml(label(u))}</span></figcaption>
     </figure>`;
     }).join('')}</div>`;
@@ -2840,7 +3095,11 @@ function openPhoto(i) {
   shadeIndex = i;
   $('shade').style.display = 'flex';
   $('shade').querySelector('img').src = `t/${M.th[i]}.jpg`;
-  $('shadeCap').textContent = fmtDT(M.ts[i]) + (M.lat[i] != null ? ` · ${M.lat[i].toFixed(4)}, ${M.lon[i].toFixed(4)}` : ' · no GPS');
+  const where = M.lat[i] != null ? ` · ${M.lat[i].toFixed(4)}, ${M.lon[i].toFixed(4)}` : ' · no GPS';
+  const clip = videoAt.has(i)
+    ? ` · ▶ video${videoLen[i] ? ` ${clock(videoLen[i])}` : ''} - plays on your computer`
+    : '';
+  $('shadeCap').textContent = fmtDT(M.ts[i]) + where + clip;
   $('shadeFav').textContent = M.fav[i] ? '★ Favourited' : '☆ Favourite';
   $('shadeDelete').classList.toggle('hidden', !M.allow_delete);
   const field = $('shadeNote');
@@ -3112,6 +3371,510 @@ function drawInsights() {
   $('status').textContent = `${fmtNum(n)} shown of ${fmtNum(M.n)}`;
 }
 
+
+// ------------------------------------------------------------------- journal
+//
+// A note per calendar day, written on the phone. It works the way the desktop's
+// does - every day exists whether or not anything was written in it, so the list
+// runs backwards without end - with two differences that come from where it is:
+//
+//   there is no server to save to. An entry is queued in the bucket like a
+//   favourite or a photo note, and the computer applies it on its next sync. So
+//   the phone keeps its own copy of what it wrote until the snapshot comes back
+//   carrying it, or a day written on the train would vanish on the next reload;
+//
+//   and geolocation works here, which it does not on the LAN app: a browser only
+//   hands out a position in a secure context, and this is served over HTTPS.
+//   So `Use my location` is a real button on a phone for the first time.
+
+const JOURNAL_PAGE = 30;
+const DAY_TEXT_MAX = 20000;
+const JOURNAL_SAVE_MS = 2000;
+
+let days = null;                 // day -> entry, once days.json has been read
+let dayAnchor = null;
+let daysShown = 0;
+let journalDirty = false;
+let journalTimer = null;
+let journalPending = null;
+// The snapshot says there are written days but none could be fetched: offline,
+// on a device that has never opened this view before. Worth saying, because an
+// empty journal and an unreachable one look identical.
+let daysMissing = false;
+// What this device has written and the computer has not yet published back.
+const myDays = new Map();
+
+// Entries are HTML, so nothing that comes out of the snapshot is trusted: it is
+// rebuilt from this whitelist, in which no tag can carry an attribute - no href,
+// no src, no on* handler. The same list the desktop uses.
+const ALLOWED_TAGS = /^(B|STRONG|I|EM|U|S|STRIKE|UL|OL|LI|BR|DIV|P)$/;
+
+/** Walked as a live list rather than a snapshot, because unwrapping a tag moves
+ *  its children up to this level and those children have not been checked yet.
+ *  Continuing from the first promoted node is what makes this a whitelist at
+ *  all: otherwise anything wrapped in a rejected tag came through whole. */
+function scrub(node) {
+  let child = node.firstChild;
+  while (child) {
+    if (child.nodeType === Node.TEXT_NODE) { child = child.nextSibling; continue; }
+    if (child.nodeType !== Node.ELEMENT_NODE) {
+      const next = child.nextSibling;
+      child.remove();
+      child = next;
+      continue;
+    }
+    if (!ALLOWED_TAGS.test(child.tagName)) {
+      const next = child.firstChild || child.nextSibling;
+      child.replaceWith(...child.childNodes);
+      child = next;
+      continue;
+    }
+    [...child.attributes].forEach((attr) => child.removeAttribute(attr.name));
+    scrub(child);
+    child = child.nextSibling;
+  }
+}
+
+/** Parsed in an inert DOMParser document rather than a live element, so an
+ *  `<img onerror>` never gets the chance to run while it is taken apart. */
+function cleanHtml(html) {
+  const doc = new DOMParser().parseFromString(html ?? '', 'text/html');
+  scrub(doc.body);
+  return doc.body.innerHTML.slice(0, DAY_TEXT_MAX);
+}
+
+/** An empty entry is not an empty string: a contenteditable left blank still
+ *  holds a <br>, and saving that would keep a day nobody wrote in. */
+const blankEntry = (html) => stripTags(html) === '';
+
+/** Local date, not UTC: a journal day is the day you lived, not the day in
+ *  Greenwich. Photo timestamps are on their own scale and stay there. */
+function todayKey() {
+  const now = new Date();
+  return new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+}
+
+const DAY_FMT = new Intl.DateTimeFormat(undefined, {
+  weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC',
+});
+const asDate = (day) => {
+  const [y, m, d] = day.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d));
+};
+function shiftDay(day, by) {
+  const date = asDate(day);
+  date.setUTCDate(date.getUTCDate() + by);
+  return date.toISOString().slice(0, 10);
+}
+
+const dayEntry = (day) => days.get(day) || { day, text: '' };
+
+/** The journal, fetched once and then kept. Published beside the manifest
+ *  rather than inside it, so the poll that watches for new photos does not drag
+ *  a decade of writing along with it every twenty seconds. */
+async function loadDays() {
+  if (days) return;
+  days = new Map();
+  if (M.days_n) {
+    try {
+      const r = await fetch('days.json', { cache: 'no-cache' });
+      if (r.ok) {
+        const data = await r.json();
+        (data.days || []).forEach((d) => days.set(d.day, d));
+      } else {
+        daysMissing = true;
+      }
+    } catch {
+      // Offline: the service worker hands back the last copy it saw, and where
+      // there is none this view is empty for a reason worth naming.
+      daysMissing = true;
+    }
+  }
+  await loadMyDays();
+}
+
+/** What was written here and has not come back yet. Kept in the queue's own
+ *  database, because that is the one place a service worker and a page both
+ *  reach - and because losing an afternoon of writing to a reload is exactly
+ *  the failure this whole app is careful about elsewhere. */
+async function loadMyDays() {
+  if (!updb) return;
+  let saved = [];
+  try {
+    saved = await Q.getPref(updb, 'days', []) || [];
+  } catch {
+    return;
+  }
+  saved.forEach((entry) => {
+    // Dropped once the computer has actually applied it, which is not the same
+    // as "the snapshot is newer than this": a snapshot is published on every
+    // sync, including one where this entry was still sitting in the queue, and
+    // dropping it then would make a day someone wrote disappear off the phone
+    // while it was still on its way. So the published copy has to show it.
+    const there = days.get(entry.day);
+    const applied = entry.text
+      ? there && (there.text === entry.text
+        || (there.updated_ts || 0) * 1000 >= entry.written_ts)
+      : !there;
+    if (applied) return;
+    myDays.set(entry.day, entry);
+    if (entry.text) days.set(entry.day, entry); else days.delete(entry.day);
+  });
+  if (myDays.size !== saved.length) await saveMyDays();
+}
+
+async function saveMyDays() {
+  if (!updb) return;
+  try {
+    await Q.setPref(updb, 'days', [...myDays.values()]);
+  } catch {
+    /* the entry is still queued for the computer; only the local copy is lost */
+  }
+}
+
+async function showJournal() {
+  if (!days) {
+    $('journal').innerHTML = '<div class="muted">Loading the journal…</div>';
+    await loadDays();
+  }
+  renderJournal();
+}
+
+function renderJournal() {
+  if (view !== 'journal' || !days) return;
+  // Rebuilding the list replaces every editor on the page, which would throw
+  // away whatever is being typed in one. Wait for the caret to leave.
+  const live = document.activeElement;
+  if (live && live.classList && live.classList.contains('day-text')) {
+    journalDirty = true;
+    return;
+  }
+  journalDirty = false;
+  dayAnchor = dayAnchor || todayKey();
+  daysShown = 0;
+
+  const search = query.trim().toLowerCase();
+  const head = `<div class="jbar">
+    <input type="date" id="jDate" max="${todayKey()}" value="${dayAnchor}">
+    <button class="btn" id="jToday">Back to today</button>
+    <span class="muted small" id="jCount"></span>
+    ${daysMissing ? '<span class="chip warn">Offline - what you have already '
+      + 'written could not be loaded, but you can write today</span>' : ''}</div>`;
+
+  // A search is a search of what was written, not a walk back through empty
+  // days, so it drops the continuum and lists only the matches.
+  if (search) {
+    const hits = [...days.values()]
+      .filter((d) => stripTags(d.text).toLowerCase().includes(search) || d.day.includes(search))
+      .sort((a, b) => (a.day < b.day ? 1 : -1));
+    $('journal').innerHTML = head + (hits.length
+      ? hits.map((d) => dayCard(d, d.day === todayKey())).join('')
+      : '<div class="muted">Nothing written matches that search.</div>');
+    $('jCount').textContent = `${fmtNum(hits.length)} of ${fmtNum(days.size)} written days`;
+    wireJournalBar();
+    return;
+  }
+
+  $('journal').innerHTML = head;
+  moreDays();
+  $('jCount').textContent = `${fmtNum(days.size)} ${days.size === 1 ? 'day' : 'days'} written`;
+  $('jToday').classList.toggle('hidden', dayAnchor === todayKey());
+  wireJournalBar();
+}
+
+function wireJournalBar() {
+  $('jDate').onchange = (e) => { if (e.target.value) openDay(e.target.value); };
+  $('jToday').onclick = () => openDay(todayKey());
+}
+
+/** Append the next page of days. Appending, not re-rendering: a rebuild would
+ *  destroy any card already being typed into further up the list. */
+function moreDays() {
+  if (!days || query.trim()) return;
+  const html = [];
+  for (let i = 0; i < JOURNAL_PAGE; i += 1) {
+    const day = shiftDay(dayAnchor, -(daysShown + i));
+    html.push(dayCard(dayEntry(day), day === todayKey()));
+    if (daysShown + i === 0 && dayAnchor === todayKey()) {
+      html.push('<div class="day-divider">Earlier</div>');
+    }
+  }
+  daysShown += JOURNAL_PAGE;
+  $('journal').insertAdjacentHTML('beforeend', html.join(''));
+}
+
+function dayCard(entry, isToday) {
+  return `<article class="day${isToday ? ' today' : ''}${entry.text ? '' : ' empty'}"
+    data-day="${entry.day}">
+    <header>${dayHeader(entry, isToday)}</header>
+    <div class="day-text" contenteditable="true" role="textbox" aria-multiline="true"
+      data-placeholder="What happened…">${cleanHtml(entry.text || '')}</div>
+  </article>`;
+}
+
+function dayHeader(entry, isToday) {
+  return `<h4>${escapeHtml(DAY_FMT.format(asDate(entry.day)))}</h4>
+    <span class="muted small">${isToday ? 'today' : entry.day}</span>
+    <span class="day-state muted small"></span>
+    <span class="spacer"></span>
+    ${placeChip(entry)}
+    <button class="btn" data-act="here">Use my location</button>
+    ${entry.lat != null ? '<button class="btn" data-act="map">Show on map</button>' : ''}`;
+}
+
+function placeChip(entry) {
+  if (entry.lat == null) {
+    return '<span class="muted small">placed by your computer, from the photos of that day</span>';
+  }
+  const how = { device:'this device', photo:'nearest photo', picked:'picked on map' }[entry.loc_src]
+    || 'unknown';
+  return `<span class="chip">${entry.lat.toFixed(4)}, ${entry.lon.toFixed(4)} · ${how}</span>`;
+}
+
+$('journal').addEventListener('scroll', () => {
+  const box = $('journal');
+  if (box.scrollTop + box.clientHeight > box.scrollHeight - 400) moreDays();
+});
+
+$('journal').addEventListener('input', (e) => {
+  if (!e.target.classList.contains('day-text')) return;
+  journalPending = e.target;
+  clearTimeout(journalTimer);
+  journalTimer = setTimeout(() => {
+    const box = journalPending;
+    journalPending = null;
+    if (box && box.isConnected) saveDay(box.closest('.day').dataset.day, box.innerHTML);
+  }, JOURNAL_SAVE_MS);
+});
+
+$('journal').addEventListener('focusout', (e) => {
+  if (!e.target.classList.contains('day-text')) return;
+  clearTimeout(journalTimer);
+  journalPending = null;
+  saveDay(e.target.closest('.day').dataset.day, e.target.innerHTML);
+  if (journalDirty) setTimeout(renderJournal, 0);
+});
+
+// Pasting from anywhere else arrives as a document's worth of markup, and this
+// runs it through the same whitelist before it is anywhere near the page.
+$('journal').addEventListener('paste', (e) => {
+  if (!e.target.classList.contains('day-text')) return;
+  e.preventDefault();
+  const html = e.clipboardData.getData('text/html');
+  const text = e.clipboardData.getData('text/plain');
+  document.execCommand('insertHTML', false, html ? cleanHtml(html) : escapeHtml(text));
+});
+
+$('journal').addEventListener('click', async (e) => {
+  const button = e.target.closest('button[data-act]');
+  if (!button) return;
+  const card = button.closest('.day');
+  const entry = dayEntry(card.dataset.day);
+  if (button.dataset.act === 'map' && entry.lat != null) {
+    setView('map');
+    map.setView([entry.lat, entry.lon], Math.max(map.getZoom(), 13));
+    return;
+  }
+  if (button.dataset.act === 'here') locateDay(card);
+});
+
+/** The one button on this page that works better here than on the LAN app: a
+ *  browser hands out a position only in a secure context, and the viewer is
+ *  served over HTTPS while the app at home is plain HTTP on a local address. */
+function locateDay(card) {
+  if (!navigator.geolocation) { toast('This browser has no location support', true); return; }
+  flashDay(card, 'Locating…');
+  navigator.geolocation.getCurrentPosition(
+    (pos) => saveDay(card.dataset.day, card.querySelector('.day-text').innerHTML,
+      { lat: pos.coords.latitude, lon: pos.coords.longitude, src: 'device' }),
+    (err) => {
+      flashDay(card, '');
+      toast(`Location unavailable: ${err.message}`, true);
+    },
+    { enableHighAccuracy: true, timeout: 8000 },
+  );
+}
+
+/** Quiet, and never twice: if the browser has been told no once, it is not
+ *  asked again, and the computer places the day by the photo nearest it in time
+ *  instead. */
+async function autoLocate() {
+  if (!navigator.geolocation) return null;
+  try {
+    const permission = await navigator.permissions?.query({ name: 'geolocation' });
+    if (permission?.state === 'denied') return null;
+  } catch { /* no permissions API: just ask */ }
+  return new Promise((resolve) => {
+    // `timeout` covers acquiring a position, not answering the permission
+    // prompt - so a prompt nobody taps leaves this pending for the life of the
+    // page. The wait below is the only thing that ends that.
+    const giveUp = setTimeout(() => resolve(null), 20000);
+    const answer = (value) => { clearTimeout(giveUp); resolve(value); };
+    navigator.geolocation.getCurrentPosition(
+      (pos) => answer({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+      () => answer(null),
+      { timeout: 6000, maximumAge: 300000 },
+    );
+  });
+}
+
+function flashDay(card, text) {
+  const slot = card && card.querySelector('.day-state');
+  if (!slot) return;
+  slot.textContent = text;
+  clearTimeout(slot.timer);
+  if (text && text !== 'Locating…') {
+    slot.timer = setTimeout(() => { slot.textContent = ''; }, 2000);
+  }
+}
+
+// Days this session has already asked the device about, so a day nobody can
+// place is not asked about again on every keystroke.
+const locateAsked = new Set();
+
+async function saveDay(day, html, place) {
+  const existing = dayEntry(day);
+  const text = blankEntry(html) ? '' : cleanHtml(html);
+  if (existing.text === text && !place) return;
+
+  // A save with no location tells the computer to place the day by the nearest
+  // photo, which would quietly undo one already set - on every edit to the text.
+  if (!place && existing.lat != null) {
+    place = { lat: existing.lat, lon: existing.lon, src: existing.loc_src };
+  }
+
+  const card = $('journal').querySelector(`.day[data-day="${day}"]`);
+  flashDay(card, 'Saving…');
+  const entry = {
+    day,
+    text,
+    lat: place ? place.lat : null,
+    lon: place ? place.lon : null,
+    loc_src: place ? (place.src || 'device') : null,
+    written_ts: Date.now(),
+  };
+  if (text) days.set(day, entry); else days.delete(day);
+  myDays.set(day, entry);
+  await saveMyDays();
+
+  const how = await queueDay(entry);
+  if (card) {
+    card.classList.toggle('empty', !text);
+    card.querySelector('header').innerHTML = dayHeader(entry, day === todayKey());
+    flashDay(card, how === 'parked' ? 'Saved here - it goes when you have a signal' : 'Saved');
+  }
+  const count = $('jCount');
+  if (count && !query.trim()) {
+    count.textContent = `${fmtNum(days.size)} ${days.size === 1 ? 'day' : 'days'} written`;
+  }
+
+  // Only now is it worth asking where this was. Locating waits on someone
+  // answering a permission prompt, which can be forever, and what has just been
+  // written must not sit unsaved behind that - so the entry is stored first and
+  // the position lands on it in a second save. A day nobody can place is left
+  // for the computer, which puts it where the nearest photo in time was.
+  if (text && !place && !locateAsked.has(day)) {
+    locateAsked.add(day);
+    const at = await autoLocate();
+    if (at) await saveDay(day, text, { lat: at.lat, lon: at.lon, src: 'device' });
+  }
+}
+
+/** Park the entry in the bucket for the computer to apply.
+ *
+ *  Unlike a favourite, a day written with no signal is not something to refuse:
+ *  writing one is exactly what someone does on a train. So a change that cannot
+ *  be sent now is kept in the queue's own store and handed to the service
+ *  worker, which sends it when there is a connection with nothing open. */
+async function queueDay(entry) {
+  const change = {
+    op: 'day_write',
+    day: entry.day,
+    text: entry.text,
+    lat: entry.lat,
+    lon: entry.lon,
+    loc_src: entry.loc_src,
+    // The computer refuses an entry older than what it already has, so a change
+    // that sat in the bucket for a week cannot overwrite a later edit.
+    written_ts: entry.written_ts,
+  };
+  if (navigator.onLine) {
+    try {
+      const r = await fetch('/api/change', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(change),
+      });
+      if (r.ok) return 'sent';
+      const data = await r.json().catch(() => ({}));
+      // The Worker rejected the entry itself - too long, or a day it will not
+      // accept. Trying again later would be rejected again.
+      if (r.status >= 400 && r.status < 500 && r.status !== 401) {
+        // The one refusal that is not about the entry: a Worker deployed before
+        // journal days existed does not know the operation, and the fix is a
+        // deploy rather than anything anyone can do here.
+        const stale = /unsupported operation/i.test(String(data.error || ''));
+        toast(stale
+          ? 'This server is older than the journal - run `wrangler deploy` on your computer'
+          : `Could not save that day: ${data.error || r.status}`, true);
+        return 'refused';
+      }
+    } catch {
+      /* no connection after all: park it below */
+    }
+  }
+  try {
+    await Q.addOp(updb, change);
+    // Not awaited: the entry is stored the moment the line above returns, and
+    // asking the worker to send it later is not something to keep the card on
+    // screen waiting for.
+    handOver();
+    return 'parked';
+  } catch {
+    toast('That day is written here but could not be queued for your computer', true);
+    return 'stuck';
+  }
+}
+
+/** Anything parked while there was no signal. Sent by the page when it can,
+ *  and by the service worker when the page is gone. */
+async function flushParked() {
+  if (!updb || !navigator.onLine) return;
+  let rows = [];
+  try {
+    rows = await Q.ops(updb);
+  } catch {
+    return;
+  }
+  for (const row of rows) {
+    try {
+      const r = await fetch('/api/change', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(row.change),
+      });
+      if (r.ok || (r.status >= 400 && r.status < 500 && r.status !== 401)) {
+        await Q.dropOp(updb, row.id);
+      } else {
+        return;
+      }
+    } catch {
+      return;
+    }
+  }
+}
+
+/** Jump the list to a day rather than making anyone scroll back to it. */
+function openDay(day) {
+  const live = document.activeElement;
+  if (live && live.classList && live.classList.contains('day-text')) live.blur();
+  journalDirty = false;
+  dayAnchor = day;
+  renderJournal();
+  const card = $('journal').querySelector(`.day[data-day="${day}"]`);
+  if (card) card.querySelector('.day-text').focus();
+}
+
 // -------------------------------------------------------------------- chrome
 
 function setView(name) {
@@ -3122,6 +3885,7 @@ function setView(name) {
   $('map').classList.toggle('hidden', name !== 'map');
   $('gallery').classList.toggle('hidden', name !== 'gallery');
   $('panel').classList.toggle('hidden', name !== 'panel');
+  $('journal').classList.toggle('hidden', name !== 'journal');
   $('insights').classList.toggle('hidden', name !== 'insights');
   $('mapControls').classList.toggle('hidden', name !== 'map');
   $('gridCtl').classList.toggle('hidden', name !== 'gallery');
@@ -3135,6 +3899,7 @@ function setView(name) {
   if (name === 'map') { map.invalidateSize(); drawMap(); }
   if (name === 'gallery') drawGallery();
   if (name === 'panel') drawPanel();
+  if (name === 'journal') showJournal();
   if (name === 'insights') drawInsights();
 }
 
@@ -3142,6 +3907,7 @@ function refresh() {
   if (view === 'map') drawMap();
   else if (view === 'gallery') drawGallery();
   else if (view === 'insights') drawInsights();
+  else if (view === 'journal') renderJournal();
   else drawPanel();
 }
 
@@ -3421,6 +4187,7 @@ async function adoptSnapshot(m) {
   M = m;
   $('summary').textContent =
     `${fmtNum(m.n)} photos · ${fmtNum(m.geo_n)} located · updated ${fmtDate(m.generated)}`;
+  readVideoIndex();
   fillAlbums();
   $('addPhotos').classList.toggle('hidden', !m.allow_import);
   const before = uploads.length;
@@ -3430,6 +4197,11 @@ async function adoptSnapshot(m) {
     /* the records reappear next boot and are retired then */
   }
   const landed = before - uploads.length;
+  if (days) {
+    days = null;          // re-read against the newer snapshot on next opening
+    myDays.clear();
+    if (view === 'journal') showJournal();
+  }
   paintUploads();
   refresh();
   if (landed > 0) {
@@ -3447,11 +4219,18 @@ async function adoptSnapshot(m) {
 // since this page was last looked at, and a card still saying "uploading…" for a
 // photo that landed an hour ago is worse than no card at all.
 document.addEventListener('visibilitychange', async () => {
-  if (document.hidden) return;
+  // Going away is the other half of this, and the more important one: a phone
+  // whose screen has just gone off is a page that is about to stop being given
+  // time, and handing over on the way out is the difference between a batch
+  // that stalls at the lock screen and one that keeps going.
+  if (document.hidden) { handOver(); return; }
   await reloadQueue().catch(() => {});
   await takeShared();
+  await resumeHeld().catch(() => {});
   watchSnapshot();
 });
+// Closing the tab, or the app being swapped out entirely. Same handover.
+window.addEventListener('pagehide', () => { handOver(); });
 
 // ---------------------------------------------------------------------- boot
 
@@ -3464,6 +4243,7 @@ fetch('manifest.json', { cache:'no-cache' })
     $('summary').textContent =
       `${fmtNum(m.n)} photos · ${fmtNum(m.geo_n)} located · updated ${fmtDate(m.generated)}`;
     $('stamp').textContent = 'all time';
+    readVideoIndex();
     fillAlbums();
     // Adding photos is off unless this snapshot came from a machine that opted
     // in, so an older snapshot simply has no button.
@@ -3505,6 +4285,9 @@ fetch('manifest.json', { cache:'no-cache' })
     // opening the app should not raise a panel about a queue that emptied
     // itself, but a queue that cannot empty has been silent for far too long.
     if (m.allow_import) reportDrain(await drainUploads(), null);
+    // Journal entries written with no signal, and photos picked but never read.
+    await flushParked();
+    await resumeHeld().catch(() => {});
     watchSnapshot();
     // Anything shared into the app while it was shut. Last, so the map is up
     // before a batch starts moving the progress bar over it.

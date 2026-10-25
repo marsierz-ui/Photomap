@@ -19,6 +19,7 @@ const OBJECTS = {
 };
 
 const PUTS = [];
+const MULTIPART = new Map();
 
 const env = {
   PASSWORD_HASH: await sha256Hex(PASSWORD),
@@ -48,6 +49,41 @@ const env = {
     async delete(key) {
       const i = PUTS.findIndex((p) => p.key === key);
       if (i >= 0) PUTS.splice(i, 1);
+    },
+    // R2's multipart upload, which is how anything larger than a Worker can
+    // receive gets into the bucket. The Worker keeps no state between the
+    // calls: the id and the part etags come back from the client each time.
+    async createMultipartUpload(key) {
+      const uploadId = `up-${MULTIPART.size + 1}`;
+      MULTIPART.set(uploadId, { key, parts: new Map(), done: false });
+      return { key, uploadId };
+    },
+    resumeMultipartUpload(key, uploadId) {
+      return {
+        key,
+        uploadId,
+        async uploadPart(partNumber, body) {
+          const open = MULTIPART.get(uploadId);
+          if (!open) throw new Error('no such upload');
+          open.parts.set(partNumber, body.byteLength);
+          return { partNumber, etag: `etag-${partNumber}` };
+        },
+        async complete(parts) {
+          const open = MULTIPART.get(uploadId);
+          if (!open) throw new Error('no such upload');
+          const sizes = [...open.parts.entries()].sort((a, b) => a[0] - b[0]);
+          // R2 refuses to stitch an upload whose middle parts differ in size,
+          // and it refuses it here - after every byte has been paid for.
+          const middle = sizes.slice(0, -1).map(([, n]) => n);
+          if (new Set(middle).size > 1) throw new Error('parts differ in size');
+          if (parts.some((p) => !open.parts.has(p.partNumber))) throw new Error('missing part');
+          open.done = true;
+          PUTS.push({ key: open.key, body: null,
+                      size: sizes.reduce((n, [, size]) => n + size, 0), type: null });
+          return { key: open.key };
+        },
+        async abort() { MULTIPART.delete(uploadId); },
+      };
     },
     async get(key) {
       if (!(key in OBJECTS)) return null;
@@ -367,6 +403,124 @@ check('a full queue also refuses originals, not just previews',
 res = await call('/api/import/state', { headers: { Cookie: cookie } });
 check('and the state endpoint reports it full', (await res.json()).full === true);
 PUTS.splice(PUTS.findIndex((p) => p.key === 'import/huge.orig'), 1);
+
+// --- a video, which does not fit in one request ------------------------------
+//
+// The largest body a Worker can receive is 100MB on the Free and Pro plans, and
+// a minute of 4K is more than that, so a clip goes up as an R2 multipart upload:
+// begin, one request per part, then finish. The parts land in the bucket as they
+// arrive, which is what makes a dropped connection cost one part rather than the
+// whole clip.
+
+const clipProxy = bytesOf(4096, 5);
+const clipProxyHash = await digestOf(clipProxy);
+res = await upload(clipProxy, { name: 'VID_1.mp4', ext: '.mp4', bytes: 200 * 1024 * 1024,
+                                proxy_sha256: clipProxyHash });
+body = await res.json();
+check('a clip larger than the photo cap is accepted for upload', res.status === 202,
+      `got ${res.status} ${JSON.stringify(body)}`);
+const clipId = body.iid;
+
+res = await upload(bytesOf(2048), { name: 'VID_2.mp4', ext: '.mp4',
+                                    bytes: 400 * 1024 * 1024,
+                                    proxy_sha256: await digestOf(bytesOf(2048)) });
+check('but not one past the video cap', res.status === 413, `got ${res.status}`);
+
+res = await upload(clipProxy, { name: 'IMG.jpg', ext: '.jpg', bytes: 200 * 1024 * 1024,
+                                proxy_sha256: clipProxyHash });
+check('and a photo that size is still refused', res.status === 413, `got ${res.status}`);
+
+res = await upload(new Uint8Array(0), { sha256: 'a'.repeat(64), bytes: 20 * 1024 * 1024, ext: '.mp4' },
+                   `/api/import/begin?iid=${clipId}`);
+body = await res.json();
+check('an upload can be begun', res.status === 200 && !!body.uploadId, JSON.stringify(body));
+check('and it names the part size the Worker will accept',
+      body.part_bytes === 8 * 1024 * 1024, JSON.stringify(body));
+const uploadId = body.uploadId;
+const partPath = (n, last) =>
+  `/api/import/part?iid=${clipId}&uploadId=${uploadId}&part=${n}${last ? '&last=1' : ''}`;
+
+const partOne = bytesOf(body.part_bytes, 1);
+res = await upload(partOne, { sha256: await digestOf(partOne) }, partPath(1));
+body = await res.json();
+check('a full-size part is accepted', res.status === 200 && body.etag, JSON.stringify(body));
+
+res = await upload(partOne, { sha256: 'b'.repeat(64) }, partPath(2));
+check('a part whose hash does not match is refused', res.status === 422, `got ${res.status}`);
+
+const short = bytesOf(1024, 2);
+res = await upload(short, { sha256: await digestOf(short) }, partPath(2));
+check('a middle part of the wrong size is refused before R2 sees it',
+      res.status === 400, `got ${res.status}`);
+
+res = await upload(short, { sha256: await digestOf(short) }, partPath(2, true));
+check('the same part as the last one is accepted', res.status === 200, `got ${res.status}`);
+
+res = await call(`/api/import/finish?iid=${clipId}&uploadId=${uploadId}`, {
+  method: 'POST',
+  headers: { Cookie: cookie, 'X-Photo-Meta': b64url(JSON.stringify({ sha256: 'c'.repeat(64) })) },
+  body: JSON.stringify({ parts: [{ partNumber: 1, etag: 'etag-1' }, { partNumber: 2, etag: 'etag-2' }] }),
+});
+check('finishing stitches the parts into one object', res.status === 202, `got ${res.status}`);
+check('which lands as import/<id>.orig, like any other original',
+      PUTS.some((p) => p.key === `import/${clipId}.orig`));
+
+res = await call(`/api/import/part?iid=${clipId}&uploadId=${uploadId}&part=0`, {
+  method: 'POST',
+  headers: { Cookie: cookie, 'X-Photo-Meta': b64url(JSON.stringify({ sha256: 'd'.repeat(64) })) },
+  body: partOne,
+});
+check('part numbers start at one', res.status === 400, `got ${res.status}`);
+
+res = await upload(new Uint8Array(0), { sha256: 'a'.repeat(64), bytes: 1000, ext: '.mp4' },
+                   `/api/import/begin?iid=1700000000000-${'0'.repeat(8)}-0000-0000-0000-000000000000`);
+check('an upload cannot be begun for an id with no proxy', res.status === 409, `got ${res.status}`);
+
+res = await call('/api/import/begin?iid=../../etc', {
+  method: 'POST',
+  headers: { Cookie: cookie, 'X-Photo-Meta': b64url(JSON.stringify({ sha256: 'a'.repeat(64) })) },
+  body: new Uint8Array(0),
+});
+check('a malformed id cannot begin one either', res.status === 400, `got ${res.status}`);
+
+res = await call(`/api/import/part?iid=${clipId}&uploadId=${uploadId}&part=1`, { method: 'POST', body: partOne });
+check('parts need a session too', res.status === 401, `got ${res.status}`);
+
+// An abandoned multipart upload is not an object, so nothing that lists the
+// bucket can see it - which is why there has to be a way to give it back.
+res = await upload(new Uint8Array(0), { sha256: 'e'.repeat(64), bytes: 20 * 1024 * 1024, ext: '.mp4' },
+                   `/api/import/begin?iid=${clipId}`);
+const doomed = (await res.json()).uploadId;
+res = await call(`/api/import/abort?iid=${clipId}&uploadId=${doomed}`, {
+  method: 'POST',
+  headers: { Cookie: cookie, 'X-Photo-Meta': b64url(JSON.stringify({ sha256: 'e'.repeat(64) })) },
+  body: new Uint8Array(0),
+});
+check('an abandoned upload can be given back', res.status === 200, `got ${res.status}`);
+check('and it is gone from the bucket', !MULTIPART.has(doomed));
+
+res = await call('/api/import/state', { headers: { Cookie: cookie } });
+body = await res.json();
+check('the state endpoint names the video cap and the part size',
+      body.video_max_bytes === 256 * 1024 * 1024 && body.part_bytes === 8 * 1024 * 1024,
+      JSON.stringify(body));
+
+// --- a day written on a phone ------------------------------------------------
+
+res = await change({ op: 'day_write', day: '2024-03-08', text: '<p>hello</p>' });
+check('a journal day is queued for the desktop', res.status === 202, `got ${res.status}`);
+const dayOp = PUTS.filter((p) => p.body?.op === 'day_write').pop();
+check('and parked in the inbox like any other change', !!dayOp, JSON.stringify(PUTS.slice(-1)));
+check('with its text intact', dayOp?.body?.text === '<p>hello</p>', JSON.stringify(dayOp?.body));
+
+check('a day that is not a date is refused',
+      (await change({ op: 'day_write', day: '8th March', text: 'x' })).status === 400);
+check('a day with no text at all is refused',
+      (await change({ op: 'day_write', day: '2024-03-08' })).status === 400);
+check('an entry longer than the cap is refused',
+      (await change({ op: 'day_write', day: '2024-03-08', text: 'x'.repeat(20001) })).status === 413);
+check('an empty entry is allowed, because that is how a day is cleared',
+      (await change({ op: 'day_write', day: '2024-03-08', text: '' })).status === 202);
 
 check('photo_import cannot be injected through the ordinary change route',
       (await change({ op: 'photo_import', uid: 'x' })).status === 400);

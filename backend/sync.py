@@ -21,7 +21,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import db, dupes, photometa, r2, scanner, snapshot, thumbs
+from . import days, db, dupes, photometa, r2, scanner, snapshot, thumbs
 
 try:
     from send2trash import send2trash
@@ -81,9 +81,16 @@ IMPORT_ID = re.compile(
     r"^\d{13}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
 IMPORT_STEM = re.compile(r"[^A-Za-z0-9_-]+")
-# Only what Pillow can actually open here, so an import cannot introduce a file
-# the scanner would then skip forever.
-IMPORT_EXTS = photometa.IMAGE_EXTS
+# Only what this machine can actually index, so an import cannot introduce a
+# file the scanner would then skip forever. Videos are in the set because
+# videometa reads them with the standard library alone - nothing has to decode
+# a frame for a clip to become a library item with a place and a time.
+IMPORT_EXTS = photometa.MEDIA_EXTS
+# A video is the one thing here big enough to need saying twice. The Worker
+# sends it in parts because a Worker cannot receive more than 100MB in one
+# request, and this is the ceiling on the assembled file - chosen against R2's
+# 10GB free tier rather than against what a phone can record, which is more.
+IMPORT_VIDEO_MAX_BYTES = 256 * 1024 * 1024
 # Only stop early if something is systematically wrong, not for a rough patch.
 MAX_FAILURES = 200
 
@@ -180,7 +187,7 @@ def _apply_inbox(bucket, conn) -> dict:
     object failed to delete does no harm when it is seen again.
     """
     applied = {"albums": 0, "favourites": 0, "duplicates": 0, "deleted": 0,
-               "notes": 0, "imported": 0, "already_here": 0, "failed": 0}
+               "notes": 0, "days": 0, "imported": 0, "already_here": 0, "failed": 0}
     try:
         keys = bucket.list_keys(prefix=snapshot.INBOX_PREFIX)
     except r2.R2Error:
@@ -249,7 +256,9 @@ def _apply_inbox(bucket, conn) -> dict:
                     applied["notes"] += len(ids)
                 conn.commit()
 
-            if op == "dupe_resolve":
+            if op == "day_write":
+                applied["days"] += _write_day(change)
+            elif op == "dupe_resolve":
                 applied["duplicates"] += _resolve_duplicate(conn, change)
             elif op == "photo_delete":
                 applied["deleted"] += _delete_photos(conn, change)
@@ -297,6 +306,37 @@ def _trash_photo(conn, photo_id: int, path: str) -> bool:
         conn.commit()
     thumbs.drop(photo_id)
     return True
+
+
+def _write_day(change) -> int:
+    """One journal entry written on a phone.
+
+    Last write wins, which is what a single person with two devices actually
+    wants and what makes this idempotent: applying the same queued entry twice
+    stores the same text twice. The entry carries the moment it was written, so
+    an op that has been sitting in the bucket since before a later edit made
+    here does not overwrite that edit.
+    """
+    day = str(change.get("day", ""))
+    if not days.valid_day(day):
+        return 0
+    written = change.get("written_ts")
+    if isinstance(written, (int, float)) and written:
+        row = db.connect().execute(
+            "SELECT updated_ts FROM day_notes WHERE day=?", (day,)
+        ).fetchone()
+        if row and (row["updated_ts"] or 0) > int(written) // 1000:
+            return 0
+    lat, lon = change.get("lat"), change.get("lon")
+    placed = isinstance(lat, (int, float)) and isinstance(lon, (int, float))
+    days.save(
+        day,
+        str(change.get("text") or ""),
+        float(lat) if placed else None,
+        float(lon) if placed else None,
+        str(change.get("loc_src") or "") or None,
+    )
+    return 1
 
 
 def _resolve_duplicate(conn, change) -> int:
@@ -460,6 +500,8 @@ def _import_photo(conn, bucket, change) -> tuple[int, bool, int]:
     ext = str(change.get("ext", "")).lower()
     if ext not in IMPORT_EXTS:
         ext = ".jpg"
+    video = ext in photometa.VIDEO_EXTS
+    ceiling = IMPORT_VIDEO_MAX_BYTES if video else IMPORT_MAX_BYTES
     proxy_key = f"{snapshot.IMPORT_PREFIX}{uid}.jpg"
     full_key = f"{snapshot.IMPORT_PREFIX}{uid}.orig"
 
@@ -469,8 +511,15 @@ def _import_photo(conn, bucket, change) -> tuple[int, bool, int]:
         # The original is still on its way and there is time left to wait. The
         # proxy alone would publish a downscaled photo we would then never
         # replace, so let the op sit rather than settling early.
-        if not have_full and not expired and now - first_seen < IMPORT_GRACE:
-            return 0, True, 0
+        #
+        # A video waits the whole deadline rather than the grace period, for two
+        # reasons that point the same way: settling early would mean settling
+        # for a single frame, which is not the recording at all; and a clip is
+        # sent in 8MB parts, so a large one over a poor connection can easily
+        # still be arriving after the fifteen minutes a photo is given.
+        if not have_full and not expired and (video or now - first_seen < IMPORT_GRACE):
+            if proxy_key in keys:
+                return 0, True, 0
         # The original first, the proxy as a fallback. The fallback is not
         # theoretical: the original may be a HEIC this machine cannot decode
         # (pillow_heif missing or blocked), while the proxy is a plain JPEG the
@@ -478,10 +527,16 @@ def _import_photo(conn, bucket, change) -> tuple[int, bool, int]:
         # it. Nothing undecodable is ever put in the library - the scanner
         # indexes unreadable files because they are already yours, but an upload
         # that will not open is a failed upload.
+        #
+        # A video has no fallback: its proxy is one frame drawn into a canvas,
+        # which is a picture of the clip and not the clip. Filing that as the
+        # import would put a still in the library under a .mp4's name and drop
+        # the recording, so a video that never finished uploading is given up on
+        # instead - which is what the deadline below is for.
         candidates = []
         if have_full:
             candidates.append((full_key, str(change.get("sha256") or ""), ext))
-        if proxy_key in keys:
+        if proxy_key in keys and not video:
             candidates.append((proxy_key, str(change.get("proxy_sha256") or ""), ".jpg"))
         if not candidates:
             return 0, False, 0  # both halves gone: nothing to land, nothing to retry
@@ -489,7 +544,7 @@ def _import_photo(conn, bucket, change) -> tuple[int, bool, int]:
         target = meta = None
         for source_key, expect, want_ext in candidates:
             body = bucket.get(source_key)
-            if not body or len(body) > IMPORT_MAX_BYTES:
+            if not body or len(body) > ceiling:
                 continue
             digest = hashlib.sha256(body).hexdigest()
             if expect and digest != expect:
@@ -542,7 +597,17 @@ def _import_photo(conn, bucket, change) -> tuple[int, bool, int]:
             photo_id, _ = scanner.upsert(conn, meta, now)
             conn.execute("DELETE FROM import_seen WHERE uid=?", (uid,))
             conn.commit()
-        thumbs.build(photo_id, str(target), int(db.get_setting("snapshot_thumb_size", 160)))
+        snap_size = int(db.get_setting("snapshot_thumb_size", 160))
+        if video:
+            # The frame the phone drew, kept as this clip's thumbnail. It may be
+            # the only picture of it this machine can make: pulling one out of a
+            # container needs ffmpeg, which is not a dependency here, and without
+            # this the gallery and the snapshot would both show a drawn tile.
+            poster = bucket.get(proxy_key) if proxy_key in keys else None
+            if poster:
+                for size in {snap_size, int(db.get_setting("thumb_size", 256))}:
+                    thumbs.adopt(photo_id, poster, size)
+        thumbs.build(photo_id, str(target), snap_size)
 
         _import_drop(bucket, keys, proxy_key, full_key)
         return 1, False, 0
@@ -646,6 +711,20 @@ def _run() -> None:
         with _lock:
             _state["uploaded"] += 1
             _state["bytes"] += len(body)
+
+        # The journal rides beside the manifest rather than in it: the viewer
+        # re-reads the manifest every twenty seconds while an upload is out, and
+        # a decade of daily notes has no business in that request. Written only
+        # when it has actually changed, so a library nobody journals in keeps
+        # costing one operation a sync rather than two.
+        journal = snapshot.days_bytes()
+        digest = hashlib.sha1(journal).hexdigest()
+        if db.get_setting("days_hash", "") != digest:
+            bucket.put(snapshot.DAYS_KEY, journal, "application/json")
+            db.set_setting("days_hash", digest)
+            with _lock:
+                _state["uploaded"] += 1
+                _state["bytes"] += len(journal)
 
         # Drop thumbnails for photos that are no longer in the library. Only keys
         # this app recorded are touched, so a shared bucket stays safe.

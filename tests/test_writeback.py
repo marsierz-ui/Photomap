@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import struct
 import uuid
 import zlib
 from pathlib import Path
@@ -34,7 +35,7 @@ db.TRASH_DIR = DATA / "trash"
 
 from PIL import Image  # noqa: E402
 
-from backend import dupes, scanner, snapshot, sync  # noqa: E402
+from backend import dupes, scanner, snapshot, sync, thumbs  # noqa: E402
 
 sync.RECYCLE_OK = False  # keep the OS recycle bin out of the test
 
@@ -570,6 +571,139 @@ check("a scan does not drop an imported photo it did not walk", still is not Non
       "the row was hard-deleted by the prune")
 check("and it is not flagged missing either", still and still["missing"] == 0,
       str(still and still["missing"]))
+
+# --- a day written on a phone -------------------------------------------------
+print("\njournal from the cloud")
+db.set_setting("cloud_import_enabled", "1")
+
+queue({"op": "day_write", "day": "2024-03-08", "text": "<p>Walked the <b>canal</b></p>",
+       "lat": 51.5074, "lon": -0.1278, "loc_src": "device",
+       "written_ts": int(time.time() * 1000)})
+state = run_sync()
+day = db.connect().execute("SELECT * FROM day_notes WHERE day=?", ("2024-03-08",)).fetchone()
+check("a day written on the phone is applied", day is not None)
+check("its text survives the round trip", day and "canal" in day["text"], day and day["text"])
+check("with the device's own position", day and abs(day["lat"] - 51.5074) < 1e-6,
+      str(day and day["lat"]))
+check("sync counts it", state["received"]["days"] == 1, str(state["received"]))
+check("and the journal is published for the viewer",
+      b"canal" in STORE[snapshot.DAYS_KEY], "days.json does not carry it")
+
+# The entry is HTML, so what arrives is rebuilt from a whitelist before it is
+# ever stored. A tag that can carry a handler is not on that list.
+queue({"op": "day_write", "day": "2024-03-09",
+       "text": '<div>ok<img src=x onerror=alert(1)><script>bad()</script></div>',
+       "written_ts": int(time.time() * 1000)})
+run_sync()
+day = db.connect().execute("SELECT text FROM day_notes WHERE day=?", ("2024-03-09",)).fetchone()
+check("markup that could run is stripped before it is stored",
+      day and "onerror" not in day["text"] and "<script" not in day["text"], day and day["text"])
+check("and the text around it is kept", day and "ok" in day["text"], day and day["text"])
+
+# Placed by the photo nearest in time when the phone had no position of its own,
+# which is the same fallback the app on this computer uses.
+queue({"op": "day_write", "day": "2021-06-04", "text": "no fix here",
+       "written_ts": int(time.time() * 1000)})
+run_sync()
+placed = db.connect().execute("SELECT * FROM day_notes WHERE day=?", ("2021-06-04",)).fetchone()
+check("a day with no position is placed by the nearest photo",
+      placed and placed["loc_src"] == "photo", str(placed and placed["loc_src"]))
+
+# A change that sat in the bucket while the day was edited here must not
+# overwrite the newer text. Every op carries the moment it was written.
+db.connect().execute("UPDATE day_notes SET text=?, updated_ts=? WHERE day=?",
+                     ("edited on the computer", int(time.time()) + 10, "2024-03-08"))
+db.connect().commit()
+queue({"op": "day_write", "day": "2024-03-08", "text": "stale phone copy",
+       "written_ts": int(time.time() * 1000) - 600000})
+run_sync()
+day = db.connect().execute("SELECT text FROM day_notes WHERE day=?", ("2024-03-08",)).fetchone()
+check("a stale entry does not overwrite a later edit",
+      day and day["text"] == "edited on the computer", day and day["text"])
+
+# Clearing it deletes it: a blank day is not a day worth keeping.
+queue({"op": "day_write", "day": "2024-03-09", "text": "",
+       "written_ts": int(time.time() * 1000)})
+run_sync()
+check("clearing a day removes it",
+      db.connect().execute("SELECT 1 FROM day_notes WHERE day=?", ("2024-03-09",)).fetchone() is None)
+
+queue({"op": "day_write", "day": "not-a-day", "text": "nope",
+       "written_ts": int(time.time() * 1000)})
+run_sync()
+check("a day key that is not a date is refused",
+      db.connect().execute("SELECT COUNT(*) c FROM day_notes").fetchone()["c"] == 2,
+      str(db.connect().execute("SELECT day FROM day_notes").fetchall()))
+
+# --- a video added from a phone -----------------------------------------------
+print("\nvideo import")
+
+
+def tiny_mp4(*, location="+51.5074-000.1278/", moov_last=False):
+    """A real ISO container, small enough to build here. See tests/test_videometa.py."""
+    def box(kind, payload):
+        return struct.pack(">I", len(payload) + 8) + kind + payload
+
+    mvhd = box(b"mvhd", struct.pack(">BBBBIIII", 0, 0, 0, 0, 0, 0, 1000, 8000) + b"\x00" * 80)
+    tkhd_head = struct.pack(">BBBBIIIII", 0, 0, 0, 1, 0, 0, 1, 0, 8000) + b"\x00" * 16
+    matrix = b"".join(struct.pack(">I", v) for v in
+                      (0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000))
+    tkhd = box(b"tkhd", tkhd_head + matrix + struct.pack(">II", 1280 << 16, 720 << 16))
+    raw = location.encode()
+    udta = box(b"udta", box(b"\xa9xyz", struct.pack(">HH", len(raw), 0x15C7) + raw))
+    moov = box(b"moov", mvhd + box(b"trak", tkhd) + udta)
+    ftyp = box(b"ftyp", b"isom" + struct.pack(">I", 512) + b"isomiso2mp41")
+    mdat = box(b"mdat", b"\x00" * 2048)
+    return ftyp + (mdat + moov if moov_last else moov + mdat)
+
+
+clip = tiny_mp4()
+poster = import_bytes(size=(64, 36))
+vid = queue_import(poster, full=clip, name="VID_20240308_101500.mp4", ext=".mp4")
+state = run_sync()
+row = photo_row(vid)
+check("a video lands in the library", row is not None)
+check("as the clip itself, not its poster",
+      row and row["filesize"] == len(clip), f"{row and row['filesize']} vs {len(clip)}")
+check("with the extension it arrived under", row and row["ext"] == ".mp4", row and row["ext"])
+check("its position is read out of the container, not taken on trust",
+      row and abs(row["lat"] - 51.5074) < 1e-4 and abs(row["lon"] + 0.1278) < 1e-4,
+      f"{row and row['lat']}, {row and row['lon']}")
+check("its duration is recorded", row and row["duration"] == 8.0, str(row and row["duration"]))
+check("the poster the phone drew becomes its thumbnail",
+      row and thumbs.cache_path(row["id"], int(db.get_setting("snapshot_thumb_size", 160))).exists(),
+      "no thumbnail was written")
+check("and the snapshot says which items are clips",
+      manifest()["ids"].index(row["id"]) in manifest()["vids"] if row else False,
+      str(manifest().get("vids")))
+
+# A clip whose original never arrived must not be filed as its poster: that
+# would put a still in the library under a .mp4's name and lose the recording.
+poster_only = queue_import(import_bytes(size=(64, 36)), name="VID_lost.mp4", ext=".mp4")
+run_sync()
+check("a video with no original is not filed as its poster frame",
+      photo_row(poster_only) is None, "a still was filed as a video")
+check("and it is held for its other half rather than dropped",
+      f"inbox/{poster_only}.json" in STORE)
+
+# A photo settles for its proxy once the grace period is up. A video must not:
+# a clip goes up in 8MB parts and a large one over a poor connection is still
+# arriving long after fifteen minutes, so it waits the whole deadline.
+db.connect().execute("UPDATE import_seen SET first_ts=? WHERE uid=?",
+                     (int(time.time()) - sync.IMPORT_GRACE - 60, poster_only))
+db.connect().commit()
+run_sync()
+check("a video past the grace period is still waiting for its recording",
+      photo_row(poster_only) is None and f"inbox/{poster_only}.json" in STORE,
+      "the still was filed, or the import was dropped")
+
+# ...and it is not waited for forever, or half an upload sits in the bucket
+# eating the free tier until someone notices.
+db.connect().execute("UPDATE import_seen SET first_ts=? WHERE uid=?",
+                     (int(time.time()) - sync.IMPORT_DEADLINE - 60, poster_only))
+db.connect().commit()
+run_sync()
+check("but it is given up on at the deadline", f"inbox/{poster_only}.json" not in STORE)
 
 # --- the watcher -------------------------------------------------------------
 # It has to start a sync when the phone leaves something, and - the part that is

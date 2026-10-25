@@ -224,3 +224,218 @@ async function readExif(file) {
     return null;
   }
 }
+
+// --------------------------------------------------------------------- video
+//
+// The same job for a clip, and the same mirroring rule: this reads exactly what
+// backend/videometa.py reads, rejects exactly what it rejects, and stores the
+// wall clock on the same scale, because where the two could differ they would
+// differ silently.
+//
+// A video's metadata lives in its `moov` box, which sits at either end of the
+// file - at the front in a finished recording, at the back in one written
+// straight off a camera - so the top level is walked by its own box sizes
+// rather than searched for. Only `moov` is ever read: a 200MB clip costs a
+// couple of small reads to find out where and when it was taken.
+
+const MOOV_MAX = 32 * 1024 * 1024;
+const EPOCH_1904 = 2082844800;
+const V_CONTAINERS = new Set(['moov', 'trak', 'mdia', 'udta', 'meta', 'ilst']);
+const V_WANTED = new Set(['mvhd', 'loci', '\xA9xyz', '\xA9day', 'data']);
+const ISO6709 = /^([+-]\d{1,3}(?:\.\d+)?)([+-]\d{1,3}(?:\.\d+)?)/;
+
+const boxType = (view, at) => String.fromCharCode(
+  view.getUint8(at), view.getUint8(at + 1), view.getUint8(at + 2), view.getUint8(at + 3),
+);
+
+const printableType = (name) => [...name].every((c) => {
+  const code = c.charCodeAt(0);
+  return (code >= 0x20 && code <= 0x7E) || code === 0xA9;
+});
+
+/** `meta` is a full box in ISO and a plain one in QuickTime: four bytes of
+ *  version and flags are there in an .mp4 and absent in a .mov, and reading the
+ *  wrong one loses the whole subtree in silence. Which it is can be looked at. */
+function metaSkip(view, start, end) {
+  for (const skip of [4, 0]) {
+    const at = start + skip;
+    if (at + 8 <= end && printableType(boxType(view, at + 4))) return skip;
+  }
+  return 4;
+}
+
+function walkBoxes(view, start, end, depth, out) {
+  let at = start;
+  while (at + 8 <= end) {
+    let size = view.getUint32(at);
+    const kind = boxType(view, at + 4);
+    let head = 8;
+    if (size === 1) {
+      if (at + 16 > end) return;
+      // Read as two 32-bit halves: the value cannot exceed MOOV_MAX by the time
+      // it is used, so there is nothing to gain from a BigInt round trip.
+      size = view.getUint32(at + 8) * 4294967296 + view.getUint32(at + 12);
+      head = 16;
+    } else if (size === 0) {
+      size = end - at;
+    }
+    if (size < head || at + size > end) return;
+    const body = [at + head, at + size];
+    if (V_WANTED.has(kind)) (out[kind] = out[kind] || []).push(body);
+    if (V_CONTAINERS.has(kind) && depth < 8) {
+      const child = body[0] + (kind === 'meta' ? metaSkip(view, body[0], body[1]) : 0);
+      walkBoxes(view, child, body[1], depth + 1, out);
+    }
+    at += size;
+  }
+}
+
+function boxText(view, span, inIlst) {
+  const [rawStart, end] = span;
+  const start = rawStart + (inIlst ? 8 : 4);
+  if (start >= end) return '';
+  let out = '';
+  for (let i = start; i < end; i += 1) out += String.fromCharCode(view.getUint8(i));
+  try {
+    out = decodeURIComponent(escape(out));   // the bytes are UTF-8
+  } catch {
+    /* not UTF-8: what was read is close enough for a coordinate string */
+  }
+  return out.replace(/\0/g, '').trim();
+}
+
+function fromIso6709(text) {
+  const match = ISO6709.exec(text || '');
+  if (!match) return null;
+  return { lat: Number(match[1]), lon: Number(match[2]) };
+}
+
+/** 3GPP's own location box: version and flags, a language code, a
+ *  null-terminated name, a role byte, then longitude, latitude and altitude as
+ *  16.16 fixed point - the opposite order from every other box here. */
+function fromLoci(view, span) {
+  const [start, end] = span;
+  let at = start + 4 + 2;
+  while (at < end && view.getUint8(at) !== 0) at += 1;
+  at += 2;  // the terminator, then the role byte
+  if (at + 12 > end) return null;
+  return { lon: view.getInt32(at) / 65536, lat: view.getInt32(at + 4) / 65536 };
+}
+
+/** Apple's `©day`: an ISO 8601 stamp carrying the phone's own offset. The
+ *  offset is read and then thrown away, because this app stores the wall clock
+ *  that was on the device - a clip shot at 15:00 reads back as 15:00 anywhere. */
+function parseDay(text) {
+  const m = /(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})/.exec(text || '');
+  if (!m) return null;
+  return Math.floor(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) / 1000);
+}
+
+function parseMvhd(view, span) {
+  const [start, end] = span;
+  if (start + 4 > end) return {};
+  const version = view.getUint8(start);
+  try {
+    if (version === 1) {
+      return {
+        created: view.getUint32(start + 4) * 4294967296 + view.getUint32(start + 8),
+        scale: view.getUint32(start + 20),
+        length: view.getUint32(start + 24) * 4294967296 + view.getUint32(start + 28),
+      };
+    }
+    return {
+      created: view.getUint32(start + 4),
+      scale: view.getUint32(start + 12),
+      length: view.getUint32(start + 16),
+    };
+  } catch {
+    return {};
+  }
+}
+
+/** Read the file's top level until `moov`, and return it as a DataView. */
+async function findMoov(file) {
+  let at = 0;
+  while (at + 8 <= file.size) {
+    const header = new DataView(await file.slice(at, at + 16).arrayBuffer());
+    if (header.byteLength < 8) return null;
+    let size = header.getUint32(0);
+    const kind = boxType(header, 4);
+    let head = 8;
+    if (size === 1) {
+      if (header.byteLength < 16) return null;
+      size = header.getUint32(8) * 4294967296 + header.getUint32(12);
+      head = 16;
+    } else if (size === 0) {
+      size = file.size - at;
+    }
+    if (size < head || at + size > file.size) return null;
+    if (kind === 'moov') {
+      if (size - head > MOOV_MAX) return null;
+      return new DataView(await file.slice(at + head, at + size).arrayBuffer());
+    }
+    at += size;
+  }
+  return null;
+}
+
+/** What a video says about itself: where, when, and how long.
+ *
+ *  Shaped like readExif's answer, plus `duration`, so a caller does not have to
+ *  care which of the two it called. `gps` names why there is no fix, drawing the
+ *  same distinction the photo reader draws, because the reasons want different
+ *  reactions: `absent` is a clip recorded with location off, and `zeroed` is one
+ *  whose coordinates were blanked on the way out of the phone.
+ */
+async function readVideoMeta(file) {
+  let view = null;
+  try {
+    view = await findMoov(file);
+  } catch {
+    return null;
+  }
+  if (!view) return null;
+
+  const boxes = {};
+  try {
+    walkBoxes(view, 0, view.byteLength, 0, boxes);
+  } catch {
+    return null;
+  }
+
+  const out = { taken_ts: null, lat: null, lon: null, duration: null, gps: 'absent' };
+  const header = boxes.mvhd ? parseMvhd(view, boxes.mvhd[0]) : {};
+  if (header.scale && header.length) out.duration = header.length / header.scale;
+
+  let fix = null;
+  let sawBox = false;
+  for (const span of boxes['\xA9xyz'] || []) {
+    sawBox = true;
+    fix = fix || fromIso6709(boxText(view, span, false));
+  }
+  for (const span of boxes.data || []) {
+    const text = boxText(view, span, true);
+    if (ISO6709.test(text)) { sawBox = true; fix = fix || fromIso6709(text); }
+  }
+  for (const span of boxes.loci || []) {
+    sawBox = true;
+    fix = fix || fromLoci(view, span);
+  }
+  if (fix && Number.isFinite(fix.lat) && Number.isFinite(fix.lon)) {
+    const sane = fix.lat >= -90 && fix.lat <= 90 && fix.lon >= -180 && fix.lon <= 180;
+    if (fix.lat === 0 && fix.lon === 0) out.gps = 'zeroed';
+    else if (!sane) out.gps = 'ok';        // present and refused, as a photo's is
+    else { out.lat = fix.lat; out.lon = fix.lon; out.gps = 'ok'; }
+  } else if (sawBox) {
+    out.gps = 'unreadable';
+  }
+
+  for (const span of boxes['\xA9day'] || []) {
+    const stamp = parseDay(boxText(view, span, false));
+    if (stamp) { out.taken_ts = stamp; break; }
+  }
+  if (out.taken_ts === null && header.created > EPOCH_1904) {
+    out.taken_ts = header.created - EPOCH_1904;
+  }
+  return out;
+}

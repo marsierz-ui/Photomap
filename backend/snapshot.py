@@ -15,16 +15,21 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from . import db, thumbs
+from . import db, photometa, thumbs
 
 MANIFEST_KEY = "manifest.json"
+# The journal, published beside the manifest rather than inside it. A decade of
+# daily notes is not large, but it is dead weight in an object the viewer
+# re-reads every twenty seconds while an upload is in flight - so it is fetched
+# once, when the Journal view is opened, and cached by the service worker.
+DAYS_KEY = "days.json"
 THUMB_PREFIX = "t/"
 INBOX_PREFIX = "inbox/"
 # Image bytes uploaded from the viewer. Deliberately not under INBOX_PREFIX: the
 # inbox drain JSON-parses everything it finds there, and a JPEG would sit in it
 # failing to parse on every sync forever.
 IMPORT_PREFIX = "import/"
-MANIFEST_VERSION = 5
+MANIFEST_VERSION = 6
 
 
 def _thumb_hash(path) -> tuple[str, int]:
@@ -44,8 +49,8 @@ def build(progress=None) -> tuple[dict, dict]:
 
     where = "missing=0" + (" AND lat IS NOT NULL" if scope == "located" else "")
     rows = conn.execute(
-        f"SELECT id, path, lat, lon, taken_ts, mtime, favorite,"
-        f" filesize, camera_make, camera_model, filename, note FROM photos"
+        f"SELECT id, path, ext, lat, lon, taken_ts, mtime, favorite,"
+        f" filesize, camera_make, camera_model, filename, note, duration FROM photos"
         f" WHERE {where} ORDER BY taken_ts DESC, id DESC"
     ).fetchall()
 
@@ -69,6 +74,12 @@ def build(progress=None) -> tuple[dict, dict]:
     # Sparse: almost no photo has a note, so a full array would be 26,000 empty
     # strings to carry a handful of real ones.
     notes: dict[str, str] = {}
+    # Videos, by position rather than as a flag per item: a library is mostly
+    # photos, so a sparse list of the exceptions is a few hundred bytes where a
+    # full array would be tens of kilobytes of zeroes. `durations` is keyed the
+    # same way, and only for the clips that report one.
+    videos: list[int] = []
+    durations: dict[str, float] = {}
     # Camera names repeat across thousands of photos, so they are published once
     # in `cams` and referenced by index. -1 is "no camera recorded".
     cameras: list[int] = []
@@ -111,6 +122,10 @@ def build(progress=None) -> tuple[dict, dict]:
             favourites.append(1 if row["favorite"] else 0)
             sizes.append(row["filesize"] or 0)
             names.append(row["filename"] or "")
+            if (row["ext"] or "").lower() in photometa.VIDEO_EXTS:
+                videos.append(len(ids) - 1)
+                if row["duration"]:
+                    durations[str(len(ids) - 1)] = round(row["duration"], 1)
             note = (row["note"] or "").strip()
             if note:
                 notes[str(row["id"])] = note
@@ -203,6 +218,8 @@ def build(progress=None) -> tuple[dict, dict]:
         "cams": camera_names,
         "name": names,
         "notes": notes,
+        "vids": videos,
+        "dur": durations,
         "albums": albums,
         "dupes": duplicate_sets,
         # Tells the viewer whether to offer deletion at all. The desktop side
@@ -223,6 +240,15 @@ def build(progress=None) -> tuple[dict, dict]:
         "located": totals["located"] or 0,
         "thumb_size": size,
         "bytes": total_bytes,
+        "video_n": len(videos),
+        # What one video may weigh on the way up, and how it travels. A Worker
+        # cannot receive more than 100MB in a request on the Free and Pro plans,
+        # so anything past the single-shot cap is sent in parts.
+        "video_max_mb": 256,
+        "part_mb": 8,
+        # Whether there is a journal to fetch at all, so the viewer does not ask
+        # for days.json against a snapshot that has none.
+        "days_n": conn.execute("SELECT COUNT(*) c FROM day_notes").fetchone()["c"],
     }
     if progress:
         progress(len(rows), len(rows))
@@ -231,6 +257,25 @@ def build(progress=None) -> tuple[dict, dict]:
 
 def manifest_bytes(manifest: dict) -> bytes:
     return json.dumps(manifest, separators=(",", ":")).encode("utf-8")
+
+
+def days_bytes() -> bytes:
+    """The journal, as the viewer reads it.
+
+    Every written day, text and all: the entries are the point of the view, and
+    a phone with no signal that can open the app should be able to read back
+    what it wrote last week as well as write today.
+    """
+    rows = [dict(r) for r in db.connect().execute(
+        "SELECT day, text, lat, lon, loc_src, updated_ts FROM day_notes ORDER BY day DESC"
+    )]
+    # The stamp is the newest entry rather than the moment this ran, so an
+    # unchanged journal produces byte-identical output - which is what lets the
+    # sync skip publishing it at all.
+    generated = max((r["updated_ts"] or 0) for r in rows) if rows else 0
+    return json.dumps(
+        {"v": 1, "generated": generated, "days": rows}, separators=(",", ":"),
+    ).encode("utf-8")
 
 
 def estimate() -> dict:

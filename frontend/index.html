@@ -206,6 +206,11 @@
   <button class="lb-nav prev" data-lb="prev">‹</button>
   <button class="lb-nav next" data-lb="next">›</button>
   <img id="lb-img" alt="">
+  <!-- A clip plays here rather than opening in another tab. The source is a
+       range-serving endpoint of its own, which is what makes it seekable: a
+       player asks for the byte range it wants, and a server that always sent
+       the whole file would make a two-minute video a two-minute wait. -->
+  <video id="lb-video" class="hidden" controls playsinline preload="metadata"></video>
   <div id="lb-info" class="lb-info"></div>
 </div>
 

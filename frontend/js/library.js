@@ -110,6 +110,7 @@ export async function openSettings() {
 
     <div class="muted small" style="margin-top:10px">
       HEIC support: ${c.heif ? 'on' : 'off (pip install pillow-heif)'} ·
+      Video frames: ${c.ffmpeg ? 'on' : 'off (install ffmpeg for real poster frames)'} ·
       Deleted files go to: ${c.recycle_bin ? 'the OS recycle bin' : 'data/trash'}<br>
       Index and thumbnails live in <code>${escapeHtml(c.data_dir)}</code>
     </div>

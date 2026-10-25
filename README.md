@@ -1,8 +1,9 @@
 # Photo Map
 
 A local photo heat map. Points your photo folders at an index, reads GPS and capture
-time out of EXIF, and gives you a world map, a browsable gallery, and time-series tools
-on top. Nothing leaves the machine except map tile requests.
+time out of EXIF - and out of the container, for videos - and gives you a world map, a
+browsable gallery, a journal and time-series tools on top. Nothing leaves the machine
+except map tile requests.
 
 ## Run
 
@@ -102,6 +103,38 @@ The heat map's radius, blur and intensity are remembered between sessions. They 
 the settings table rather than in the browser, so they follow you to the phone; the
 `value` attributes in the HTML stay the defaults, so there is one place to change those
 rather than two. The write waits for the slider to stop moving.
+
+**Videos** - clips are indexed beside photos rather than in a section of their own:
+one row, one point on the map, one place in the timeline, one tile in the gallery with
+a `▶` and its length on it. Clicking one plays it, which is the only thing this app
+does with a video that it does not do with a photo.
+
+`backend/videometa.py` reads .mp4, .m4v, .mov and .3gp with the standard library and
+nothing else - the metadata of an ISO base media file is a tree of box headers, and
+walking it is a page of code where decoding a frame would be a dependency. It takes the
+position out of the `©xyz` or `loci` box, the capture time out of `©day` or the movie
+header, and the size out of the video track, applying that track's rotation so a clip
+shot upright is not listed as landscape. The `moov` box sits at either end of the file
+depending on what wrote it, so the top level is walked by its own sizes rather than
+searched for: a 200MB clip costs two small reads.
+
+Capture time is `©day` first, then the filename, then the movie header - the same
+precedence photos use, for the same measured reason. `©day` is a phone's own wall
+clock, which is the scale everything here stores; a movie header is nominally UTC and in
+practice whatever the encoder felt like, so a name like `VID_20240115_120000.mp4` beats
+it.
+
+**A thumbnail is a frame, and a frame needs a decoder.** If `ffmpeg` is on the PATH one
+is pulled out a second in - past the black frame most recordings open on - and everything
+downstream treats it as an ordinary thumbnail. If it is not, the tile is drawn rather
+than left blank, because a missing thumbnail reads as a broken one. The settings dialog
+says which of the two you have. Installing ffmpeg and pressing **Rebuild thumbnails**
+turns every drawn tile into a real frame, with no other change. A clip uploaded from a
+phone brings its own poster frame, so those have a real picture either way.
+
+Playback is a range-serving endpoint of its own (`/api/photos/<id>/video`) rather than
+the download route: a player seeks by asking for byte ranges, and a server that answers
+every request with the whole file makes a two-minute clip unseekable.
 
 **Journal** - a note per calendar day, written the way a word processor works:
 **Ctrl+B / I / U** for bold, italic and underline, **Ctrl+Shift+7 / 8** for a numbered or
@@ -320,11 +353,21 @@ EXIF capture times carry no timezone. A photo taken at 15:00 in Tokyo and one ta
 clock is normalized through UTC so it sorts and buckets correctly. Photos with no EXIF
 date fall back to the file modification time, marked "(file date)" in the lightbox.
 
+A video is treated the same way and for the same reason: `©day` carries an offset, and
+that offset is read and then thrown away, so a clip shot at 15:00 anywhere reads back as
+15:00.
+
 ## Formats
 
 Whatever Pillow can open in your environment: JPEG, PNG, TIFF, WebP, BMP, GIF, and AVIF
 natively. HEIC/HEIF needs `pillow-heif` to load successfully - the settings dialog shows
 whether it did. RAW files are not indexed.
+
+Videos: .mp4, .m4v, .mov, .3gp and .3g2. That set is not conditional on anything being
+installed - their metadata is read here with the standard library - so a clip is always
+indexed, always placed and always dated. Only its thumbnail depends on ffmpeg being
+present. .webm and .mkv are not indexed: they are a different container entirely, and
+nothing that comes off a phone is one.
 
 > On this machine `pillow-heif` installs but its native library is blocked by an
 > Application Control policy, so `.heic` is currently not in the indexed set. Everything
@@ -355,6 +398,22 @@ switched off. Full-size originals never leave the machine.
 gallery; *only photos with GPS* gives a map-only heat map and uploads far less. The
 dialog shows the estimate live -- on a 26,729-photo library, 160px thumbnails come to
 about 313MB, roughly 3% of R2's 10GB free tier.
+
+**What actually costs anything on the free tier**, since almost everything here was
+shaped by it:
+
+- *storage*, 10GB. The snapshot is thumbnails, so a large library is a few hundred
+  megabytes. What can fill it is uploads waiting to be collected, which is why there is
+  a 4GB ceiling on those and a 256MB cap per clip - four videos is most of the ceiling,
+  and the ceiling is what stops the tier being reached at all;
+- *Class A operations* (writes and lists), 1M a month. A routine sync is a handful:
+  `manifest.json`, the journal when it changed, and one per new thumbnail. The watcher
+  that looks for phone uploads costs two listings a minute, about 90,000 a month. A
+  256MB video is 32 part uploads;
+- *Class B operations* (reads), 10M a month. Thumbnails are content-addressed and
+  served `immutable`, so a second look at one is not a request at all;
+- and the limit that is not a quota but a wall: **a Worker cannot receive a body larger
+  than 100MB** on Free or Pro, which is why anything bigger goes up in parts.
 
 Thumbnails are content-addressed, so a routine sync rewrites only `manifest.json` -- a
 handful of Class A operations against a 1M/month free allowance.
@@ -388,6 +447,40 @@ page and no map at all the moment it went offline - the exact case it exists for
 MapLibre is deliberately left out of the precached shell, being half a megabyte for a
 mode most sessions never open; it is fetched the first time the globe is chosen and
 cached from then on.
+
+**The journal is there too, and this is where writing one actually happens.** The
+Journal tab is the same idea as the desktop's - a card per calendar day, every day
+present whether or not anything was written in it, today at the top and a month at a
+time as you scroll - with the same rich text and the same tag whitelist applied to
+everything going in or coming out. **Go to day** jumps the list, the search box narrows
+it to the days that match, and clearing an entry deletes it.
+
+Two things are different, and both come from where it runs:
+
+- **there is no server to save to.** An entry is queued in the bucket exactly like a
+  favourite or a photo note, and the computer applies it on its next sync. Until it
+  comes back in a published snapshot the phone keeps its own copy, so a day written on
+  a train is still there after a reload - and it is dropped only when the published
+  journal actually carries it, never merely because a newer snapshot exists;
+- **and an entry can be written with no signal at all**, which is exactly when someone
+  writes one. A change that cannot be sent is parked in the queue's own database and
+  handed to the service worker, which sends it when there is a connection with nothing
+  open. The card says *Saved here - it goes when you have a signal* rather than
+  pretending it reached the bucket. Favourites and albums still refuse offline: they
+  are a tap, and a tap can be repeated.
+
+**Use my location works here, and only here.** A browser hands out a position only in a
+secure context, which over plain HTTP means this computer and nothing else - so the
+button that has never worked from a phone on the LAN works from the published viewer,
+which is served over HTTPS. It is asked after the entry is stored rather than before,
+because a permission prompt can go unanswered forever and what was just written must not
+wait behind it. A day nobody can place is left to the computer, which puts it where the
+photo nearest it in time was.
+
+The journal is published as `days.json` beside the manifest rather than inside it: the
+viewer re-reads the manifest every twenty seconds while an upload is out, and a decade
+of writing has no business in that request. It is written only when it has changed, so
+a library nobody journals in still costs one object per sync rather than two.
 
 **Insights in the viewer** are computed in the browser from the manifest rather than
 asked of a server, because there is no server to ask - the Worker serves objects and
@@ -474,8 +567,8 @@ fine. They say nothing about the library.
 
 ### Changes made in the cloud
 
-The viewer can favourite photos, write photo notes, add them to albums, create albums,
-and remove duplicate copies. A note saves on the way out of the field (or Ctrl+Enter),
+The viewer can favourite photos, write photo notes, write journal days, add photos to
+albums, create albums, and remove duplicate copies. A note saves on the way out of the field (or Ctrl+Enter),
 and only when it actually changed, so opening a photo to look at it queues nothing. An
 empty note clears it, stored as NULL exactly as the desktop does, so the search never
 matches a blank. Notes are capped at 4,000 characters in the Worker, with the same cap
@@ -485,6 +578,14 @@ It never writes to the library directly: each change is parked in the bucket
 under `inbox/`, and the desktop app drains and applies it on its next sync. Every
 operation is idempotent, so a change whose inbox object failed to delete does no harm
 when it is seen again, and an unrecognised operation is ignored rather than guessed at.
+
+**A journal day** is capped at 20,000 characters in the Worker, stripped to the same
+tag whitelist again on the desktop side - a cloud entry is written by whatever posted to
+the Worker, so the client's own whitelist is not the one that counts - and applied last
+write wins. Every entry carries the moment it was written, and one that has been sitting
+in the bucket since before a later edit made on the computer is dropped rather than
+applied, so a queued change cannot travel backwards in time. An empty entry deletes the
+day, which is how a day is cleared from either end.
 
 **Duplicate cleanup** is always available: it is refused unless exactly one copy
 survives, so it cannot lose a photo.
@@ -503,7 +604,7 @@ from the cloud*. Once on, several things have to line up before a file moves:
 - the desktop re-checks the switch when applying, so a snapshot published while it was
   on cannot be used to delete after you turn it off.
 
-### Adding photos from a phone
+### Adding photos and videos from a phone
 
 Off until you switch it on in ⚙ → *Accept photos added from your phone*. Once on, the
 viewer grows a **+ Add** button. A picked photo is pinned straight away from an EXIF
@@ -512,6 +613,32 @@ original, and collected by this computer on its next sync into `data/imported/`,
 it becomes an ordinary library photo. The desktop re-reads every file it receives with
 Pillow and wins any disagreement with the phone, so a phone that could not parse its
 own HEIC still ends up with real coordinates.
+
+**A video goes the same way, in pieces.** The picker takes clips as well, and one
+travels as the same two halves: a poster frame first - drawn out of the file by the
+phone's own decoder, which is the one thing on the path guaranteed to be able to read
+it - and then the recording. `viewer/exif.js` reads the container's own boxes for the
+position and the capture time, mirroring `backend/videometa.py` box for box, so a clip
+gets its pin the moment it is picked in just the way a JPEG does.
+
+The recording itself cannot be one request: **the largest body a Worker can receive is
+100MB on the Free and Pro plans**, and a minute of 4K is more than that. So anything
+past 64MB goes up as an R2 multipart upload - 8MB at a time, each part hashed and
+checked before it is stored, each one written back to the queue as it lands. A dropped
+connection costs the part in flight and nothing else: the next attempt resumes at the
+part after the last one that arrived rather than at the beginning. An upload that is
+abandoned is aborted explicitly, because a multipart upload that was never completed is
+not an object and nothing that lists the bucket can see it.
+
+Clips are capped at **256MB** each, which is a number chosen against R2's 10GB free tier
+rather than against what a phone can record. Four of them is most of what is allowed to
+be waiting at once.
+
+The poster is never filed as though it were the clip. If the recording never arrives,
+the import is given up on rather than settled for - a still in the library under a
+`.mp4`'s name would be worse than nothing. Where the computer has no `ffmpeg`, the
+phone's poster becomes that clip's thumbnail, which is often the only picture of it this
+machine can make.
 
 **Select everything, every time.** No web app can reach a camera roll without the
 phone's own picker, so choosing the photos is a gesture only you can make -- but
@@ -683,9 +810,30 @@ Nothing here says "waiting for your computer" any more. It reads as a fault when
 computer is switched on and in front of you; what it meant was that Photo Map has to run
 a sync before an uploaded photo joins the library, so that is what it says.
 
-**Closing the app no longer stops the upload.** Whatever is still queued is handed to the
-service worker through Background Sync: the browser wakes it when there is a connection,
-with nothing open, and it sends the photos that are already staged. It shares the queue
+**Closing the app - or the screen going off - no longer stops the upload.** To a phone
+those are the same thing: a page that is no longer on screen stops being given time, and
+before this a batch simply stalled at the lock screen. Whatever is still queued is
+handed to the service worker through Background Sync: the browser wakes it when there is
+a connection, with nothing open, and it sends the photos that are already staged.
+
+**And the ones that were never read.** Photos are deliberately read a few ahead of the
+uploader rather than all at once - a whole camera roll staged in one go is gigabytes of
+previews parked on the phone - so the rest of a selection used to be reported as *not
+reached* and had to be picked again. It is now kept in the queue's own store instead,
+and the worker reads the next one itself, sends it, and goes on to the next. Up to a
+gigabyte of a selection is kept that way, which is a few hundred phone photos: enough
+that a batch survives a pocket, bounded so that parking it is never the phone's storage
+problem.
+
+It stages only what the bitmap decoder will open, which is every ordinary JPEG and PNG.
+A HEIC needs an `<img>` and a video needs a `<video>`, and a service worker has neither,
+so those wait for the app to be opened - left where they are, never dropped. And it
+stands down entirely while the app is on screen, because the page is draining the same
+queue and two senders would put some photos in the bucket twice.
+
+The handover happens on the way out - when the tab is hidden, and again when it is
+closed - rather than only at the end of a batch, which is what makes the lock screen a
+pause rather than a stop. It shares the queue
 with the page through `viewer/uploadq.js` - the database, the record shape, both
 endpoints, the metadata header and which failures are worth retrying - rather than
 keeping a second copy of any of that to drift out of step. It honours the Wi-Fi
@@ -770,6 +918,12 @@ npx wrangler deploy
 ```
 
 `SESSION_SECRET` should be a long random string -- any password manager will make one.
+
+**A sync publishes the viewer, not the Worker.** Adding videos and journal days added
+routes and operations to `worker/src/worker.js`, so an existing deployment needs
+`npx wrangler deploy` again before either works from a phone: without it a video upload
+gets a 404 on `/api/import/begin` and a journal entry is refused as an unsupported
+operation. Both say so in those words rather than failing quietly.
 Deploy prints a `https://photo-map.<you>.workers.dev` address; paste it into the
 **Viewer URL** field in the app so the settings dialog can offer it as a link.
 
@@ -798,14 +952,16 @@ backend/
   auth.py        access key + unlock page for non-loopback clients
   netinfo.py     which addresses other devices can reach this server on
   nametime.py    capture times recovered from filenames
+  days.py        journal entries: whitelist, placement, one writer for both ends
   dupes.py       content-hash duplicate detection
   r2.py          SigV4-signed S3 client for R2 (standard library only)
   snapshot.py    builds the manifest + content-addressed snapshot thumbnails
   sync.py        delta upload, prune, background thread
   db.py          SQLite schema, connections, settings, roots
   photometa.py   EXIF: GPS, capture time, camera, dimensions
+  videometa.py   the same, out of an .mp4/.mov container, standard library only
   scanner.py     threaded folder walk and index upsert
-  thumbs.py      on-demand thumbnail/preview cache
+  thumbs.py      on-demand thumbnail/preview cache, video frames via ffmpeg
 frontend/
   index.html     single page, no build step
   js/            ES modules: map, globe, gallery, journal, timeline, sidebar,
@@ -819,13 +975,17 @@ worker/
   src/worker.js  Cloudflare Worker: password gate + serves the private bucket
 tests/           sigv4 vs botocore, sync against a mock S3, worker auth and
                  write-back, cloud change round-trip, filename dates,
-                 duplicate detection and delete safety
+                 duplicate detection and delete safety, video metadata in both
+                 readers, the upload queue's digest and multipart driver, and
+                 the service worker's drain
 data/            photomap.db + thumbs/ (created on first run, safe to delete)
 ```
 
 Run the tests with `.venv\Scripts\python.exe tests\test_sync.py`,
 `tests\test_writeback.py`, `tests\test_nametime.py`, `tests\test_dupes.py`,
-`node tests\test_worker.mjs`, and (after `pip install botocore`) `tests\test_sigv4.py`.
+`tests\test_videometa.py`, `node tests\test_worker.mjs`, `node tests\test_exif.mjs`,
+`node tests\test_uploadq.mjs`, `node tests\test_sw.mjs`, and (after
+`pip install botocore`) `tests\test_sigv4.py`.
 
 Rescanning is incremental: files whose size and mtime are unchanged are skipped.
 
@@ -842,6 +1002,10 @@ scriptable: `/api/points`, `/api/photos`, `/api/timeline`, `/api/dist`, `/api/st
 `/api/albums`. All of them accept the same filter query params
 (`from`, `to`, `bbox`, `album`, `camera`, `gps`, `fav`, `q`), where `q` matches the
 path or the note.
+
+A video plays from `/api/photos/<id>/video`, which answers `Range` requests so a
+player can seek; `/api/photos/<id>/original` still hands over the whole file for a
+download.
 
 Notes are written with `POST /api/photos/<id>/note` and a `{"note": "..."}` body; an
 empty string clears it. Journal days are `GET /api/days` and

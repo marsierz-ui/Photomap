@@ -6,7 +6,7 @@ import warnings
 
 from PIL import Image
 
-from . import nametime
+from . import nametime, videometa
 
 Image.MAX_IMAGE_PIXELS = None  # personal library: panoramas are not an attack
 warnings.simplefilter("ignore", Image.DecompressionBombWarning)
@@ -26,6 +26,17 @@ CANDIDATE_EXTS = (
 )
 IMAGE_EXTS = {e for e in CANDIDATE_EXTS if e in Image.registered_extensions()}
 HEIF_OK = ".heic" in IMAGE_EXTS
+
+# Videos are indexed alongside photos rather than beside them: one row, one map
+# point, one place in the timeline. Nothing here decodes a frame - `videometa`
+# reads the container's own boxes - so the set is not conditional on Pillow.
+VIDEO_EXTS = videometa.VIDEO_EXTS
+MEDIA_EXTS = IMAGE_EXTS | VIDEO_EXTS
+
+
+def is_video(path: str) -> bool:
+    return os.path.splitext(path)[1].lower() in VIDEO_EXTS
+
 
 GPS_IFD = 0x8825
 EXIF_IFD = 0x8769
@@ -126,7 +137,14 @@ def _gps(gps_ifd: dict) -> tuple[float | None, float | None, float | None]:
 
 
 def read(path: str) -> dict:
-    """Return metadata for one image file. Never raises."""
+    """Return metadata for one file. Never raises.
+
+    Videos come back through here too, in the same shape, so every caller - the
+    scanner, the cloud import - stays one code path with one row layout.
+    """
+    if is_video(path):
+        return videometa.read(path)
+
     stat = os.stat(path)
     meta = {
         "path": path,
@@ -145,6 +163,7 @@ def read(path: str) -> dict:
         "orientation": 1,
         "camera_make": None,
         "camera_model": None,
+        "duration": None,
         "error": None,
     }
 

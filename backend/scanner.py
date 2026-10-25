@@ -70,7 +70,7 @@ def _walk(roots: list[str]) -> list[str]:
                 return found
             dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
             for name in filenames:
-                if os.path.splitext(name)[1].lower() not in photometa.IMAGE_EXTS:
+                if os.path.splitext(name)[1].lower() not in photometa.MEDIA_EXTS:
                     continue
                 full = os.path.normpath(os.path.join(dirpath, name))
                 key = full.lower()
@@ -96,12 +96,13 @@ def upsert(conn, meta: dict, now: int) -> tuple[int, bool]:
         meta["taken_ts"], meta["taken_src"], meta["lat"], meta["lon"],
         meta["altitude"], meta["width"], meta["height"], meta["orientation"],
         meta["camera_make"], meta["camera_model"], meta["filesize"], meta["mtime"],
+        meta.get("duration"),
     )
     if row:
         conn.execute(
             "UPDATE photos SET path=?, folder=?, filename=?, ext=?, taken_ts=?,"
             " taken_src=?, lat=?, lon=?, altitude=?, width=?, height=?, orientation=?,"
-            " camera_make=?, camera_model=?, filesize=?, mtime=?, missing=0"
+            " camera_make=?, camera_model=?, filesize=?, mtime=?, duration=?, missing=0"
             " WHERE id=?",
             values + (row["id"],),
         )
@@ -109,8 +110,8 @@ def upsert(conn, meta: dict, now: int) -> tuple[int, bool]:
     cur = conn.execute(
         "INSERT INTO photos(path, folder, filename, ext, taken_ts, taken_src,"
         " lat, lon, altitude, width, height, orientation, camera_make,"
-        " camera_model, filesize, mtime, added_ts, missing)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",
+        " camera_model, filesize, mtime, duration, added_ts, missing)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",
         values + (now,),
     )
     return cur.lastrowid, True

@@ -7,10 +7,14 @@ import time
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import (
+    FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, db, dupes, nametime, netinfo, r2, scanner, snapshot, sync, thumbs
+from . import (
+    auth, days, db, dupes, nametime, netinfo, photometa, r2, scanner, snapshot, sync, thumbs,
+)
 from .photometa import HEIF_ERROR, HEIF_OK, IMAGE_EXTS
 
 try:
@@ -150,7 +154,11 @@ def get_config(request: Request):
         "settings": settings,
         "heif": HEIF_OK,
         "heif_error": HEIF_ERROR,
-        "extensions": sorted(IMAGE_EXTS),
+        "extensions": sorted(IMAGE_EXTS | photometa.VIDEO_EXTS),
+        # Whether a frame can be pulled out of a video here. Without it a clip
+        # still indexes, still has a place and a time, and still appears
+        # everywhere - it is the poster that is drawn rather than real.
+        "ffmpeg": bool(thumbs.FFMPEG),
         "recycle_bin": RECYCLE_OK,
         "data_dir": str(db.DATA_DIR),
     }
@@ -367,8 +375,9 @@ def list_photos(request: Request, limit: int = 200, offset: int = 0, sort: str =
     order = SORTS.get(sort, SORTS["date_desc"])
     total = conn.execute(f"SELECT COUNT(*) c FROM photos p WHERE {where}", params).fetchone()["c"]
     rows = conn.execute(
-        f"SELECT p.id, p.filename, p.path, p.taken_ts, p.taken_src, p.lat, p.lon, p.width,"
-        f" p.height, p.favorite, p.filesize, p.camera_make, p.camera_model, p.note"
+        f"SELECT p.id, p.filename, p.path, p.ext, p.taken_ts, p.taken_src, p.lat, p.lon,"
+        f" p.width, p.height, p.favorite, p.filesize, p.camera_make, p.camera_model,"
+        f" p.note, p.duration"
         f" FROM photos p WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
         params + [min(limit, 1000), offset],
     ).fetchall()
@@ -429,6 +438,76 @@ def photo_thumb(photo_id: int, s: int = Query(default=0)):
 @app.get("/api/photos/{photo_id}/preview")
 def photo_preview(photo_id: int, s: int = Query(default=0)):
     return _serve_cached(photo_id, s or int(db.get_setting("preview_size", 1600)))
+
+
+# What a <video> element asks for, and the only reason this is not FileResponse:
+# a player seeks by asking for byte ranges, and a server that answers every
+# request with the whole file makes a two-minute clip unseekable.
+VIDEO_TYPES = {
+    ".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime",
+    ".3gp": "video/3gpp", ".3g2": "video/3gpp2",
+}
+# One chunk of a seek, not the whole file: a player asks for more as it plays.
+VIDEO_CHUNK = 4 * 1024 * 1024
+
+
+@app.get("/api/photos/{photo_id}/video")
+def photo_video(photo_id: int, request: Request):
+    row = db.connect().execute(
+        "SELECT path, ext FROM photos WHERE id=?", (photo_id,)
+    ).fetchone()
+    if not row or not os.path.exists(row["path"]):
+        raise HTTPException(404, "File missing")
+    if not photometa.is_video(row["path"]):
+        raise HTTPException(400, "Not a video")
+
+    path = row["path"]
+    total = os.path.getsize(path)
+    media = VIDEO_TYPES.get(row["ext"], "application/octet-stream")
+    headers = {"Accept-Ranges": "bytes", "Cache-Control": "private, max-age=3600"}
+
+    span = _byte_range(request.headers.get("range"), total)
+    if span is None:
+        return FileResponse(path, media_type=media, headers=headers)
+    start, end = span
+    headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+    headers["Content-Length"] = str(end - start + 1)
+
+    def stream():
+        with open(path, "rb") as fh:
+            fh.seek(start)
+            left = end - start + 1
+            while left > 0:
+                chunk = fh.read(min(65536, left))
+                if not chunk:
+                    return
+                left -= len(chunk)
+                yield chunk
+
+    return StreamingResponse(stream(), status_code=206, media_type=media, headers=headers)
+
+
+def _byte_range(header: str | None, total: int) -> tuple[int, int] | None:
+    """The one form players actually send: `bytes=start-` or `bytes=start-end`.
+
+    A malformed or multi-range header is answered with the whole file rather
+    than a 416: this serves one library to one browser, and refusing is worse
+    than ignoring.
+    """
+    if not header or not header.startswith("bytes=") or "," in header:
+        return None
+    first, _, last = header[6:].partition("-")
+    try:
+        start = int(first) if first else 0
+        end = int(last) if last else min(start + VIDEO_CHUNK - 1, total - 1)
+    except ValueError:
+        return None
+    if not first and last:  # a suffix range: the last N bytes
+        start, end = max(0, total - int(last)), total - 1
+    end = min(end, total - 1)
+    if start > end or start >= total:
+        return None
+    return start, end
 
 
 @app.get("/api/photos/{photo_id}/original")
@@ -521,67 +600,24 @@ def delete_photos(body: dict = Body(...)):
 
 
 # --------------------------------------------------------------------------- journal
-
-# A photo taken months from the day says nothing about where that day happened,
-# so the fallback gives up rather than guess wildly.
-NEAREST_PHOTO_WINDOW = 2 * 86400
-
-
-def _day_anchor(day: str) -> int:
-    """Midday of a YYYY-MM-DD, on the same wall-clock-through-UTC scale as
-    taken_ts - so the comparison is date against date, not zone against zone."""
-    year, month, date = (int(part) for part in day.split("-"))
-    return int(datetime.datetime(year, month, date, 12, tzinfo=datetime.UTC).timestamp())
-
-
-def _nearest_photo(anchor_ts: int) -> tuple[float, float] | None:
-    row = db.connect().execute(
-        "SELECT lat, lon, ABS(taken_ts - ?) AS gap FROM photos"
-        " WHERE missing=0 AND lat IS NOT NULL AND taken_ts IS NOT NULL"
-        " ORDER BY gap LIMIT 1",
-        (anchor_ts,),
-    ).fetchone()
-    if not row or row["gap"] > NEAREST_PHOTO_WINDOW:
-        return None
-    return row["lat"], row["lon"]
+#
+# The day itself, its text and where it happened all live in backend/days.py:
+# entries are written from the cloud viewer too, and those arrive through the
+# bucket rather than through here.
 
 
 @app.get("/api/days")
 def list_days():
-    rows = db.connect().execute("SELECT * FROM day_notes ORDER BY day DESC").fetchall()
-    return [dict(r) for r in rows]
+    return days.listing()
 
 
 @app.put("/api/days/{day}")
 def save_day(day: str, body: dict = Body(...)):
-    """Empty text deletes the entry: a blank day is not a day worth keeping."""
-    if len(day) != 10 or day[4] != "-" or day[7] != "-":
+    if not days.valid_day(day):
         raise HTTPException(400, "Day must be YYYY-MM-DD")
-    text = (body.get("text") or "").strip()
-    conn = db.connect()
-    if not text:
-        with db.write_lock:
-            conn.execute("DELETE FROM day_notes WHERE day=?", (day,))
-            conn.commit()
-        return {"day": day, "text": "", "lat": None, "lon": None, "loc_src": None}
-
-    lat, lon = body.get("lat"), body.get("lon")
-    source = (body.get("loc_src") or "device") if lat is not None and lon is not None else None
-    if source is None:
-        found = _nearest_photo(_day_anchor(day))
-        if found:
-            lat, lon = found
-            source = "photo"
-
-    with db.write_lock:
-        conn.execute(
-            "INSERT INTO day_notes(day, text, lat, lon, loc_src, updated_ts) VALUES (?,?,?,?,?,?)"
-            " ON CONFLICT(day) DO UPDATE SET text=excluded.text, lat=excluded.lat,"
-            " lon=excluded.lon, loc_src=excluded.loc_src, updated_ts=excluded.updated_ts",
-            (day, text, lat, lon, source, int(time.time())),
-        )
-        conn.commit()
-    return {"day": day, "text": text, "lat": lat, "lon": lon, "loc_src": source}
+    return days.save(
+        day, body.get("text") or "", body.get("lat"), body.get("lon"), body.get("loc_src")
+    )
 
 
 # --------------------------------------------------------------------------- albums

@@ -62,6 +62,18 @@ export default {
     if (url.pathname === '/api/import/full' && request.method === 'POST') {
       return receiveOriginal(request, env);
     }
+    if (url.pathname === '/api/import/begin' && request.method === 'POST') {
+      return beginParts(request, env);
+    }
+    if (url.pathname === '/api/import/part' && request.method === 'POST') {
+      return receivePart(request, env);
+    }
+    if (url.pathname === '/api/import/finish' && request.method === 'POST') {
+      return finishParts(request, env);
+    }
+    if (url.pathname === '/api/import/abort' && request.method === 'POST') {
+      return abortParts(request, env);
+    }
     if (url.pathname === '/api/import/state' && request.method === 'GET') {
       return importState(env);
     }
@@ -148,7 +160,7 @@ function timingSafeEqual(a, b) {
 // them on its next sync. The Worker never touches the library itself.
 const ALLOWED_OPS = new Set([
   'album_add', 'album_remove', 'album_create', 'favorite', 'dupe_resolve', 'photo_delete',
-  'photo_note',
+  'photo_note', 'day_write',
 ]);
 const MAX_IDS = 5000;
 const DELETE_CAP = 200;
@@ -164,6 +176,29 @@ const DELETE_CAP = 200;
 // not an option.
 const IMPORT_MAX_BYTES = 64 * 1024 * 1024;  // covers a 50MB phone photo
 const PROXY_MAX_BYTES = 2 * 1024 * 1024;
+// A video does not fit in one request and cannot be made to: the largest body a
+// Worker can receive is 100MB on the Free and Pro plans, and a minute of 4K is
+// more than that. So anything past IMPORT_MAX_BYTES arrives as an R2 multipart
+// upload - the parts land in the bucket as they come and are stitched into one
+// object at the end, which also means a dropped connection costs one part
+// rather than the whole clip.
+//
+// The ceiling is set against R2's 10GB free tier rather than against what a
+// phone can record. Four such videos is most of what is allowed to be waiting
+// at once, which is the number worth thinking about.
+const VIDEO_MAX_BYTES = 256 * 1024 * 1024;
+// R2 requires every part except the last to be the same size and at least 5MB.
+// 8 leaves plenty of room under the request limit and makes a 256MB clip 32
+// requests - trivial against a million Class A operations a month.
+const PART_BYTES = 8 * 1024 * 1024;
+// Uploaded as an image, indexed as a video. The extension decides which cap
+// applies, so the list has to be here and not only on the phone.
+const VIDEO_EXTS = new Set(['.mp4', '.m4v', '.mov', '.3gp', '.3g2']);
+const isVideo = (ext) => VIDEO_EXTS.has(String(ext || '').toLowerCase());
+// A journal day is a page, not a document. Matched by the desktop, which
+// re-applies the cap when it stores the entry.
+const DAY_TEXT_MAX = 20000;
+const DAY_KEY = /^\d{4}-\d{2}-\d{2}$/;
 // The real risk is not one big photo, it is a computer that has not synced for
 // weeks. R2's free tier is 10 GB; past this the bucket stops accepting, which
 // leaves the snapshot and plenty of headroom. Clearing it is one sync.
@@ -200,6 +235,17 @@ async function queueChange(request, env) {
     }
     if (change.note.length > NOTE_MAX) {
       return json(413, { error: `A note is limited to ${NOTE_MAX} characters` });
+    }
+  }
+  if (change.op === 'day_write') {
+    if (!DAY_KEY.test(String(change.day || ''))) {
+      return json(400, { error: 'day_write needs a YYYY-MM-DD day' });
+    }
+    if (typeof change.text !== 'string') {
+      return json(400, { error: 'day_write needs a text string' });
+    }
+    if (change.text.length > DAY_TEXT_MAX) {
+      return json(413, { error: `A day is limited to ${DAY_TEXT_MAX} characters` });
     }
   }
   if (change.op === 'photo_delete') {
@@ -286,8 +332,11 @@ async function receiveImport(request, env) {
   // Checked against what this photo will eventually occupy, both halves, so a
   // proxy is never accepted for an original that cannot follow it.
   const claimed = Number(meta.bytes) || bytes.byteLength;
-  if (claimed > IMPORT_MAX_BYTES) {
-    return json(413, { error: `Photos are limited to ${IMPORT_MAX_BYTES >> 20}MB` });
+  const ceiling = isVideo(meta.ext) ? VIDEO_MAX_BYTES : IMPORT_MAX_BYTES;
+  if (claimed > ceiling) {
+    return json(413, {
+      error: `${isVideo(meta.ext) ? 'Videos' : 'Photos'} are limited to ${ceiling >> 20}MB`,
+    });
   }
   const pending = await pendingBytes(env);
   if (pending + claimed > IMPORT_QUOTA_BYTES) return quotaResponse(pending);
@@ -355,6 +404,133 @@ async function receiveOriginal(request, env) {
   });
 }
 
+// ------------------------------------------------------------------ in parts
+//
+// The same original, for a file too large to be one request. R2's own multipart
+// upload does the stitching, so the Worker holds no state between the calls
+// beyond what the client hands back: the upload id and the part etags. That is
+// what makes this safe to spread across a background sync that may be woken,
+// killed and woken again with the app shut the whole time.
+
+/** The open upload for one import id, or an error response. */
+async function openMultipart(request, env) {
+  const url = new URL(request.url);
+  const iid = url.searchParams.get('iid') || '';
+  if (!IMPORT_ID.test(iid)) return { error: json(400, { error: 'Not an upload id' }) };
+  const uploadId = url.searchParams.get('uploadId') || '';
+  if (!uploadId || uploadId.length > 512) {
+    return { error: json(400, { error: 'Not an open upload' }) };
+  }
+  // Same rule as the single-shot original: without the proxy there is no op
+  // describing this file, so nothing would ever collect it.
+  if (!(await env.BUCKET.head(`import/${iid}.jpg`))) {
+    return { error: json(409, { error: 'That upload is not open' }) };
+  }
+  return { iid, uploadId, upload: env.BUCKET.resumeMultipartUpload(`import/${iid}.orig`, uploadId) };
+}
+
+async function beginParts(request, env) {
+  const url = new URL(request.url);
+  const iid = url.searchParams.get('iid') || '';
+  if (!IMPORT_ID.test(iid)) return json(400, { error: 'Not an upload id' });
+  const meta = readMeta(request);
+  if (!meta || typeof meta.sha256 !== 'string') {
+    return json(400, { error: 'Metadata needs sha256' });
+  }
+  if (!(await env.BUCKET.head(`import/${iid}.jpg`))) {
+    return json(409, { error: 'That upload is not open' });
+  }
+  const claimed = Number(meta.bytes) || 0;
+  const ceiling = isVideo(meta.ext) ? VIDEO_MAX_BYTES : IMPORT_MAX_BYTES;
+  if (claimed <= 0 || claimed > ceiling) {
+    return json(413, { error: `Videos are limited to ${ceiling >> 20}MB` });
+  }
+  const pending = await pendingBytes(env);
+  if (pending + claimed > IMPORT_QUOTA_BYTES) return quotaResponse(pending);
+
+  const upload = await env.BUCKET.createMultipartUpload(`import/${iid}.orig`, {
+    httpMetadata: { contentType: 'application/octet-stream' },
+  });
+  return json(200, { uploadId: upload.uploadId, part_bytes: PART_BYTES });
+}
+
+async function receivePart(request, env) {
+  const opened = await openMultipart(request, env);
+  if (opened.error) return opened.error;
+
+  const url = new URL(request.url);
+  const number = Number(url.searchParams.get('part'));
+  // R2 numbers parts from 1, and the ceiling is what the size cap allows.
+  if (!Number.isInteger(number) || number < 1 || number > Math.ceil(VIDEO_MAX_BYTES / PART_BYTES)) {
+    return json(400, { error: 'Not a part number' });
+  }
+  const last = url.searchParams.get('last') === '1';
+  const meta = readMeta(request);
+  if (!meta || typeof meta.sha256 !== 'string') {
+    return json(400, { error: 'Metadata needs sha256' });
+  }
+
+  const bytes = await request.arrayBuffer();
+  if (bytes.byteLength === 0) return json(400, { error: 'Empty body' });
+  // Every part but the last has to be exactly this size - R2 refuses to stitch
+  // an upload whose middle parts differ, and it refuses it at `complete`, which
+  // is after every byte has already been paid for.
+  if (!last && bytes.byteLength !== PART_BYTES) {
+    return json(400, { error: `Every part but the last must be ${PART_BYTES} bytes` });
+  }
+  if (bytes.byteLength > PART_BYTES) return json(413, { error: 'Part too large' });
+  if (await sha256Bytes(bytes) !== meta.sha256) {
+    return json(422, { error: 'That part did not arrive intact - try again' });
+  }
+
+  const part = await opened.upload.uploadPart(number, bytes);
+  return json(200, { partNumber: part.partNumber, etag: part.etag });
+}
+
+async function finishParts(request, env) {
+  const opened = await openMultipart(request, env);
+  if (opened.error) return opened.error;
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json(400, { error: 'Body must be JSON' });
+  }
+  const parts = Array.isArray(body.parts) ? body.parts : null;
+  if (!parts || !parts.length || parts.length > Math.ceil(VIDEO_MAX_BYTES / PART_BYTES)) {
+    return json(400, { error: 'Needs the list of parts' });
+  }
+  for (const part of parts) {
+    if (!Number.isInteger(part.partNumber) || typeof part.etag !== 'string') {
+      return json(400, { error: 'A part needs partNumber and etag' });
+    }
+  }
+  try {
+    await opened.upload.complete(parts);
+  } catch (err) {
+    return json(422, { error: `Those parts would not join up: ${String(err).slice(0, 120)}` });
+  }
+  const pending = await pendingBytes(env);
+  return json(202, { stored: true, pending, quota: IMPORT_QUOTA_BYTES });
+}
+
+/** Give back the space an abandoned upload is holding.
+ *
+ *  A multipart upload that is never completed is not an object, so nothing that
+ *  lists the bucket can see it and the desktop's own sweep cannot reach it. The
+ *  viewer calls this when it gives up on a video. */
+async function abortParts(request, env) {
+  const opened = await openMultipart(request, env);
+  if (opened.error) return opened.error;
+  try {
+    await opened.upload.abort();
+  } catch {
+    /* already gone, or already complete: either way there is nothing to free */
+  }
+  return json(200, { aborted: true });
+}
+
 /** What the viewer asks before picking, so it can say the queue is full before
  *  a photo is chosen rather than after it has been read and downscaled. */
 async function importState(env) {
@@ -363,6 +539,8 @@ async function importState(env) {
     pending,
     quota: IMPORT_QUOTA_BYTES,
     max_bytes: IMPORT_MAX_BYTES,
+    video_max_bytes: VIDEO_MAX_BYTES,
+    part_bytes: PART_BYTES,
     full: pending >= IMPORT_QUOTA_BYTES,
   });
 }
