@@ -11,6 +11,10 @@ const PAGE = 30;
 
 const AUTOSAVE_MS = 2500;
 
+// Show only the days that have something written, newest first, instead of every
+// day back to the beginning of time with the empty ones among them.
+let onlyWritten = false;
+
 let notes = new Map();
 let loaded = false;
 let dirty = false;
@@ -216,6 +220,13 @@ export function initJournal() {
     if (e.target.value) openDay(e.target.value);
   });
   el('journal-today').addEventListener('click', () => openDay(today()));
+  el('journal-written').addEventListener('change', (e) => {
+    onlyWritten = e.target.checked;
+    // Leaving the caret in a card would defer the redraw this has to make now.
+    if (document.activeElement?.matches?.('.day-text')) document.activeElement.blur();
+    dirty = false;
+    render();
+  });
 
   on('journalShown', () => { if (!loaded) load(); else render(); });
   // The search box filters photos; letting it filter the journal too keeps one
@@ -272,6 +283,20 @@ function render() {
  *  destroy any card already being typed into further up the list. */
 function more() {
   if (!loaded || (state.filters.q || '').trim()) return;
+  if (onlyWritten) {
+    // From the day being looked at and back: the same walk the full list makes,
+    // taking only the days that hold something.
+    const list = [...notes.values()].filter((d) => d.day <= anchor)
+      .sort((a, b) => (a.day < b.day ? 1 : -1));
+    const page = list.slice(shown, shown + PAGE);
+    shown += page.length;
+    if (!list.length) {
+      view().innerHTML = '<div class="muted">No days with notes yet.</div>';
+      return;
+    }
+    view().insertAdjacentHTML('beforeend', page.map((d) => card(d, d.day === today())).join(''));
+    return;
+  }
   const html = [];
   for (let i = 0; i < PAGE; i += 1) {
     const day = shift(anchor, -(shown + i));

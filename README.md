@@ -178,7 +178,10 @@ its own header rather than raising a toast, because a toast every few seconds wh
 write is not feedback, it is weather.
 
 Searching drops the continuum and lists only the days that match, since a search is a
-search of what was written, not a walk back through empty days.
+search of what was written, not a walk back through empty days. **Only days with notes**
+does the same without a search term: the days that hold something, newest first, a page
+at a time, starting from the day being looked at - so **Go to day** still jumps within
+it. The phone viewer's journal has the same checkbox.
 
 Saving redraws only the card it saved. Rebuilding the list would replace every editor
 on the page, so moving from one day straight into another threw away what you had just

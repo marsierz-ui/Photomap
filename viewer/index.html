@@ -3411,6 +3411,9 @@ const JOURNAL_SAVE_MS = 2000;
 let days = null;                 // day -> entry, once days.json has been read
 let dayAnchor = null;
 let daysShown = 0;
+// Only the days that have something written, newest first, rather than every day
+// back to the beginning with the empty ones among them.
+let onlyWritten = false;
 let journalDirty = false;
 let journalTimer = null;
 let journalPending = null;
@@ -3575,6 +3578,7 @@ function renderJournal() {
   const head = `<div class="jbar">
     <input type="date" id="jDate" max="${todayKey()}" value="${dayAnchor}">
     <button class="btn" id="jToday">Back to today</button>
+    <label class="muted small"><input type="checkbox" id="jWritten"> Only days with notes</label>
     <span class="muted small" id="jCount"></span>
     ${daysMissing ? '<span class="chip warn">Offline - what you have already '
       + 'written could not be loaded, but you can write today</span>' : ''}</div>`;
@@ -3601,6 +3605,14 @@ function renderJournal() {
 }
 
 function wireJournalBar() {
+  $('jWritten').checked = onlyWritten;
+  $('jWritten').onchange = (e) => {
+    onlyWritten = e.target.checked;
+    const live = document.activeElement;
+    if (live && live.classList && live.classList.contains('day-text')) live.blur();
+    journalDirty = false;
+    renderJournal();
+  };
   $('jDate').onchange = (e) => { if (e.target.value) openDay(e.target.value); };
   $('jToday').onclick = () => openDay(todayKey());
 }
@@ -3609,6 +3621,20 @@ function wireJournalBar() {
  *  destroy any card already being typed into further up the list. */
 function moreDays() {
   if (!days || query.trim()) return;
+  if (onlyWritten) {
+    const list = [...days.values()].filter((d) => d.day <= dayAnchor)
+      .sort((a, b) => (a.day < b.day ? 1 : -1));
+    const page = list.slice(daysShown, daysShown + JOURNAL_PAGE);
+    daysShown += page.length;
+    if (!list.length) {
+      $('journal').insertAdjacentHTML('beforeend',
+        '<div class="muted">No days with notes yet.</div>');
+      return;
+    }
+    $('journal').insertAdjacentHTML('beforeend',
+      page.map((d) => dayCard(d, d.day === todayKey())).join(''));
+    return;
+  }
   const html = [];
   for (let i = 0; i < JOURNAL_PAGE; i += 1) {
     const day = shiftDay(dayAnchor, -(daysShown + i));
