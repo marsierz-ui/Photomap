@@ -278,6 +278,19 @@ check("and stays tagged after a rescan", row(single)["gps_method"] == "NEIGHBOUR
 main.set_location(row(single)["id"], {"lat": 54.0, "lon": -9.5})
 check("a position picked on the map is not", row(single)["gps_method"] == "MANUAL")
 
+# --------------------------------------------- a gallery of exactly the photos picked
+wanted = [row(p)["id"] for p in (u_real, u_cell, nowhere)]
+page = main.query_photos({"ids": wanted, "limit": 2, "offset": 0, "sort": "name"})
+check("only the named photos are counted", page["total"] == 3, str(page["total"]))
+check("a page is the size asked for", len(page["items"]) == 2, str(len(page["items"])))
+rest = main.query_photos({"ids": wanted, "limit": 2, "offset": 2, "sort": "name"})
+check("and the next page carries on from it", len(rest["items"]) == 1
+      and {i["id"] for i in page["items"] + rest["items"]} == set(wanted))
+check("an empty selection is an empty gallery, not the whole library",
+      main.query_photos({"ids": []})["total"] == 0)
+many = main.query_photos({"ids": list(range(1, 6000)), "limit": 1})
+check("a selection too long for a URL is accepted", many["total"] >= 1)
+
 print()
 print(f"{len(failures)} FAILED" if failures else "ALL FIX CHECKS PASSED")
 sys.exit(1 if failures else 0)

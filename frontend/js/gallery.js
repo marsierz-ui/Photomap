@@ -80,9 +80,21 @@ export function initGallery() {
     reset();
   });
   el('gallery-selectall').addEventListener('click', async () => {
-    const res = await api.get('/api/photos/ids', params());
-    emit('selectMany', res.ids);
-    toast(`${fmtNum(res.ids.length)} photos selected`);
+    const ids = state.only || (await api.get('/api/photos/ids', params())).ids;
+    emit('selectMany', ids);
+    toast(`${fmtNum(ids.length)} photos selected`);
+  });
+  el('gallery-only-clear').addEventListener('click', () => {
+    state.only = null;
+    paintOnly();
+    reset();
+  });
+  // Raised by the selection bar, which has already switched to this view or is
+  // about to: either way the grid must be rebuilt for the new set.
+  on('galleryOnly', () => {
+    paintOnly();
+    dirty = true;
+    if (state.view === 'gallery') reset();
   });
 
   on('filters', () => { dirty = true; if (state.view === 'gallery') reset(); });
@@ -93,6 +105,15 @@ export function initGallery() {
     syncRowHeight();
     if (dirty) reset();
   });
+}
+
+function paintOnly() {
+  const on = !!state.only;
+  el('gallery-only').classList.toggle('hidden', !on);
+  if (on) {
+    el('gallery-only-text').textContent =
+      `Only the ${fmtNum(state.only.length)} selected photo${state.only.length === 1 ? '' : 's'}`;
+  }
 }
 
 function reset() {
@@ -111,8 +132,12 @@ async function loadPage() {
   loading = true;
   const mine = ++token;
   try {
-    const p = params({ extra: { limit: PAGE, offset: items.length, sort: state.sort } });
-    const res = await api.get('/api/photos', p);
+    // Opened from a selection: exactly those photos, whatever the filters say.
+    const res = state.only
+      ? await api.post('/api/photos/query',
+        { ids: state.only, limit: PAGE, offset: items.length, sort: state.sort })
+      : await api.get('/api/photos', params({
+        extra: { limit: PAGE, offset: items.length, sort: state.sort } }));
     if (mine !== token) return;
     total = res.total;
     if (!res.items.length) exhausted = true;

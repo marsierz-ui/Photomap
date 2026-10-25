@@ -113,6 +113,10 @@
     <div class="view hidden" id="view-gallery">
       <div class="gallery-bar">
         <span id="gallery-count" class="muted"></span>
+        <span id="gallery-only" class="chip hidden">
+          <span id="gallery-only-text"></span>
+          <button id="gallery-only-clear" class="btn tiny">Show all photos</button>
+        </span>
         <div class="spacer"></div>
         <label class="inline">Size
           <input type="range" id="grid-size" min="90" max="360" step="10" value="160">
@@ -197,6 +201,7 @@
 <div id="selbar" class="selbar hidden">
   <strong id="sel-count">0 selected</strong>
   <button id="sel-map" class="btn tiny">Show on map</button>
+  <button id="sel-only" class="btn tiny" title="Open the gallery with only the selected photos">View only these</button>
   <button id="sel-album" class="btn tiny">Add to album…</button>
   <button id="sel-fav" class="btn tiny">Favourite</button>
   <button id="sel-setloc" class="btn tiny" title="Give every selected photo the same location">Set location…</button>

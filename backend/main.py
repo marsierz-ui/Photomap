@@ -379,8 +379,25 @@ def points(request: Request, limit: int = 500000):
 
 @app.get("/api/photos")
 def list_photos(request: Request, limit: int = 200, offset: int = 0, sort: str = "date_desc"):
-    conn = db.connect()
     where, params = _filters(request)
+    return _photo_page(where, params, limit, offset, sort)
+
+
+@app.post("/api/photos/query")
+def query_photos(body: dict = Body(...)):
+    """One page of exactly the photos named, in the order asked for.
+
+    A POST because a whole selection does not fit in a URL: a few thousand ids is
+    tens of kilobytes, past what the server accepts on a request line.
+    """
+    ids = [int(i) for i in body.get("ids", [])][:20000]
+    where = f"p.missing=0 AND p.id IN ({','.join('?' * len(ids))})" if ids else "0"
+    return _photo_page(where, ids, int(body.get("limit", 200)), int(body.get("offset", 0)),
+                       str(body.get("sort", "date_desc")))
+
+
+def _photo_page(where: str, params: list, limit: int, offset: int, sort: str) -> dict:
+    conn = db.connect()
     order = SORTS.get(sort, SORTS["date_desc"])
     total = conn.execute(f"SELECT COUNT(*) c FROM photos p WHERE {where}", params).fetchone()["c"]
     rows = conn.execute(

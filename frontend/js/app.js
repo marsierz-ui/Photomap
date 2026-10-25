@@ -78,6 +78,11 @@ function wireSelection() {
   el('sel-setloc').onclick = () => setLocationDialog([...state.selection]);
   el('sel-undoloc').onclick = () => undoLocationDialog([...state.selection]);
   el('sel-delete').onclick = () => deleteDialog([...state.selection]);
+  el('sel-only').onclick = () => {
+    state.only = [...state.selection];
+    emit('galleryOnly');
+    showView('gallery');
+  };
   el('sel-map').onclick = () => {
     showView('map');
     if (!fitToSelection()) toast('None of the selected photos have GPS data');

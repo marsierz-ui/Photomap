@@ -8,6 +8,9 @@ export const state = {
   followMap: false,
   sort: 'date_desc',
   selection: new Set(),
+  // Photo ids the gallery is limited to, when it was opened from a selection.
+  // A snapshot, so changing the selection afterwards does not reshuffle it.
+  only: null,
   view: 'map',
   config: null,
   albums: [],

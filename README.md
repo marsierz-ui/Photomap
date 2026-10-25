@@ -7,6 +7,11 @@ except map tile requests.
 
 ## Run
 
+A **Photo Map** shortcut on the Desktop runs `open_photomap.bat`: it starts the app, or
+just opens the browser if it is already running (it looks for the default port, 8712).
+The icon is `data/photomap.ico`, made from the viewer's own. To recreate the shortcut,
+point a new one at `open_photomap.bat` with this folder as its start-in folder.
+
 Double-click `run.bat`, or:
 
 ```bash
@@ -246,7 +251,10 @@ how the grid scrolls, so there is no box: tap photos to select them. A box is th
 difference between picking sixty photos and clicking sixty times. Dragging to the bottom
 edge keeps scrolling, and since scrolling is what fetches the next page, a long drag
 reaches photos that had not been loaded when it started. It adds to the selection rather
-than replacing it. The selection bar adds to albums, favourites, shows on the map, or deletes.
+than replacing it. The selection bar adds to albums, favourites, shows on the map, or deletes. **View only these** opens
+the gallery with just the selected photos, however they were selected - a box on the map
+included - under a banner that says so; **Show all photos** leaves it. Select all in that
+mode means those photos.
 
 The published phone viewer has the same gesture, answered differently: its grid is
 virtualised, so there are no elements to test and the rectangle is turned into rows and
