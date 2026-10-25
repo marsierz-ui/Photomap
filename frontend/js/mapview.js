@@ -167,11 +167,16 @@ function frame(south, west, north, east, pad, maxZoom) {
 
 // ------------------------------------------------------------------- loading
 
+/** The map only ever shows located photos, so it asks for those - but not by
+ *  overriding a location filter the person chose. Forcing gps=yes on top of
+ *  "Approximate" or "Set from a neighbouring photo" made the map ignore it. */
+const mapGps = () => (['any', 'no'].includes(state.filters.gps) ? 'yes' : state.filters.gps);
+
 async function load() {
   const token = ++loadToken;
   setStatus('Loading…');
   try {
-    const res = await api.get('/api/points', params({ bbox: false, extra: { gps: 'yes' } }));
+    const res = await api.get('/api/points', params({ bbox: false, extra: { gps: mapGps() } }));
     if (token !== loadToken) return;
     data = res;
   } catch (err) {
@@ -527,7 +532,7 @@ const SURFACES = {
     aim: (on) => map.getContainer().classList.toggle('selecting', on),
     pick: async (from, to) => {
       const bounds = L.latLngBounds(map.containerPointToLatLng(from), map.containerPointToLatLng(to));
-      const p = params({ bbox: false, extra: { gps: 'yes', bbox: boundsToBbox(bounds) } });
+      const p = params({ bbox: false, extra: { gps: mapGps(), bbox: boundsToBbox(bounds) } });
       return (await api.get('/api/photos/ids', p)).ids;
     },
   },
