@@ -98,6 +98,14 @@ function wireSelection() {
 
 async function main() {
   state.config = await api.get('/api/config');
+  // The server's code changed after it started: these pages are new, the
+  // server behind them is not, and the difference shows up as broken views.
+  if (state.config.stale) {
+    const bar = document.createElement('div');
+    bar.className = 'stale-bar';
+    bar.textContent = 'Photo Map was updated while running. Close its window and start it again from the shortcut to load the new version.';
+    document.body.appendChild(bar);
+  }
 
   initMap();
   // After the map exists, so the basemap can follow the theme on first paint.

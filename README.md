@@ -30,6 +30,11 @@ Fresh checkout instead of the bundled `.venv`:
 python -m venv .venv && .venv\Scripts\pip install -r requirements.txt
 ```
 
+**After updating the code**, restart the app: Python does not reload it, and the pages
+are read fresh on every request, so a server left running serves new pages from old code.
+The app notices - it compares its code on disk with what it started with - and says so in
+a red bar at the top until it is restarted.
+
 ## Using it from your phone and laptop
 
 `--lan` binds every interface and prints the addresses other devices can use, plus a
@@ -265,8 +270,19 @@ browser's own print dialog - nothing is uploaded, and the PDF is yours to print 
 **Saved places** - give a spot a name ("Home", "Grandma's", "the cottage") and a size,
 from a building to a city. Right-click the map, or **+ New** in the sidebar, where a town
 name, coordinates or a click on the map all work. Clicking a place narrows every view to
-the photos inside it; ⌂ makes it home. They are drawn on the map, and the map's **Find a
-place…** box searches them along with every GeoNames town, offline.
+the photos inside it; ⌂ makes it home. They are drawn on the map.
+
+**One search box** at the top does two jobs. What you type narrows the photos, live, by
+file name, note and place. Under it, the places whose name matches - saved places, every
+GeoNames town (offline), typed coordinates - are listed as *Go to a place on the map*:
+click one, or **↓** and **Enter**, and the map goes there, clears the text (it was typed to
+find the place, not to filter), and draws the town's border from OpenStreetMap. Enter with
+nothing highlighted only closes the list, so a photo search never turns into a jump across
+the map. They were two boxes, one of them over the map; one box keeps the map clear, and
+the list says plainly which kind of result it is. The border comes from Nominatim
+(OpenStreetMap), asked once per place you pick - the town's position, not any photo's - and
+kept; offline, the place is shown without it. The location picker in the no-location queue
+and the home timeline draws borders the same way.
 
 **GPS tracks** - GPX files from a watch or logger app, and Google location exports:
 Takeout's `Records.json`, the monthly Semantic Location History files, the newer
@@ -494,7 +510,7 @@ until clicked, so the map controls stay compact. With Mapbox:
   looking at: zoom in past level 11 and the photo nearest the middle of the view sets the
   light from where the sun was when it was taken (worked out from its time and position,
   and exact once the weather lookup has given the real time zone). Zoom back out past 9 and
-  the planet goes back to daylight. A replay sets it per stop.
+  the planet goes back to daylight. A replay sets it per photo, whatever is chosen here.
 - *Map* - Standard (3D buildings and landmarks) or Standard Satellite.
 - *Colours* - Default, Faded or Monochrome themes.
 - *Show* - weather of the photo, terrain (Mapbox's elevation model, slightly
@@ -512,10 +528,22 @@ days go in one request, so a week in one city costs one lookup. Photos are fille
 background after turning it on and after each scan, and a photo opened before then is
 looked up on the spot. The lightbox shows it under *Where*.
 
-In 3D the weather is drawn when you zoom in on a photo or a replay reaches a stop: rain and
+In 3D the weather is drawn when you zoom in on a photo or a replay reaches it: rain and
 snow particles (Mapbox GL JS 3.9+), fog that closes in for fog and thickens under cloud,
-and a faded map on grey days unless you chose a theme yourself. A chip at the top shows the
-photo's time and weather; click it to open the photo. The replay card shows it too.
+and a faded map on grey days unless you chose a theme yourself. A strip at the top shows the
+photo's time and weather (and, in Replay, the song); click it to open the photo.
+
+**Replay** flies from place to place in the order the photos were taken and shows every
+photo, first to last: photos taken within half a kilometre of each other, one after
+another, are one place, and the camera stays put while that place's photos go by (a badge
+says 2 / 5). **Places only** shows one photo per place instead, for a quick look at where
+a long stretch went. The trip list in the bar replays one trip from its first photo;
+*All photos in the current filters* replays whatever the filters select. **← →** step
+photo by photo, **Space** pauses and resumes, **↑ ↓** change the speed (½x to 8x); the
+map's own arrow keys are off while it runs. The card is the photo itself, and under it
+that day's journal entry, if there is one, in a box that scrolls. During a replay the
+light and the weather always follow the photo on screen - its hour and its sky - even
+when a fixed light or no effects were chosen in **Style ▾** for looking around.
 
 Open-Meteo is free for non-commercial use without a key. A commercial product needs one
 of its API plans (Standard, Professional or Enterprise, at
@@ -1295,6 +1323,7 @@ backend/
   music.py       Spotify listening history, matched to photo times
   spotify.py     Spotify account sign-in (PKCE) and saving recent plays every half hour
   borders.py     town borders from OpenStreetMap (Overpass), cached per 500 m cell
+  outlines.py    a picked place's border from Nominatim, for drawing it
   tracks.py      GPX / Google Timeline import, clock-offset matching, geotagging
 frontend/
   index.html     single page, no build step
@@ -1348,8 +1377,8 @@ too), `near` is a saved place id, `country` a two-letter code and `label` `Camer
 `other`.
 
 Saved places are `GET/POST /api/places` and `PATCH/DELETE /api/places/<id>`; place
-search is `GET /api/geocode/search?q=`, and `GET /api/geocode/reverse?lat=&lon=` names a
-position. Trips are `GET /api/trips?away_km=50`; `GET /api/trips/<key>` is one trip with
+search is `GET /api/geocode/search?q=`, `GET /api/geocode/reverse?lat=&lon=` names a
+position, and `GET /api/geocode/outline?lat=&lon=&population=` is a place's border as GeoJSON. Trips are `GET /api/trips?away_km=50`; `GET /api/trips/<key>` is one trip with
 its legs, days and workouts, `PUT /api/trips/<key>/title` names it and
 `PUT /api/trips/<key>/modes` (`trip`, and `legs` as `{leg id: mode}`) sets how it was
 travelled. The home timeline is `GET/PUT /api/home-timeline` (`items`: `since`, `name`,

@@ -317,7 +317,9 @@ async function placesStatus(box) {
   if (!slot) return;
   const st = await api.get('/api/geocode');
   if (!slot.isConnected) return;
-  if (st.available) {
+  if (st.available && st.downloading) {
+    slot.textContent = 'On - downloading the current list…';
+  } else if (st.available) {
     slot.textContent = st.pending ? `On - naming ${fmtNum(st.pending)} photos…` : 'On (GeoNames, worked out on this computer)';
   } else if (st.downloading) {
     slot.textContent = 'Downloading…';
@@ -330,7 +332,7 @@ async function placesStatus(box) {
     };
     return;
   }
-  if (!st.populations) {
+  if (st.populations === false && !st.downloading) {
     // An old list: no populations to size towns by, no ids for other languages.
     slot.insertAdjacentHTML('beforeend', ` · this list is from an older version
       <button class="btn tiny" data-act="places-again" title="Town ranges sized by population, and names in other languages">Download again (about 11 MB)</button>`);

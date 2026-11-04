@@ -16,7 +16,8 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 
 from . import (
-    activities, auth, borders, days, db, dupes, geocode, home, music, nametime, netinfo, photometa, places, r2,
+    activities, auth, borders, days, db, dupes, geocode, home, music, nametime, netinfo, outlines, photometa,
+    places, r2,
     scanner, snapshot, spotify, sync, thumbs, tracks, trips, weather,
 )
 from .photometa import HEIF_ERROR, HEIF_OK, IMAGE_EXTS
@@ -29,6 +30,19 @@ except ImportError:
     RECYCLE_OK = False
 
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
+BACKEND = Path(__file__).resolve().parent
+
+
+def _code_stamp() -> float:
+    """The newest change to the server's own code. Python does not reload it,
+    while the pages are read from disk on every request - so after an update a
+    server left running serves new pages from old code, and they fail in ways
+    that look like bugs. The pages compare this against the stamp taken at
+    start and ask for a restart."""
+    return max(p.stat().st_mtime for p in BACKEND.glob("*.py"))
+
+
+STARTED_STAMP = _code_stamp()
 
 db.init()
 weather.init_schema()
@@ -36,6 +50,7 @@ home.init_schema()
 activities.init_schema()
 music.init_schema()
 borders.init_schema()
+outlines.init_schema()
 app = FastAPI(title="Photo Map", docs_url=None, redoc_url=None)
 
 # Photos added on a phone reach the bucket immediately and the library only on a
@@ -228,6 +243,7 @@ def get_config(request: Request):
         "ffmpeg": bool(thumbs.FFMPEG),
         "recycle_bin": RECYCLE_OK,
         "data_dir": str(db.DATA_DIR),
+        "stale": _code_stamp() > STARTED_STAMP,
     }
 
 
@@ -1411,6 +1427,15 @@ def borders_enable(body: dict = Body(...)):
 def geocode_reverse(lat: float, lon: float):
     place, cc = geocode.lookup(lat, lon) if geocode.available() else ("", "")
     return {"place": place, "country": cc}
+
+
+@app.get("/api/geocode/outline")
+def geocode_outline(lat: float, lon: float, population: int = 0):
+    """A picked place's border, from OpenStreetMap, for drawing it."""
+    try:
+        return outlines.outline(lat, lon, population)
+    except Exception as exc:  # offline, or Nominatim busy: the place is still shown, without its border
+        raise HTTPException(502, f"Could not fetch the outline: {exc}")
 
 
 @app.get("/api/geocode/search")

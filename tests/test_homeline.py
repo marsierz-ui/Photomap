@@ -401,6 +401,50 @@ check("counts per label for the filter", counts.get("Camera") == 2 and counts.ge
 conn.execute("DELETE FROM photos WHERE id >= 9001")
 conn.commit()
 
+# ------------------------------------------------------- outlines, stale code
+
+import os  # noqa: E402
+import urllib.request  # noqa: E402
+
+from backend import outlines  # noqa: E402
+
+outlines.init_schema()
+asked_urls = []
+
+
+class FakeAnswer(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def fake_urlopen(req, timeout=0):
+    asked_urls.append(req.full_url)
+    return FakeAnswer(json.dumps({"name": "Lyon", "geojson": {"type": "Polygon", "coordinates": [[[4.8, 45.7],
+                      [4.9, 45.7], [4.9, 45.8], [4.8, 45.7]]]}}).encode())
+
+
+real_urlopen = urllib.request.urlopen
+urllib.request.urlopen = fake_urlopen
+try:
+    shape = main.geocode_outline(45.7485, 4.8467, 472317)
+    again = main.geocode_outline(45.7485, 4.8467, 472317)
+finally:
+    urllib.request.urlopen = real_urlopen
+check("outline of a picked place", shape["geojson"]["type"] == "Polygon" and shape["name"] == "Lyon", shape)
+check("a city is asked at city scale", "zoom=10" in asked_urls[0] and "polygon_geojson=1" in asked_urls[0], asked_urls)
+check("outlines are asked about once", len(asked_urls) == 1 and again == shape, len(asked_urls))
+
+loopback = Request({"type": "http", "headers": [], "client": ("127.0.0.1", 1)})
+check("fresh server is not stale", main.get_config(loopback)["stale"] is False)
+code = Path(main.__file__).parent / "outlines.py"
+before = code.stat().st_mtime
+os.utime(code, (before, main.STARTED_STAMP + 60))
+check("changed code on disk is noticed", main.get_config(loopback)["stale"] is True)
+os.utime(code, (before, before))
+
 # ------------------------------------------------------------ places visited
 
 geocode.rename()

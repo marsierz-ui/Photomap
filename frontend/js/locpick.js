@@ -10,6 +10,20 @@ import { parseCoordinates } from './actions.js';
 
 // With `enterConfirms`, Enter on a search result chooses it and calls onEnter
 // at once - one key from a typed name to a saved location, for the queue.
+/** Draw a place's border from OpenStreetMap on `map`; resolves to the layer,
+ *  or null when there is none (offline, open country, a point not a town). */
+export async function drawOutline(map, lat, lon, population = 0) {
+  try {
+    const r = await api.get('/api/geocode/outline', new URLSearchParams({ lat, lon, population: population || 0 }));
+    if (!r.geojson) return null;
+    return L.geoJSON(r.geojson, {
+      style: { color: '#ffb020', weight: 2, fillColor: '#ffb020', fillOpacity: 0.07 }, interactive: false,
+    }).addTo(map);
+  } catch {
+    return null;
+  }
+}
+
 export function locationPicker(root, { onChange = () => {}, onEnter = null, enterConfirms = false } = {}) {
   root.classList.add('lp');
   root.innerHTML = `
@@ -28,6 +42,7 @@ export function locationPicker(root, { onChange = () => {}, onEnter = null, ente
   sizer.observe(map.getContainer());
 
   let marker = null;
+  let outline = null;
   let current = null;
   let results = [];
   let hi = 0; // the highlighted result, moved with the up and down arrows
@@ -75,6 +90,7 @@ export function locationPicker(root, { onChange = () => {}, onEnter = null, ente
     results = [];
     enterWaiting = false;
     close();
+    if (outline) { map.removeLayer(outline); outline = null; }
     if (view) map.setView([view.lat, view.lon], view.zoom ?? 11);
   }
 
@@ -85,6 +101,14 @@ export function locationPicker(root, { onChange = () => {}, onEnter = null, ente
     close();
     input.value = r.label;
     set(r.lat, r.lon, { label: r.name || r.label, zoom: r.zoom });
+    if (outline) { map.removeLayer(outline); outline = null; }
+    if (r.note === 'coordinates') return;
+    const want = current;
+    drawOutline(map, r.lat, r.lon, r.population).then((layer) => {
+      if (!layer) return;
+      if (current !== want) { map.removeLayer(layer); return; }
+      outline = layer;
+    });
   };
   const enter = () => {
     if (!list.classList.contains('hidden') && results.length) {
@@ -125,6 +149,7 @@ export function locationPicker(root, { onChange = () => {}, onEnter = null, ente
         ...saved,
         ...res.items.map((h) => ({
           label: `${h.name}${h.region ? `, ${h.region}` : ''}`, name: h.name, lat: h.lat, lon: h.lon,
+          population: h.population,
           zoom: h.population > 500000 ? 11 : 13, note: `${h.local ? `${h.local} · ` : ''}${flag(h.cc)} ${countryName(h.cc)}`,
         })),
       ];

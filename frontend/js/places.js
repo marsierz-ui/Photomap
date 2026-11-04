@@ -9,6 +9,7 @@ import { state, on, emit, setFilters, fmtNum, countryName, flag } from './state.
 import { el, modal, toast, confirmModal, escapeHtml } from './ui.js';
 import { leafletMap, flyTo, pickLocation } from './mapview.js';
 import { parseCoordinates } from './actions.js';
+import { drawOutline } from './locpick.js';
 
 let pins = null;
 let found = null;
@@ -164,19 +165,40 @@ export function placeDialog(place) {
 }
 
 // ------------------------------------------------------------ find a place
+//
+// One box at the top does both jobs. What is typed narrows the photos (by file
+// name, note and place - sidebar.js does that, live), and the places whose
+// name matches are listed under it: pick one with the mouse, or the arrow keys
+// and Enter, to go there on the map, with the town's border drawn. Enter with
+// nothing highlighted only closes the list, so a photo search is never turned
+// into a jump across the map by accident.
 
 function wireSearch() {
-  const input = el('place-search');
+  const input = el('search');
   const list = el('place-results');
   let timer = null;
   let results = [];
-  const close = () => { list.classList.add('hidden'); };
-  const go = (r) => {
+  let hi = -1;
+  let outline = null;
+  // The top bar clips what overflows it, so the list lives outside it and is
+  // placed under the box each time it opens.
+  const place = () => {
+    const r = input.getBoundingClientRect();
+    list.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - 348))}px`;
+    list.style.top = `${r.bottom + 4}px`;
+    list.style.width = `${Math.max(r.width, 340)}px`;
+  };
+  const close = () => { list.classList.add('hidden'); hi = -1; };
+  const go = async (r) => {
     close();
-    input.value = r.label;
+    // The text was typed to find the place, not to narrow the photos.
+    input.value = '';
+    setFilters({ q: '' });
+    emit('showMap');
     flyTo(r.lat, r.lon, r.zoom);
     const map = leafletMap();
     if (found) map.removeLayer(found);
+    if (outline) { map.removeLayer(outline); outline = null; }
     if (r.saved) return;
     found = L.marker([r.lat, r.lon], { title: r.label }).addTo(map)
       .bindPopup(`<strong>${escapeHtml(r.label)}</strong><br><button class="btn tiny" data-save>Save as a place</button>`)
@@ -184,37 +206,70 @@ function wireSearch() {
     found.getPopup().getElement()?.querySelector('[data-save]')?.addEventListener('click', () => {
       placeDialog({ name: r.name, lat: r.lat, lon: r.lon, radius_m: 1000 });
     });
+    const mine = found;
+    found.on('popupclose', () => {
+      if (found !== mine) return;
+      map.removeLayer(found);
+      found = null;
+      if (outline) { map.removeLayer(outline); outline = null; }
+    });
+    if (r.typed) return;
+    const drawn = await drawOutline(map, r.lat, r.lon, r.population);
+    if (found !== mine) { if (drawn) map.removeLayer(drawn); return; }
+    outline = drawn;
+    if (outline) map.flyToBounds(outline.getBounds(), { padding: [40, 40], maxZoom: 15, duration: 0.8 });
+  };
+  const highlight = (i) => {
+    hi = Math.max(-1, Math.min(i, results.length - 1));
+    list.querySelectorAll('[data-i]').forEach((b) => b.classList.toggle('hi', Number(b.dataset.i) === hi));
   };
   input.addEventListener('input', () => {
     clearTimeout(timer);
     const q = input.value.trim();
-    if (q.length < 2) { close(); return; }
+    if (q.length < 2) { close(); results = []; return; }
     timer = setTimeout(async () => {
       const typed = parseCoordinates(q);
       const ql = q.toLowerCase();
       const saved = state.places.filter((p) => p.name.toLowerCase().includes(ql))
         .map((p) => ({ label: p.name, name: p.name, lat: p.lat, lon: p.lon, zoom: 15, saved: true, note: 'saved place' }));
       const res = await api.get('/api/geocode/search', new URLSearchParams({ q, limit: 8 }));
+      if (input.value.trim() !== q) return;
       results = [
-        ...(typed ? [{ label: q, name: '', lat: typed.lat, lon: typed.lon, zoom: 15, note: 'coordinates' }] : []),
+        ...(typed ? [{ label: q, name: '', lat: typed.lat, lon: typed.lon, zoom: 15, typed: true, note: 'coordinates' }] : []),
         ...saved,
         ...res.items.map((h) => ({
           label: `${h.name}${h.region ? `, ${h.region}` : ''}`, name: h.name, lat: h.lat, lon: h.lon,
+          population: h.population,
           zoom: h.population > 500000 ? 11 : 13, note: `${h.local ? `${h.local} · ` : ''}${flag(h.cc)} ${countryName(h.cc)}`,
         })),
       ];
-      list.innerHTML = results.map((r, i) => `<button data-i="${i}">${escapeHtml(r.label)} <span class="muted">${escapeHtml(r.note)}</span></button>`).join('')
-        || `<span class="muted small" style="padding:6px">${res.available ? 'Nothing by that name' : 'Download place names in Settings to search by name'}</span>`;
+      // Only worth showing when there is a place to go to; otherwise the box
+      // is a photo search and the list would be in the way.
+      if (!results.length) { close(); return; }
+      hi = -1;
+      list.innerHTML = '<div class="results-head muted small">Go to a place on the map (↓ and Enter, or click)</div>'
+        + results.map((r, i) => `<button data-i="${i}">${escapeHtml(r.label)} <span class="muted">${escapeHtml(r.note)}</span></button>`).join('')
+        + `<div class="results-foot muted small">The photos are narrowed to "${escapeHtml(q)}" meanwhile</div>`;
+      place();
       list.classList.remove('hidden');
     }, 200);
   });
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && results.length) go(results[0]);
+    const open = !list.classList.contains('hidden') && results.length;
+    if (open && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      e.preventDefault();
+      highlight(hi + (e.key === 'ArrowDown' ? 1 : -1));
+    }
+    if (e.key === 'Enter') {
+      if (open && hi >= 0) go(results[hi]);
+      else close();
+    }
     if (e.key === 'Escape') close();
   });
   list.addEventListener('click', (e) => {
     const r = results[Number(e.target.closest('[data-i]')?.dataset.i)];
     if (r) go(r);
   });
-  document.addEventListener('click', (e) => { if (!e.target.closest('.place-find')) close(); });
+  document.addEventListener('click', (e) => { if (e.target !== input && !list.contains(e.target)) close(); });
+  window.addEventListener('resize', close);
 }

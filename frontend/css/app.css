@@ -110,8 +110,8 @@ button, input, select { font: inherit; color: inherit; }
 .tab:hover { color: var(--text); }
 .tab.active { background: var(--panel-2); border-color: var(--line); color: var(--text); }
 
-#search, #place-search {
-  width: 240px;
+#search {
+  width: 300px;
   min-width: 0;
   flex-shrink: 1;
   background: var(--panel-2);
@@ -119,7 +119,11 @@ button, input, select { font: inherit; color: inherit; }
   border-radius: var(--radius);
   padding: 5px 9px;
 }
-#search:focus, #place-search:focus { outline: 1px solid var(--accent); }
+#search:focus { outline: 1px solid var(--accent); }
+.place-results.top-results { position: fixed; z-index: 3000; right: auto; }
+.top-results .results-head, .top-results .results-foot { padding: 6px 10px; }
+.top-results .results-foot { border-top: 1px solid var(--line); }
+.place-results button.hi { background: var(--active); }
 
 .chip {
   background: var(--panel-2);
@@ -268,25 +272,36 @@ button, input, select { font: inherit; color: inherit; }
   /* Clear of the status line bottom-left, and of the Mapbox logo and credits
      bottom-right, which Mapbox's terms want left visible. */
   position: absolute; left: 50%; bottom: 84px; transform: translateX(-50%); z-index: 600;
-  display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+  display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 6px 8px; padding: 6px 10px;
   background: var(--overlay); border: 1px solid var(--line); border-radius: var(--radius);
   max-width: calc(100% - 32px);
 }
 .replay-bar input[type=range] { width: 220px; min-width: 80px; flex: 1; }
 .replay-bar .where { white-space: nowrap; }
 .replay-card {
-  position: absolute; left: 12px; bottom: 140px; z-index: 600; cursor: pointer;
-  display: flex; flex-direction: column; gap: 6px; padding: 8px; width: 336px;
+  position: absolute; left: 12px; bottom: 156px; z-index: 600;
+  display: flex; flex-direction: column; gap: 6px; padding: 6px; width: 432px; max-width: calc(100% - 24px);
   background: var(--overlay); border: 1px solid var(--line); border-radius: var(--radius);
   animation: replay-pop .35s ease-out;
 }
-.replay-card img { width: 320px; height: 240px; object-fit: cover; border-radius: 4px; display: block; }
+.replay-card .shot { position: relative; cursor: pointer; }
+.replay-card img { width: 100%; aspect-ratio: 4 / 3; max-height: 46vh; object-fit: cover; border-radius: 4px; display: block; }
+.replay-card .count {
+  position: absolute; right: 6px; bottom: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
+  background: rgba(0, 0, 0, .6); color: #fff;
+}
+.replay-card .note {
+  max-height: 120px; overflow-y: auto; white-space: pre-line; font-size: 12px; line-height: 1.45;
+  padding: 6px 8px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px;
+}
+.replay-card .note-day { white-space: normal; margin-bottom: 2px; }
+.replay-bar select { background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 2px 4px; max-width: 220px; color: inherit; font: inherit; font-size: 11px; }
 @keyframes replay-pop { from { opacity: 0; transform: translateY(8px) scale(.96); } to { opacity: 1; transform: none; } }
 @media (max-width: 700px) {
   .replay-bar { bottom: 80px; left: 8px; right: 8px; transform: none; max-width: none; }
   .replay-bar .where { display: none; }
-  .replay-card { bottom: 132px; left: 8px; width: 196px; }
-  .replay-card img { width: 180px; height: 135px; }
+  .replay-card { bottom: 132px; left: 8px; width: 220px; }
+  .replay-card .note { max-height: 80px; }
 }
 
 .note-pin i {
@@ -709,7 +724,6 @@ button, input, select { font: inherit; color: inherit; }
   max-width: calc(100% - 260px); overflow: hidden; text-overflow: ellipsis;
   animation: replay-pop .35s ease-out;
 }
-.replay-card .wx { margin-top: 2px; }
 @media (max-width: 700px) {
   .globe-weather { left: 54px; transform: none; max-width: calc(100% - 190px); font-size: 11px; }
   .style-pop .pop-grid { grid-template-columns: 1fr; }
@@ -733,8 +747,6 @@ button, input, select { font: inherit; color: inherit; }
 .empty { padding: 30px 10px; text-align: center; }
 
 /* ----------------------------------------------------------------- places */
-.place-find { position: relative; }
-.place-find input { width: 210px; margin: 0; box-shadow: 0 1px 4px var(--shadow); }
 .place-results {
   position: absolute; right: 0; top: calc(100% + 4px); width: 300px; max-height: 320px; overflow-y: auto;
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
@@ -780,7 +792,6 @@ label.btn { cursor: pointer; }
 .tile .meta .where { opacity: .85; }
 
 @media (max-width: 700px) {
-  .place-find input { width: 150px; }
   .place-results { width: 240px; }
   .trip-grid { grid-template-columns: 1fr; }
 }
@@ -886,7 +897,6 @@ label.btn { cursor: pointer; }
 .music-player.hidden { display: none; }
 .music-embed { flex: 1; min-width: 0; }
 .music-player iframe { display: block; border: 0; border-radius: 8px; }
-.replay-card .tune { margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tv-place { display: flex; align-items: center; gap: 8px; padding: 3px 4px; border-radius: 4px; cursor: pointer; }
 .tv-place:hover { background: var(--hover); }
 
@@ -894,4 +904,12 @@ label.btn { cursor: pointer; }
 .src-tag {
   display: inline-block; padding: 0 5px; border-radius: 3px; font-size: 10px; line-height: 15px;
   background: var(--panel-2); border: 1px solid var(--line); color: var(--muted); white-space: nowrap;
+}
+
+/* Shown when the server is older than its own code; see /api/config "stale". */
+.stale-bar {
+  position: fixed; top: 50px; left: 50%; transform: translateX(-50%); z-index: 3500;
+  padding: 8px 14px; border-radius: var(--radius); font-size: 12px; max-width: calc(100vw - 24px);
+  background: var(--danger-bg); color: var(--danger-text); border: 1px solid var(--danger-line);
+  box-shadow: 0 6px 18px var(--shadow);
 }

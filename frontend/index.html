@@ -34,7 +34,8 @@
     <button class="tab" data-view="insights">Insights</button>
     <button class="tab" data-view="dupes">Duplicates</button>
   </nav>
-  <input id="search" type="search" placeholder="Search names, notes, places…" autocomplete="off">
+  <input id="search" type="search" placeholder="Search photos, or go to a place…" autocomplete="off"
+    title="Typing narrows the photos by file name, note and place. Matching towns and saved places are listed below it: pick one to go there on the map.">
   <div class="spacer"></div>
   <div id="scan-chip" class="chip hidden"></div>
   <div id="cloud-chip" class="chip hidden"></div>
@@ -42,6 +43,9 @@
   <button id="btn-theme" class="btn ghost" title="Switch between light and dark"></button>
   <button id="btn-settings" class="btn ghost" title="Library settings">⚙</button>
 </header>
+
+<!-- The search box's list of places, outside the top bar, which clips. -->
+<div id="place-results" class="place-results top-results hidden"></div>
 
 <div class="layout">
   <div id="scrim" class="scrim hidden"></div>
@@ -96,10 +100,6 @@
       <div id="map"></div>
       <div id="globe" class="hidden"></div>
       <div class="map-controls">
-        <div class="place-find">
-          <input id="place-search" type="search" placeholder="Find a place…" autocomplete="off">
-          <div id="place-results" class="place-results hidden"></div>
-        </div>
         <div class="seg" id="view-mode">
           <button data-view="2d" class="active" title="Flat map: heat, clusters or points">2D</button>
           <button data-view="3d" title="Globe, with 3D buildings and lighting when Mapbox is on">3D</button>

@@ -129,6 +129,12 @@ const saveOpts = () => remember('pm-3d-style', JSON.stringify(opts));
 // The photo the light and weather are taken from, and its weather.
 let focused = null;
 let focusWeather = null;
+// A line the replay adds to the strip at the top: the song at that photo.
+let chipExtra = '';
+// During a replay the sky always follows the photo on screen - its hour and its
+// weather - whatever fixed light or effects were chosen for looking around.
+const followLight = () => lightMode === 'auto' || replay.active();
+const weatherFx = () => opts.weather || replay.active();
 let baseFog = undefined;
 const weatherCache = new Map();
 const weatherOn = () => state.config?.settings?.weather_enabled === '1';
@@ -653,7 +659,7 @@ function applyStyleOptions() {
   set('showRoadLabels', opts.roads);
   if (!satellite) {
     // A grey day is shown faded, unless a theme of its own was chosen.
-    const mood = opts.weather && opts.theme === 'default' ? sky.effects(focusWeather).mood : null;
+    const mood = weatherFx() && opts.theme === 'default' ? sky.effects(focusWeather).mood : null;
     set('theme', mood || opts.theme);
     set('show3dObjects', opts.buildings);
   }
@@ -669,7 +675,7 @@ function applyStyleOptions() {
  *  Rain and snow are Mapbox GL JS 3.9+; anything older just skips them. */
 function applyWeather(w) {
   if (engine !== 'mapbox' || !map) return;
-  const fx = sky.effects(opts.weather ? w : null);
+  const fx = sky.effects(weatherFx() ? w : null);
   try { if (map.setRain) map.setRain(fx.rain); } catch (err) { console.warn('rain:', err.message); }
   try { if (map.setSnow) map.setSnow(fx.snow); } catch (err) { console.warn('snow:', err.message); }
   try {
@@ -702,6 +708,7 @@ function showChip() {
   const parts = [fmtDateTime(focused.ts)];
   if (focusWeather) parts.push(sky.describe(focusWeather, { night }));
   else if (weatherOn() && focused.loading) parts.push('Looking up the weather…');
+  if (chipExtra && replay.active()) parts.push(chipExtra);
   chip.textContent = parts.join('  ·  ');
   chip.classList.remove('hidden');
 }
@@ -726,20 +733,20 @@ async function focusOn(photo) {
   focused = photo ? { ...photo, loading: true } : null;
   focusWeather = null;
   if (!photo) {
-    if (lightMode === 'auto') applyLight(ORBIT_LIGHT);
+    if (followLight()) applyLight(ORBIT_LIGHT);
     applyWeather(null);
     showChip();
     return null;
   }
   // The light first, from the sun's position: it needs no network.
-  if (lightMode === 'auto') applyLight(sky.lightFor(photo.ts, photo.lat, photo.lon) || ORBIT_LIGHT);
+  if (followLight()) applyLight(sky.lightFor(photo.ts, photo.lat, photo.lon) || ORBIT_LIGHT);
   showChip();
   const w = await weatherFor(photo.id);
   if (focused?.id !== photo.id) return w;
   focused.loading = false;
   focusWeather = w;
   // With the real time zone, sunrise and sunset are exact.
-  if (w && lightMode === 'auto') applyLight(sky.lightFor(photo.ts, photo.lat, photo.lon, w) || ORBIT_LIGHT);
+  if (w && followLight()) applyLight(sky.lightFor(photo.ts, photo.lat, photo.lon, w) || ORBIT_LIGHT);
   applyWeather(w);
   showChip();
   if (!el('style-pop').classList.contains('hidden')) renderPop();
@@ -809,13 +816,13 @@ const replayHooks = {
       : EMPTY);
   },
   highlight: (id) => { if (ready) map.setFilter('photo-hover', ['==', ['get', 'id'], id]); },
-  // Each stop sets the light and the weather; resolves to the weather's text
-  // for the stop's card.
+  // Each photo sets the light and the weather, shown in the strip at the top.
   stop: async (stop) => {
     if (!stop) return '';
     const w = await focusOn({ id: stop.ids[0], ts: stop.first, lat: stop.lat, lon: stop.lon });
     return w ? sky.describe(w, { short: true, night: light === 'night' }) : '';
   },
+  caption: (text) => { chipExtra = text || ''; if (focused) showChip(); },
 };
 
 function lineStyle(forReplay) {

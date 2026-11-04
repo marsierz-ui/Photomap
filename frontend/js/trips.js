@@ -209,10 +209,12 @@ export async function homeTimelineDialog(intro = '') {
         const r = rows[active];
         r.lat = at.lat;
         r.lon = at.lon;
-        if (!r.name && at.label) r.name = at.label;
+        // A new place renames the row, unless the name was typed by hand: a
+        // suggested "Galway" left on a row moved to Dublin is just wrong.
+        if (at.label && !r.typed) r.name = at.label;
         const row = list.querySelector(`[data-i="${active}"]`);
         row.querySelector('.htl-at').textContent = `${at.lat.toFixed(3)}, ${at.lon.toFixed(3)}`;
-        if (!row.querySelector('.htl-name').value && r.name) row.querySelector('.htl-name').value = r.name;
+        row.querySelector('.htl-name').value = r.name || '';
       },
     });
     setTimeout(() => focusRow(0), 0);
@@ -235,7 +237,7 @@ export async function homeTimelineDialog(intro = '') {
     });
     list.addEventListener('input', (e) => {
       const r = rows[Number(e.target.closest('.htl-row').dataset.i)];
-      if (e.target.classList.contains('htl-name')) r.name = e.target.value;
+      if (e.target.classList.contains('htl-name')) { r.name = e.target.value; r.typed = Boolean(r.name); }
       if (e.target.classList.contains('htl-since')) r.since = e.target.value;
     });
     box.querySelector('[data-act=add]').onclick = () => {
@@ -251,7 +253,8 @@ export async function homeTimelineDialog(intro = '') {
       const [first, ...moves] = rows;
       moves.sort((a, b) => a.since.localeCompare(b.since));
       try {
-        await api.put('/api/home-timeline', { items: [{ ...first, since: '1900-01-01' }, ...moves] });
+        const clean = ({ typed, ...row }) => row;  // eslint-disable-line no-unused-vars
+        await api.put('/api/home-timeline', { items: [{ ...clean(first), since: '1900-01-01' }, ...moves.map(clean)] });
       } catch (e) {
         err(e.message);
         return;
