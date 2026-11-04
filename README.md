@@ -104,10 +104,20 @@ place stops being one blue blob and separates into the visits that made it. Hues
 the golden angle rather than running along a gradient, which is what keeps consecutive
 days apart instead of nearly identical. The status line counts the days on screen.
 
-The heat map's radius, blur and intensity are remembered between sessions. They live in
-the settings table rather than in the browser, so they follow you to the phone; the
-`value` attributes in the HTML stay the defaults, so there is one place to change those
-rather than two. The write waits for the slider to stop moving.
+The heat map rescales as you zoom: its intensity is measured against the busiest spot
+currently on screen, so the hottest place in view is red whether you are looking at a
+continent or a street. Radius, blur and intensity are set in **⚙ → Heat map** and kept in
+the settings table, so they follow you to the phone.
+
+**Points** draws a thumbnail bubble over the points, one per patch of screen, showing the
+latest photo taken there and how many share the patch. Clicking one opens those photos in
+the lightbox. **Photos** turns the bubbles off when they get in the way.
+
+**Places** - coordinates are turned into a place name and country on this machine, from
+the GeoNames list of places with 1,000+ people (CC BY 4.0, about 11 MB, downloaded once
+from **⚙ → Place names** or the Insights tab). Each photo gets the nearest place, so a
+photo taken right at a border can be filed under the neighbour. Positions changed later
+are named again on their own. The lightbox shows the place; Insights lists countries.
 
 **Videos** - clips are indexed beside photos rather than in a section of their own:
 one row, one point on the map, one place in the timeline, one tile in the gallery with
@@ -343,10 +353,14 @@ and names without `(1)`/`copy` markers win - and you can pick a different one. E
 to the recycle bin; the API refuses any set that would not leave exactly one survivor.
 
 **Albums** - manual grouping. Each album has a colour that the map uses for its points,
-so a single album can be visualized on its own. Build one from a selection, or empty.
+so a single album can be visualized on its own. Build one from a selection, or empty, or
+from the lightbox's **+ Album**. Albums nest: **+** on an album makes a subalbum, and **✎**
+moves one elsewhere. An album shows its subalbums' photos too; deleting one moves its
+subalbums up a level. Names are unique across all levels.
 
 **Insights** - totals, GPS coverage, disk usage, and distributions by hour of day,
-weekday, month, year, plus a camera breakdown. Respects the active filters.
+weekday, month, year, plus a camera breakdown and photos, days and places per country.
+Respects the active filters.
 
 ## Deleting
 

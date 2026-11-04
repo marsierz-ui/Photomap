@@ -185,10 +185,19 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # What produced the position: GPS, or a guess from the network. See
         # photometa.APPROX_METHODS.
         ("gps_method", "ALTER TABLE photos ADD COLUMN gps_method TEXT"),
+        # Where the position is, in words: nearest named place and its country,
+        # from geocode.py. NULL until looked up, '' when there is nothing near.
+        ("place", "ALTER TABLE photos ADD COLUMN place TEXT"),
+        ("country", "ALTER TABLE photos ADD COLUMN country TEXT"),
+        ("place_at", "ALTER TABLE photos ADD COLUMN place_at TEXT"),
     ):
         if column not in existing:
             conn.execute(ddl)
+    albums = {r["name"] for r in conn.execute("PRAGMA table_info(albums)")}
+    if "parent_id" not in albums:
+        conn.execute("ALTER TABLE albums ADD COLUMN parent_id INTEGER")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_hash ON photos(content_hash)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_country ON photos(country)")
     # Added after location_fixes first existed: whether a stored position was set
     # by hand or copied from a neighbouring photo, which is worth telling apart.
     fixes = {r["name"] for r in conn.execute("PRAGMA table_info(location_fixes)")}
