@@ -80,11 +80,15 @@
       <div id="map"></div>
       <div id="globe" class="hidden"></div>
       <div class="map-controls">
+        <div class="seg" id="view-mode">
+          <button data-view="2d" class="active" title="Flat map: heat, clusters or points">2D</button>
+          <button data-view="3d" title="Globe, with 3D buildings and lighting when Mapbox is on">3D</button>
+          <button data-view="replay" title="Fly through the photos in the order they were taken">Replay</button>
+        </div>
         <div class="seg" id="layer-mode">
           <button data-mode="heat" class="active">Heat</button>
           <button data-mode="cluster">Clusters</button>
           <button data-mode="points">Points</button>
-          <button data-mode="globe">Globe</button>
         </div>
         <div class="seg" id="base-mode">
           <button data-base="dark" class="active">Dark</button>
@@ -96,16 +100,19 @@
           <button data-skin="streets">Streets</button>
           <button data-skin="satellite">Satellite</button>
         </div>
+        <div class="seg hidden" id="light-mode">
+          <button data-light="dawn">Dawn</button>
+          <button data-light="day">Day</button>
+          <button data-light="dusk">Dusk</button>
+          <button data-light="night">Night</button>
+          <button data-act="satellite" title="Satellite imagery under the 3D buildings">Satellite</button>
+        </div>
         <button id="map-fit" class="btn tiny">Fit to photos</button>
         <button id="map-path" class="btn tiny" title="Connect photos in time order">Path</button>
         <button id="map-days" class="btn tiny hidden" title="Give every capture day its own colour">Colour by day</button>
+        <button id="map-bubbles" class="btn tiny hidden" title="Show photo thumbnails over the points">Photos</button>
         <button id="map-notes" class="btn tiny" title="Show the journal days that have a location">Notes</button>
         <button id="map-select" class="btn tiny" title="Drag a box on the map (or hold Shift and drag)">Box select</button>
-      </div>
-      <div class="map-heat-controls" id="heat-controls">
-        <label>Radius <input type="range" id="heat-radius" min="4" max="60" value="22"></label>
-        <label>Blur <input type="range" id="heat-blur" min="1" max="45" value="16"></label>
-        <label>Intensity <input type="range" id="heat-intensity" min="1" max="30" value="10"></label>
       </div>
       <div class="map-status" id="map-status"></div>
     </div>

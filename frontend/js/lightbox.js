@@ -1,9 +1,10 @@
-import { api, previewUrl } from './api.js';
+import { api, guard, previewUrl } from './api.js';
 import { state, on, emit, fmtDateTime, fmtBytes, fmtNum } from './state.js';
 import { el, escapeHtml, toast } from './ui.js';
 import { setFavorite, deleteDialog } from './actions.js';
 import { isVideo, isApprox, clock } from './gallery.js';
 import { flyToPhoto, pickLocation } from './mapview.js';
+import { pickAlbumDialog, refreshAll } from './sidebar.js';
 
 const box = el('lightbox');
 const img = el('lb-img');
@@ -73,6 +74,15 @@ export function initLightbox() {
       const at = await pickLocation();
       emit('openPhoto', { id: photo.id, ids });
       if (at) saveLocation(at.lat, at.lng, photo.id);
+    } else if (act === 'album') {
+      const photo = current;
+      pickAlbumDialog([photo.id], () => { if (current === photo) show(); });
+    } else if (act === 'unalbum') {
+      const photo = current;
+      await guard(api.post(`/api/albums/${e.target.dataset.id}/photos/remove`, { ids: [photo.id] }), 'Failed');
+      await refreshAll();
+      emit('filters');
+      if (current === photo) show();
     } else if (act === 'reveal') {
       await api.post(`/api/photos/${current.id}/reveal`);
     } else if (act === 'delete') {
@@ -153,6 +163,19 @@ function saveNote() {
     .catch((err) => toast(`Could not save the note: ${err.message}`, true));
 }
 
+const regionNames = new Intl.DisplayNames(undefined, { type: 'region' });
+export const countryName = (cc) => { try { return regionNames.of(cc) || cc; } catch { return cc; } };
+
+/** The preview size that fills this screen, from a few fixed steps so the
+ *  server keeps a handful of cached sizes rather than one per window. Never
+ *  smaller than the preview size set in settings. */
+function bigPreview(id) {
+  const need = Math.max(window.screen.width, window.screen.height) * (window.devicePixelRatio || 1);
+  const step = [1600, 2400, 3200].find((s) => s >= need) || 3200;
+  const floor = Number(state.config?.settings?.preview_size) || 1600;
+  return `${previewUrl(id)}?s=${Math.max(step, floor)}`;
+}
+
 const gapText = (s) => (s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min`
   : `${(s / 3600).toFixed(1)} h`);
 
@@ -204,7 +227,7 @@ async function show() {
   stopPlayer();
   img.classList.remove('hidden');
   player.classList.add('hidden');
-  img.src = previewUrl(id);
+  img.src = bigPreview(id);
   info.innerHTML = '<span class="muted">Loading…</span>';
   const data = await api.get(`/api/photos/${id}`);
   if (ids[index] !== id) return;
@@ -214,20 +237,21 @@ async function show() {
   if (video) {
     img.classList.add('hidden');
     player.classList.remove('hidden');
-    player.poster = previewUrl(id);
+    player.poster = bigPreview(id);
     player.src = `/api/photos/${id}/video`;
   }
 
   const albums = (data.albums || [])
     .map((aid) => state.albums.find((a) => a.id === aid))
     .filter(Boolean)
-    .map((a) => `<span class="dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${escapeHtml(a.color)}"></span> ${escapeHtml(a.name)}`)
+    .map((a) => `<span class="lb-album"><span class="dot" style="background:${escapeHtml(a.color)}"></span>${escapeHtml(a.name)}<button class="lb-x" data-act="unalbum" data-id="${a.id}" title="Remove from this album">✕</button></span>`)
     .join(' ');
+  const place = data.place || (data.country ? countryName(data.country) : '');
 
   info.innerHTML = `
     <span><strong>${escapeHtml(data.filename)}</strong></span>
     <span><span class="k">Taken</span> ${fmtDateTime(data.taken_ts)}${data.taken_src === 'mtime' ? ' <span class="k">(file date)</span>' : ''}</span>
-    <span><span class="k">Where</span> ${data.lat == null ? 'no GPS' : `${data.lat.toFixed(5)}, ${data.lon.toFixed(5)}`}${isApprox(data) ? ' <span class="k">(approximate, from the network)</span>' : ''}${data.gps_method === 'MANUAL' ? ' <span class="k">(set by hand)</span>' : ''}${data.gps_method === 'NEIGHBOUR' ? ' <span class="k">(copied from a neighbouring photo)</span>' : ''}</span>
+    <span><span class="k">Where</span> ${data.lat == null ? 'no GPS' : `${place ? `${escapeHtml(place)}${data.place && data.country ? `, ${escapeHtml(countryName(data.country))}` : ''} <span class="k">·</span> ` : ''}${data.lat.toFixed(5)}, ${data.lon.toFixed(5)}`}${isApprox(data) ? ' <span class="k">(approximate, from the network)</span>' : ''}${data.gps_method === 'MANUAL' ? ' <span class="k">(set by hand)</span>' : ''}${data.gps_method === 'NEIGHBOUR' ? ' <span class="k">(copied from a neighbouring photo)</span>' : ''}</span>
     <span id="lb-suggest">${isApprox(data) ? '<button data-act="fixloc">Fix location</button>' : ''}</span>
     <span><span class="k">Camera</span> ${escapeHtml([data.camera_make, data.camera_model].filter(Boolean).join(' ') || '—')}</span>
     <span><span class="k">Size</span> ${data.width || '?'}×${data.height || '?'} · ${fmtBytes(data.filesize)}${video ? ` · ▶ ${data.duration ? clock(data.duration) : 'video'}` : ''}</span>
@@ -236,6 +260,7 @@ async function show() {
       placeholder="Add a note… (searchable)">${escapeHtml(data.note || '')}</textarea>
     <span class="spacer"></span>
     <button data-act="fav">${data.favorite ? '★ Favourited' : '☆ Favourite'}</button>
+    <button data-act="album">+ Album</button>
     <button data-act="map">Show on map</button>
     <button data-act="reveal">Reveal in folder</button>
     <a class="btn" href="/api/photos/${id}/original" download>Download</a>

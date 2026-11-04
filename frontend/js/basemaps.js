@@ -11,8 +11,9 @@ import { toast } from './ui.js';
 
 // Monthly free tiers from mapbox.com/pricing. Style tiles (dark, streets) are
 // billed as Static Tiles API requests, satellite as Raster Tiles API requests,
-// and each has its own allowance.
-export const MAPBOX_FREE = { styles: 200000, raster: 750000 };
+// and the 3D view (Mapbox GL JS) per map load, each with its own allowance.
+export const MAPBOX_FREE = { styles: 200000, raster: 750000, loads: 50000 };
+const KINDS = Object.keys(MAPBOX_FREE);
 
 const MAPBOX_STYLES = { dark: 'mapbox/dark-v11', streets: 'mapbox/streets-v12' };
 const MAPBOX_ATTR = '&copy; <a href="https://www.mapbox.com/about/maps/" target="_blank">Mapbox</a> '
@@ -24,20 +25,21 @@ const thisMonth = () => new Date().toISOString().slice(0, 7);
 
 let usage = null;
 let refusedBy = null;
-const pending = { styles: 0, raster: 0 };
+const pending = { styles: 0, raster: 0, loads: 0 };
 let flushTimer = null;
 
 export function usageNow() {
   if (!usage) {
     try { usage = JSON.parse(settings().mapbox_usage || 'null'); } catch { usage = null; }
   }
-  if (!usage || usage.month !== thisMonth()) usage = { month: thisMonth(), styles: 0, raster: 0 };
+  if (!usage || usage.month !== thisMonth()) usage = { month: thisMonth(), styles: 0, raster: 0, loads: 0 };
   return { ...usage, refused: refusedBy };
 }
 
-const spent = (kind) => usageNow()[kind] >= MAPBOX_FREE[kind];
+const spent = (kind) => (usageNow()[kind] || 0) >= MAPBOX_FREE[kind];
 
-function useMapbox(kind) {
+/** Whether Mapbox should serve this kind of request right now. */
+export function useMapbox(kind) {
   const s = settings();
   return s.map_provider === 'mapbox' && !!s.mapbox_token && !refusedBy && !spent(kind);
 }
@@ -82,7 +84,7 @@ export function mapboxKind(url) {
 export function count(kind) {
   const before = spent(kind);
   pending[kind] += 1;
-  usage[kind] += 1;
+  usage[kind] = (usage[kind] || 0) + 1;
   if (!flushTimer) flushTimer = setTimeout(flush, 15000);
   if (!before && spent(kind)) {
     flush();
@@ -95,20 +97,19 @@ async function flush() {
   clearTimeout(flushTimer);
   flushTimer = null;
   const body = { ...pending };
-  if (!body.styles && !body.raster) return;
-  pending.styles = 0;
-  pending.raster = 0;
+  if (!KINDS.some((k) => body[k])) return;
+  KINDS.forEach((k) => { pending[k] = 0; });
   try {
     const total = await api.post('/api/mapbox/usage', body);
     // Other tabs and devices count too; the server's total is the real one.
-    const was = { styles: spent('styles'), raster: spent('raster') };
-    usage = { month: total.month, styles: total.styles + pending.styles, raster: total.raster + pending.raster };
+    const was = KINDS.map(spent).join();
+    usage = { month: total.month };
+    KINDS.forEach((k) => { usage[k] = (total[k] || 0) + pending[k]; });
     if (state.config) state.config.settings.mapbox_usage = JSON.stringify(total);
-    if (was.styles !== spent('styles') || was.raster !== spent('raster')) emit('basemaps');
+    if (was !== KINDS.map(spent).join()) emit('basemaps');
   } catch {
     // Not lost: put back and sent with the next batch.
-    pending.styles += body.styles;
-    pending.raster += body.raster;
+    KINDS.forEach((k) => { pending[k] += body[k]; });
   }
 }
 

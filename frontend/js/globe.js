@@ -13,9 +13,10 @@
 // the same machinery that draws a normal map: there is no memory to police, and
 // the renderer sleeps when nothing moves instead of spinning a frame loop.
 import { thumbUrl } from './api.js';
-import { emit, on, fmtNum, fmtDateTime, dayColor } from './state.js';
+import { state, emit, on, fmtNum, fmtDateTime, dayColor } from './state.js';
 import { el, toast } from './ui.js';
-import { tileSpec, mapboxKind, count as countTile, refused } from './basemaps.js';
+import { tileSpec, mapboxKind, count as countTile, refused, useMapbox } from './basemaps.js';
+import * as replay from './replay.js';
 
 // Vendored rather than fetched from a CDN, so an outage cannot take the globe
 // out. Resolved against this module's own URL: MapLibre finds its worker with
@@ -23,6 +24,15 @@ import { tileSpec, mapboxKind, count as countTile, refused } from './basemaps.js
 // files it ships with. See vendor/README.md.
 const LIB = new URL('../vendor/maplibre-gl/maplibre-gl.mjs', import.meta.url).href;
 const CSS = new URL('../vendor/maplibre-gl/maplibre-gl.css', import.meta.url).href;
+
+// Mapbox Standard - 3D buildings, landmarks and dawn-to-night lighting - only
+// renders in Mapbox's own GL JS. Fetched from Mapbox rather than vendored: it
+// is only used while Mapbox serves the tiles anyway, so an outage of one is an
+// outage of both, and the MapLibre globe takes over either way.
+const MAPBOX_GL = 'https://api.mapbox.com/mapbox-gl-js/v3.33.0/';
+const STANDARD = 'mapbox://styles/mapbox/standard';
+const STANDARD_SATELLITE = 'mapbox://styles/mapbox/standard-satellite';
+export const LIGHTS = ['dawn', 'day', 'dusk', 'night'];
 
 // Same cap as the 2D points layer. MapLibre draws the whole set in one GPU call
 // and tiles it on a worker, so the only cost that scales here is building the
@@ -69,8 +79,12 @@ function rebuildSkins() {
   });
 }
 
-let maplibre = null;
+let lib = null;
 let map = null;
+// Which renderer `map` is: 'mapbox' (Standard, 3D) or 'maplibre' (the globe on
+// raster skins).
+let engine = null;
+let mapboxBroken = false;
 let ready = false;
 let booting = false;
 let skin = 'map';
@@ -79,10 +93,43 @@ let count = 0;
 let hovered = null;
 let hoverTimer = null;
 let tip = null;
+let replaying = false;
+let lastData = null;
+
+const remembered = (key, fallback) => {
+  try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
+};
+const remember = (key, value) => {
+  try { localStorage.setItem(key, value); } catch { /* private window */ }
+};
+let light = remembered('pm-light', 'dusk');
+let satellite = remembered('pm-3d-satellite', '0') === '1';
 
 const container = () => el('globe');
+const shown = () => !container().classList.contains('hidden');
+const wantEngine = () => (!mapboxBroken && useMapbox('loads') ? 'mapbox' : 'maplibre');
 
-on('basemaps', rebuildSkins);
+// The provider changed, or Mapbox ran out or said no. Raster skins can be
+// swapped in place; a change of renderer means a new map.
+on('basemaps', () => {
+  if (!map) return;
+  if (engine !== wantEngine()) {
+    teardown();
+    if (shown()) boot();
+  } else if (engine === 'maplibre') {
+    rebuildSkins();
+  }
+});
+
+function teardown() {
+  if (replaying) replay.exit();
+  setHovered(null);
+  map.remove();
+  map = null;
+  ready = false;
+  booting = false;
+  engine = null;
+}
 
 // ------------------------------------------------------------------ loading
 
@@ -102,6 +149,30 @@ function loadLib() {
     libPromise = import(LIB).catch((err) => { libPromise = null; throw err; });
   }
   return libPromise;
+}
+
+// A classic script, not a module: it sets window.mapboxgl.
+let mapboxPromise = null;
+
+function loadMapbox() {
+  if (!mapboxPromise) {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = `${MAPBOX_GL}mapbox-gl.css`;
+    document.head.appendChild(link);
+    mapboxPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = `${MAPBOX_GL}mapbox-gl.js`;
+      script.onload = () => resolve(window.mapboxgl);
+      script.onerror = () => {
+        script.remove();
+        mapboxPromise = null;
+        reject(new Error('Mapbox GL JS could not be loaded'));
+      };
+      document.head.appendChild(script);
+    });
+  }
+  return mapboxPromise;
 }
 
 function style() {
@@ -124,8 +195,6 @@ function style() {
       'skin-map': skinSource('map'),
       'skin-streets': skinSource('streets'),
       'skin-satellite': skinSource('satellite'),
-      photos: { type: 'geojson', data: EMPTY },
-      path: { type: 'geojson', data: EMPTY },
     },
     layers: [
       // The sphere before any tile lands. Without it the unpainted globe is
@@ -134,50 +203,68 @@ function style() {
       { id: 'skin-map', type: 'raster', source: 'skin-map', layout: { visibility: vis('map') } },
       { id: 'skin-streets', type: 'raster', source: 'skin-streets', layout: { visibility: vis('streets') } },
       { id: 'skin-satellite', type: 'raster', source: 'skin-satellite', layout: { visibility: vis('satellite') } },
-      // Under the points, not over them - a dashed line drawn across the dots
-      // it connects reads worse than one sitting beneath them.
-      {
-        id: 'path-line',
-        type: 'line',
-        source: 'path',
-        layout: { 'line-cap': 'round', 'line-join': 'round' },
-        paint: {
-          'line-color': BASE_COLOR,
-          'line-width': 1.5,
-          'line-opacity': 0.6,
-          'line-dasharray': [4, 4],
-        },
-      },
-      {
-        id: 'photos',
-        type: 'circle',
-        source: 'photos',
-        paint: {
-          // Small enough at world view that a city reads as a cluster of dots
-          // rather than one blob, big enough close in to be worth aiming at.
-          'circle-radius': ['interpolate', ['linear'], ['zoom'], 0, 2.2, 4, 3, 8, 4.2, 14, 6],
-          'circle-color': tint(),
-          'circle-opacity': 0.9,
-          // A dark rim separates overlapping dots; skipped when they are too
-          // small for it to be anything but a smudge.
-          'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 2, 0, 5, 0.8],
-          'circle-stroke-color': 'rgba(0,0,0,.55)',
-        },
-      },
-      {
-        id: 'photo-hover',
-        type: 'circle',
-        source: 'photos',
-        filter: ['==', ['get', 'id'], -1],
-        paint: {
-          'circle-radius': ['interpolate', ['linear'], ['zoom'], 0, 4.5, 8, 6.5, 14, 8.5],
-          'circle-color': tint(),
-          'circle-stroke-width': 2,
-          'circle-stroke-color': '#fff',
-        },
-      },
     ],
   };
+}
+
+/** The photos and the trip line, on top of whichever basemap the renderer has.
+ *  Added after the style loads, on both renderers, and again whenever Mapbox
+ *  switches style (satellite on or off), which throws added layers away. With
+ *  no slot, Mapbox Standard draws them above everything, labels included. */
+function addDataLayers() {
+  if (map.getSource('photos')) return;
+  map.addSource('photos', { type: 'geojson', data: EMPTY });
+  map.addSource('path', { type: 'geojson', data: EMPTY });
+  // Under the points, not over them - a dashed line drawn across the dots it
+  // connects reads worse than one sitting beneath them.
+  map.addLayer({
+    id: 'path-line',
+    type: 'line',
+    source: 'path',
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: {
+      'line-color': BASE_COLOR,
+      'line-width': 1.5,
+      'line-opacity': 0.6,
+      'line-dasharray': [4, 4],
+    },
+  });
+  map.addLayer({
+    id: 'photos',
+    type: 'circle',
+    source: 'photos',
+    paint: {
+      // Small enough at world view that a city reads as a cluster of dots
+      // rather than one blob, big enough close in to be worth aiming at.
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 0, 2.2, 4, 3, 8, 4.2, 14, 6],
+      'circle-color': tint(),
+      'circle-opacity': 0.9,
+      // A dark rim separates overlapping dots; skipped when they are too small
+      // for it to be anything but a smudge.
+      'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 2, 0, 5, 0.8],
+      'circle-stroke-color': 'rgba(0,0,0,.55)',
+    },
+  });
+  map.addLayer({
+    id: 'photo-hover',
+    type: 'circle',
+    source: 'photos',
+    filter: ['==', ['get', 'id'], -1],
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 0, 4.5, 8, 6.5, 14, 8.5],
+      'circle-color': tint(),
+      'circle-stroke-width': 2,
+      'circle-stroke-color': '#fff',
+    },
+  });
+  // Standard lights the scene for the time of day, custom layers included, so
+  // at dusk or night the dots and the route would sink into the dark. Lit from
+  // within instead. MapLibre does not know these properties.
+  if (engine === 'mapbox') {
+    map.setPaintProperty('path-line', 'line-emissive-strength', 1);
+    map.setPaintProperty('photos', 'circle-emissive-strength', 1);
+    map.setPaintProperty('photo-hover', 'circle-emissive-strength', 1);
+  }
 }
 
 // The style is built with the skin and the colouring already chosen rather than
@@ -195,21 +282,84 @@ async function boot() {
   if (!rect.width || !rect.height) return;
 
   booting = true;
+  const want = wantEngine();
   try {
-    maplibre = await loadLib();
-    create(box);
+    if (want === 'mapbox') {
+      lib = await loadMapbox();
+      lib.accessToken = state.config.settings.mapbox_token;
+    } else {
+      lib = await loadLib();
+    }
+    engine = want;
+    if (engine === 'mapbox') createMapbox(box); else create(box);
+    syncControls();
   } catch (err) {
-    // Two real cases: the CDN is unreachable, or the machine has no WebGL2,
+    booting = false;
+    if (want === 'mapbox') {
+      // Mapbox's script did not arrive: the MapLibre globe, for this session.
+      mapboxBroken = true;
+      boot();
+      return;
+    }
+    // Two real cases: the file did not load, or the machine has no WebGL2,
     // which MapLibre requires. Cleared here rather than left set, so a retry
     // (reopening the globe, or a network blip clearing up) gets another
     // attempt instead of the pane sitting on "Preparing the globe…" forever.
-    booting = false;
     el('map-status').textContent = `The globe is unavailable here: ${err.message}`;
   }
 }
 
+/** Mapbox Standard: a globe from far out, 3D buildings and landmarks close in,
+ *  lit for the time of day chosen. Billed per map load, so one is counted here. */
+function createMapbox(box) {
+  countTile('loads');
+  map = new lib.Map({
+    container: box,
+    style: satellite ? STANDARD_SATELLITE : STANDARD,
+    config: { basemap: { lightPreset: light } },
+    projection: 'globe',
+    center: [10, 25],
+    zoom: 1.4,
+    // Shift-drag is box select here, as on the 2D map.
+    boxZoom: false,
+    // Mapbox's terms want the logo visible; bottom-left is where the status
+    // line sits.
+    logoPosition: 'bottom-right',
+  });
+  map.addControl(new lib.NavigationControl({ visualizePitch: true }), 'top-left');
+  onLoaded();
+  map.on('error', (e) => {
+    // Only the map services count: GL JS also posts telemetry to
+    // events.mapbox.com, and a 429 there says nothing about the maps.
+    if ([401, 403, 429].includes(e.error?.status) && mapboxKind(e.error?.url)) refused(e.error.status);
+    else console.warn('3D map:', e.error?.message || e.type);
+  });
+}
+
+/** style.load, not load: load also waits for the first frame to be painted,
+ *  and a browser gives a background tab no frames at all. Everything here needs
+ *  the style, not a picture of it. Fires again when Mapbox switches style. */
+function onLoaded() {
+  map.on('style.load', () => {
+    addDataLayers();
+    // A new style starts from its own default lighting.
+    if (engine === 'mapbox') map.setConfigProperty('basemap', 'lightPreset', light);
+    if (!ready) {
+      ready = true;
+      booting = false;
+      wire();
+    }
+    // Only matters if the mode buttons were used while the renderer was still
+    // being fetched.
+    setSkin(skin);
+    setDayColors(byDay);
+    // The pane is up but has no points yet: tell the map view to draw them.
+    emit('globeReady');
+  });
+}
+
 function create(box) {
-  map = new maplibre.Map({
+  map = new lib.Map({
     container: box,
     style: style(),
     center: [10, 25],
@@ -238,22 +388,8 @@ function create(box) {
     },
   });
 
-  map.addControl(new maplibre.NavigationControl({ showCompass: false }), 'top-left');
-
-  // style.load, not load: load also waits for the first frame to be painted,
-  // and a browser gives a background tab no frames at all. Everything below
-  // needs the style, not a picture of it.
-  map.on('style.load', () => {
-    ready = true;
-    booting = false;
-    // Only matters if the mode buttons were used while the renderer was still
-    // being fetched; the style is built with both of these already applied.
-    setSkin(skin);
-    setDayColors(byDay);
-    wire();
-    // The pane is up but has no points yet: tell the map view to draw them.
-    emit('globeReady');
-  });
+  map.addControl(new lib.NavigationControl({ showCompass: false }), 'top-left');
+  onLoaded();
 
   // Without a listener MapLibre logs every miss itself, and a satellite tile
   // that does not exist over open ocean is normal rather than news.
@@ -373,19 +509,88 @@ function toGeoJSON(data, n) {
 
 // ------------------------------------------------------------------ exports
 
+/** The raster skins only mean something on the MapLibre globe; Mapbox Standard
+ *  has its lighting and a satellite switch instead. */
+function syncControls() {
+  const on = shown();
+  el('globe-skin').classList.toggle('hidden', !on || engine === 'mapbox');
+  el('light-mode').classList.toggle('hidden', !on || engine !== 'mapbox');
+  [...el('light-mode').querySelectorAll('[data-light]')].forEach((b) => b.classList.toggle('active', b.dataset.light === light));
+  el('light-mode').querySelector('[data-act=satellite]').classList.toggle('active', satellite);
+}
+
+// While a replay runs it owns the trip line: solid, thicker, drawn as it flies.
+const replayHooks = {
+  route: (coords) => {
+    if (!ready) return;
+    map.getSource('path').setData(coords.length > 1
+      ? { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } }
+      : EMPTY);
+  },
+  highlight: (id) => { if (ready) map.setFilter('photo-hover', ['==', ['get', 'id'], id]); },
+};
+
+function lineStyle(forReplay) {
+  map.setPaintProperty('path-line', 'line-dasharray', forReplay ? [1, 0] : [4, 4]);
+  map.setPaintProperty('path-line', 'line-width', forReplay ? 3.5 : 1.5);
+  map.setPaintProperty('path-line', 'line-opacity', forReplay ? 0.95 : 0.6);
+  if (forReplay) map.setPaintProperty('path-line', 'line-color', '#ffb020');
+}
+
 export function show(data) {
   container().classList.remove('hidden');
-  el('globe-skin').classList.remove('hidden');
+  syncControls();
   if (!ready) { boot(); return false; }
   resize();
   update(data);
+  lastData = data;
+  if (replaying) {
+    if (replay.active()) replay.setData(data);
+    else { lineStyle(true); replay.enter(map, container(), data, replayHooks); }
+  }
   return true;
 }
 
 export function hide() {
   container().classList.add('hidden');
-  el('globe-skin').classList.add('hidden');
+  syncControls();
   setHovered(null);
+  if (replay.active()) replay.exit();
+}
+
+/** Animation mode: on the same surface, the camera replays the trip. */
+export function setReplay(on) {
+  if (replaying === on) return;
+  replaying = on;
+  if (!ready) return;
+  if (on) {
+    lineStyle(true);
+    replay.enter(map, container(), lastData, replayHooks);
+  } else {
+    replay.exit();
+    lineStyle(false);
+    map.easeTo({ pitch: 0, bearing: 0, duration: 800 });
+  }
+}
+
+export function setLight(name) {
+  if (!LIGHTS.includes(name)) return;
+  light = name;
+  remember('pm-light', name);
+  if (ready && engine === 'mapbox') map.setConfigProperty('basemap', 'lightPreset', name);
+  syncControls();
+}
+
+/** Standard Satellite is a different style, so the switch reloads it; the
+ *  photo layers come back through onLoaded. */
+export function setSatellite(on) {
+  satellite = on;
+  remember('pm-3d-satellite', on ? '1' : '0');
+  if (ready && engine === 'mapbox') {
+    if (replay.active()) replay.exit();
+    map.setStyle(on ? STANDARD_SATELLITE : STANDARD);
+  }
+  syncControls();
 }
 
 export function update(data) {
@@ -406,7 +611,7 @@ export function update(data) {
  *  matching the flat map's Path exactly, including the warning once it is
  *  past drawing at all. */
 export function setPath(data, on, color) {
-  if (!ready) return;
+  if (!ready || replaying) return;
   const source = map.getSource('path');
   const n = data ? data.n : 0;
   if (on && n > 1) {
@@ -437,7 +642,7 @@ export function resize() {
 export function setSkin(name) {
   if (!SKINS[name]) return;
   skin = name;
-  if (!ready) return;
+  if (!ready || engine !== 'maplibre') return;
   Object.entries(SKINS).forEach(([key, def]) => {
     map.setLayoutProperty(def.layer, 'visibility', key === name ? 'visible' : 'none');
   });
