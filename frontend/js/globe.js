@@ -13,8 +13,9 @@
 // the same machinery that draws a normal map: there is no memory to police, and
 // the renderer sleeps when nothing moves instead of spinning a frame loop.
 import { thumbUrl } from './api.js';
-import { state, emit, on, fmtNum, fmtDateTime, dayColor } from './state.js';
+import { emit, on, fmtNum, fmtDateTime, dayColor } from './state.js';
 import { el, toast } from './ui.js';
+import { tileSpec, mapboxKind, count as countTile, refused } from './basemaps.js';
 
 // Vendored rather than fetched from a CDN, so an outage cannot take the globe
 // out. Resolved against this module's own URL: MapLibre finds its worker with
@@ -38,48 +39,35 @@ const EMPTY = { type: 'FeatureCollection', features: [] };
 // them the way the 2D map's {r} placeholder does: only where they show.
 const RETINA = window.devicePixelRatio > 1 ? '@2x' : '';
 
-// Read when the style is built, not at import: this module loads before the
-// config does. Without a key CARTO serves a watermark instead of every tile.
-const cartoTiles = (key) =>
-  [`https://basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}${RETINA}.png?key=${encodeURIComponent(key || '')}`];
-
-// Both skins live in the style at once and are switched by visibility. MapLibre
-// only fetches tiles for a source a visible layer uses, so the hidden one costs
+// All skins live in the style at once and are switched by visibility. MapLibre
+// only fetches tiles for a source a visible layer uses, so the hidden ones cost
 // nothing, the visible one keeps whatever it had cached when you switch back,
-// and the attribution control follows along on its own.
+// and the attribution control follows along on its own. `base` is the same
+// basemap on the 2D map; basemaps.js decides who serves it.
 const SKINS = {
-  map: {
-    layer: 'skin-map',
-    source: {
-      type: 'raster',
-      tileSize: 256,
-      maxzoom: 20,
-      attribution: '&copy; OpenStreetMap contributors, &copy; CARTO',
-    },
-  },
-  // Same tile source as the 2D map's Streets basemap: a single host, no retina
-  // set - unlike CARTO, raw OSM tiles do not offer an @2x variant.
-  streets: {
-    layer: 'skin-streets',
-    source: {
-      type: 'raster',
-      tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-      tileSize: 256,
-      maxzoom: 19,
-      attribution: '&copy; OpenStreetMap contributors',
-    },
-  },
-  satellite: {
-    layer: 'skin-satellite',
-    source: {
-      type: 'raster',
-      tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
-      tileSize: 256,
-      maxzoom: 19,
-      attribution: 'Imagery &copy; Esri',
-    },
-  },
+  map: { layer: 'skin-map', base: 'dark' },
+  streets: { layer: 'skin-streets', base: 'streets' },
+  satellite: { layer: 'skin-satellite', base: 'satellite' },
 };
+
+// Built when asked, not at import: this module loads before the config does.
+function skinSource(name) {
+  const t = tileSpec(SKINS[name].base, RETINA);
+  return { type: 'raster', tiles: [t.url], tileSize: t.tileSize, maxzoom: t.maxzoom, attribution: t.attribution };
+}
+
+/** Swap every skin's source for the provider now in force. A source's tile
+ *  size cannot be changed in place, so each is removed and added again, under
+ *  the path line as in the style. */
+function rebuildSkins() {
+  if (!ready) return;
+  Object.entries(SKINS).forEach(([name, def]) => {
+    map.removeLayer(def.layer);
+    map.removeSource(def.layer);
+    map.addSource(def.layer, skinSource(name));
+    map.addLayer({ id: def.layer, type: 'raster', source: def.layer, layout: { visibility: vis(name) } }, 'path-line');
+  });
+}
 
 let maplibre = null;
 let map = null;
@@ -94,7 +82,7 @@ let tip = null;
 
 const container = () => el('globe');
 
-on('cartoKey', (key) => map?.getSource('skin-map')?.setTiles(cartoTiles(key)));
+on('basemaps', rebuildSkins);
 
 // ------------------------------------------------------------------ loading
 
@@ -133,9 +121,9 @@ function style() {
       'atmosphere-blend': ['interpolate', ['linear'], ['zoom'], 0, 0.9, 5, 0.4, 8, 0],
     },
     sources: {
-      'skin-map': { ...SKINS.map.source, tiles: cartoTiles(state.config?.settings?.carto_key) },
-      'skin-streets': SKINS.streets.source,
-      'skin-satellite': SKINS.satellite.source,
+      'skin-map': skinSource('map'),
+      'skin-streets': skinSource('streets'),
+      'skin-satellite': skinSource('satellite'),
       photos: { type: 'geojson', data: EMPTY },
       path: { type: 'geojson', data: EMPTY },
     },
@@ -241,6 +229,13 @@ function create(box) {
     // a few levels of them - the rest is memory held against a trip nobody
     // makes, which is exactly what sank the last build.
     maxTileCacheZoomLevels: 3,
+    // Every Mapbox tile counts against its free tier, so each one is tallied
+    // on its way out.
+    transformRequest: (url, type) => {
+      const kind = type === 'Tile' && mapboxKind(url);
+      if (kind) countTile(kind);
+      return { url };
+    },
   });
 
   map.addControl(new maplibre.NavigationControl({ showCompass: false }), 'top-left');
@@ -262,7 +257,10 @@ function create(box) {
 
   // Without a listener MapLibre logs every miss itself, and a satellite tile
   // that does not exist over open ocean is normal rather than news.
-  map.on('error', (e) => console.warn('globe:', e.error?.message || e.type));
+  map.on('error', (e) => {
+    if ([401, 403, 429].includes(e.error?.status) && mapboxKind(e.error?.url)) refused(e.error.status);
+    else console.warn('globe:', e.error?.message || e.type);
+  });
 }
 
 function wire() {

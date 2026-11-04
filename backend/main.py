@@ -1,4 +1,5 @@
 import datetime
+import json
 import os
 import shutil
 import subprocess
@@ -302,6 +303,29 @@ def update_settings(body: dict = Body(...)):
     for key, value in body.items():
         db.set_setting(key, value)
     return {"ok": True}
+
+
+_mapbox_lock = threading.Lock()
+
+
+@app.post("/api/mapbox/usage")
+def mapbox_usage(body: dict = Body(...)):
+    """Add the Mapbox tiles a browser requested to this month's tally.
+
+    Kept here rather than in the browser so every tab and device on this server
+    counts against one total. Months are UTC calendar months."""
+    month = time.strftime("%Y-%m", time.gmtime())
+    with _mapbox_lock:
+        try:
+            usage = json.loads(db.get_setting("mapbox_usage", "") or "{}")
+        except ValueError:
+            usage = {}
+        if usage.get("month") != month:
+            usage = {"month": month, "styles": 0, "raster": 0}
+        for kind in ("styles", "raster"):
+            usage[kind] = int(usage.get(kind) or 0) + max(0, int(body.get(kind) or 0))
+        db.set_setting("mapbox_usage", json.dumps(usage))
+    return usage
 
 
 @app.get("/api/browse")

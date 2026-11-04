@@ -2,6 +2,7 @@ import { api, thumbUrl } from './api.js';
 import { state, params, emit, on, boundsToBbox, fmtNum, fmtDateTime, dayColor } from './state.js';
 import { el, toast, escapeHtml, stripTags } from './ui.js';
 import * as globe from './globe.js';
+import { tileSpec, count, tileFailed } from './basemaps.js';
 
 const MAX_MARKERS = 60000;
 const MAX_PATH = 5000;
@@ -39,9 +40,28 @@ function hasSize() {
 
 const bases = {};
 
-// CARTO serves an "API key required" watermark in place of every tile without one.
-const cartoUrl = (key) =>
-  `https://basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png?key=${encodeURIComponent(key || '')}`;
+function makeBase(name) {
+  const t = tileSpec(name, '{r}');
+  // A 512px tile at zoom z is drawn where Leaflet expects 256px tiles at z+1.
+  const offset = t.tileSize === 512 ? -1 : 0;
+  const layer = L.tileLayer(t.url, {
+    attribution: t.attribution,
+    maxZoom: 22, maxNativeZoom: t.maxzoom - offset, tileSize: t.tileSize, zoomOffset: offset,
+  });
+  if (t.kind) {
+    layer.on('tileloadstart', () => count(t.kind));
+    layer.on('tileerror', (e) => tileFailed(e.tile.src));
+  }
+  return layer;
+}
+
+/** (Re)build the three bases from the current provider, keeping whichever is shown. */
+function buildBases() {
+  const shown = Object.keys(bases).find((name) => map.hasLayer(bases[name])) || 'dark';
+  Object.values(bases).forEach((layer) => map.removeLayer(layer));
+  ['dark', 'streets', 'satellite'].forEach((name) => { bases[name] = makeBase(name); });
+  bases[shown].addTo(map);
+}
 
 export function initMap() {
   map = L.map('map', {
@@ -54,19 +74,7 @@ export function initMap() {
     boxZoom: false,
   });
 
-  bases.dark = L.tileLayer(cartoUrl(state.config?.settings?.carto_key), {
-    attribution: '&copy; OpenStreetMap contributors, &copy; CARTO',
-    maxZoom: 22, maxNativeZoom: 20,
-  });
-  bases.streets = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '&copy; OpenStreetMap contributors',
-    maxZoom: 22, maxNativeZoom: 19,
-  });
-  bases.satellite = L.tileLayer(
-    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-    { attribution: 'Imagery &copy; Esri', maxZoom: 22, maxNativeZoom: 19 },
-  );
-  bases.dark.addTo(map);
+  buildBases();
 
   map.on('moveend', () => {
     // A hidden pane is a zero-size container, and Leaflet still fires moveend
@@ -98,7 +106,7 @@ export function initMap() {
   on('globeReady', () => { if (mode === 'globe') render(); });
   on('selection', () => { if (mode === 'points') render(); });
   on('dayNoteSaved', () => { if (showNotes) drawNotes(); });
-  on('cartoKey', (key) => bases.dark.setUrl(cartoUrl(key)));
+  on('basemaps', buildBases);
   // A dark basemap under a light UI reads as a bug, so the two move together.
   on('theme', (mode2) => setBase(mode2 === 'light' ? 'streets' : 'dark'));
 }

@@ -3,6 +3,7 @@ import { state, emit, fmtNum } from './state.js';
 import { el, modal, toast, escapeHtml, confirmModal } from './ui.js';
 import { cloudBlock, refreshPanel } from './cloud.js';
 import { themeChoice, setTheme } from './theme.js';
+import { MAPBOX_FREE, usageNow, settingsChanged } from './basemaps.js';
 
 let pollTimer = null;
 let scanning = false;
@@ -107,6 +108,16 @@ export async function openSettings() {
     <div class="row"><label>CARTO key</label>
       <input type="text" id="s-carto" placeholder="Needed for the dark map - free at carto.com/basemaps/apikey" autocomplete="off" spellcheck="false">
     </div>
+    <div class="row"><label>Map provider</label>
+      <select id="s-provider">
+        <option value="free">CARTO, OpenStreetMap, Esri</option>
+        <option value="mapbox">Mapbox, free maps once its free tier is used</option>
+      </select>
+    </div>
+    <div class="row"><label>Mapbox token</label>
+      <input type="text" id="s-mapbox" placeholder="Public token (pk.…) from account.mapbox.com" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="row"><label>Mapbox this month</label><span id="s-mapbox-usage" class="muted small"></span></div>
 
     ${shareBlock(c.share)}
     ${cloudBlock()}
@@ -127,6 +138,9 @@ export async function openSettings() {
     box.querySelector('#s-thumb').value = c.settings.thumb_size || '256';
     box.querySelector('#s-preview').value = c.settings.preview_size || '1600';
     box.querySelector('#s-carto').value = c.settings.carto_key || '';
+    box.querySelector('#s-provider').value = c.settings.map_provider || 'free';
+    box.querySelector('#s-mapbox').value = c.settings.mapbox_token || '';
+    mapboxUsage(box);
     box.querySelector('#s-theme').value = themeChoice();
     box.querySelector('#s-theme').onchange = (e) => setTheme(e.target.value);
     renderRoots(box);
@@ -141,12 +155,15 @@ export async function openSettings() {
     };
     box.querySelector('#s-thumb').onchange = (e) => api.post('/api/config/settings', { thumb_size: e.target.value });
     box.querySelector('#s-preview').onchange = (e) => api.post('/api/config/settings', { preview_size: e.target.value });
-    box.querySelector('#s-carto').onchange = async (e) => {
-      const key = e.target.value.trim();
-      await guard(api.post('/api/config/settings', { carto_key: key }), 'Could not save the key');
-      state.config.settings.carto_key = key;
-      emit('cartoKey', key);
+    const saveMap = async (patch) => {
+      await guard(api.post('/api/config/settings', patch), 'Could not save the map setting');
+      Object.assign(state.config.settings, patch);
+      settingsChanged();
+      mapboxUsage(box);
     };
+    box.querySelector('#s-carto').onchange = (e) => saveMap({ carto_key: e.target.value.trim() });
+    box.querySelector('#s-provider').onchange = (e) => saveMap({ map_provider: e.target.value });
+    box.querySelector('#s-mapbox').onchange = (e) => saveMap({ mapbox_token: e.target.value.trim() });
     box.querySelector('[data-act=rethumb]').onclick = async () => {
       const res = await api.post('/api/thumbs/clear', {});
       toast(`${fmtNum(res.removed)} cached thumbnails cleared`);
@@ -176,6 +193,18 @@ export async function openSettings() {
     wireShare(box);
     refreshPanel();
   });
+}
+
+function mapboxUsage(box) {
+  const slot = box.querySelector('#s-mapbox-usage');
+  // The dialog may have closed while a save was on its way.
+  if (!slot) return;
+  const u = usageNow();
+  const pct = (kind) => Math.min(100, Math.round((u[kind] / MAPBOX_FREE[kind]) * 100));
+  slot.textContent =
+    `${fmtNum(u.styles)} of ${fmtNum(MAPBOX_FREE.styles)} map tiles (${pct('styles')}%) · `
+    + `${fmtNum(u.raster)} of ${fmtNum(MAPBOX_FREE.raster)} satellite tiles (${pct('raster')}%)`
+    + (u.refused ? ` · refused by Mapbox (${u.refused}), using the free maps` : '');
 }
 
 function shareBlock(share) {
