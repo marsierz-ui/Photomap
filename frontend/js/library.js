@@ -129,6 +129,9 @@ export async function openSettings() {
     <div class="actions" style="justify-content:flex-start;margin:4px 0 0"><button class="btn tiny" data-act="heat-reset">Reset heat map</button></div>
 
     <div class="row" style="margin-top:14px"><label>Place names</label><span id="s-places" class="muted small">…</span></div>
+    <div class="row"><label>Names in</label>
+      <select id="s-place-lang" style="flex:1"></select></div>
+    <div class="row"><label></label><span id="s-place-lang-status" class="muted small"></span></div>
     <div class="row"><label>Weather</label>
       <select id="s-weather">
         <option value="0">Off</option>
@@ -287,7 +290,55 @@ async function placesStatus(box) {
     };
     return;
   }
-  if (st.downloading || st.pending) setTimeout(() => placesStatus(box), 3000);
+  languageStatus(box, st);
+  if (st.downloading || st.pending || st.names.running) setTimeout(() => placesStatus(box), 3000);
+}
+
+// Languages offered for place names: the browser's own first, then a fixed
+// list of the common ones. Any ISO 639-1 code GeoNames knows would work.
+const PLACE_LANGS = ['en', 'de', 'fr', 'es', 'it', 'pt', 'nl', 'pl', 'cs', 'sv', 'da', 'no', 'fi', 'ga',
+  'el', 'hu', 'ro', 'tr', 'ru', 'uk', 'ja', 'zh', 'ko', 'ar', 'he', 'hi'];
+
+function languageStatus(box, st) {
+  const select = box.querySelector('#s-place-lang');
+  const slot = box.querySelector('#s-place-lang-status');
+  if (!select || !slot) return;
+  if (!select.options.length) {
+    const own = (navigator.language || 'en').slice(0, 2).toLowerCase();
+    const codes = [own, ...PLACE_LANGS.filter((c) => c !== own)];
+    let names = null;
+    try { names = new Intl.DisplayNames(undefined, { type: 'language' }); } catch { /* old browser */ }
+    select.innerHTML = '<option value="">As GeoNames spells them (mostly local: Wien, Gaillimh)</option>'
+      + codes.map((c) => `<option value="${c}">${escapeHtml(names?.of(c) || c)}</option>`).join('');
+    select.onchange = async () => {
+      await guard(api.post('/api/geocode/language', { lang: select.value }), 'Could not change the language');
+      placesStatus(box);
+    };
+  }
+  if (document.activeElement !== select) select.value = st.language || '';
+  select.disabled = !st.available;
+  const n = st.names;
+  if (!st.available) {
+    slot.textContent = 'Download place names first.';
+  } else if (!st.language) {
+    slot.textContent = '';
+  } else if (n.running) {
+    slot.textContent = n.total && n.done < n.total
+      ? `Downloading translations… ${Math.round((n.done / n.total) * 100)}% of ${fmtNum(Math.round(n.total / 1e6))} MB (once per language)`
+      : 'Picking out the names for this language…';
+  } else if (st.translated) {
+    slot.textContent = st.pending ? `Renaming ${fmtNum(st.pending)} photos…` : 'On. Search finds places by either name.';
+  } else {
+    // No table for this language: an older place list, or a failed download.
+    slot.innerHTML = `${n.error ? `Failed: ${escapeHtml(n.error)}. ` : ''}${st.ids
+      ? 'Translations need GeoNames\' alternate names (about 190 MB download, kept as a few MB).'
+      : 'This place list predates translations; download it again first.'}
+      <button class="btn tiny" data-act="names">${st.ids ? 'Download translations' : 'Download place names again'}</button>`;
+    slot.querySelector('[data-act=names]').onclick = async () => {
+      await guard(api.post(st.ids ? '/api/geocode/names' : '/api/geocode/download'), 'Could not start the download');
+      placesStatus(box);
+    };
+  }
 }
 
 /** How far the weather lookup has got. Sends positions and dates to

@@ -200,7 +200,7 @@ function wireSearch() {
         ...saved,
         ...res.items.map((h) => ({
           label: `${h.name}${h.region ? `, ${h.region}` : ''}`, name: h.name, lat: h.lat, lon: h.lon,
-          zoom: h.population > 500000 ? 11 : 13, note: `${flag(h.cc)} ${countryName(h.cc)}`,
+          zoom: h.population > 500000 ? 11 : 13, note: `${h.local ? `${h.local} · ` : ''}${flag(h.cc)} ${countryName(h.cc)}`,
         })),
       ];
       list.innerHTML = results.map((r, i) => `<button data-i="${i}">${escapeHtml(r.label)} <span class="muted">${escapeHtml(r.note)}</span></button>`).join('')

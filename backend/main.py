@@ -393,6 +393,26 @@ def geocode_download():
     return geocode.status()
 
 
+@app.post("/api/geocode/language")
+def geocode_language(body: dict = Body(...)):
+    """Choose the language place names are shown in ('' for GeoNames' own)."""
+    try:
+        return geocode.set_language(str(body.get("lang") or ""))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.post("/api/geocode/names")
+def geocode_names():
+    """Fetch (again) the alternate names for the chosen language."""
+    lang = geocode.language()
+    if not lang:
+        raise HTTPException(400, "Choose a language first")
+    if not geocode.status()["names"]["running"]:
+        threading.Thread(target=geocode.download_names, args=(lang,), daemon=True).start()
+    return geocode.status()
+
+
 @app.get("/api/countries")
 def countries(request: Request):
     """Located photos per country, with how many places and days in each."""

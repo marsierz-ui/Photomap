@@ -10,11 +10,19 @@ country outlines.
 Positions change after the fact (fixes, undo, a rescan), so each photo records
 the coordinates it was named for in `place_at` and anything that no longer
 matches is looked up again. No write site has to remember to clear it.
+
+Names come as GeoNames spells them, which is mostly the local form ("Wien",
+"Gaillimh"). A language can be chosen instead: GeoNames' alternate names file
+is streamed once for it and reduced to that language's name for each place on
+the list (and each region), so "Vienna" or "Wiedeń" is a lookup in a small
+table. Changing language renames every photo.
 """
 import io
-import unicodedata
 import math
+import os
+import tempfile
 import threading
+import unicodedata
 import urllib.request
 import zipfile
 
@@ -31,10 +39,15 @@ COUNTRY_KM = 150
 
 _index = None
 _pops: list = []
+_ids: list = []
+_region_ids: list = []
 _folded = None
 _index_lock = threading.Lock()
 _fill_lock = threading.Lock()
 _download = {"running": False, "error": None}
+# The alternate names download: which language, how far through the archive.
+_names = {"running": False, "error": None, "lang": "", "done": 0, "total": 0}
+_translated: dict = {}  # language -> {geonameid: name}, loaded on first use
 
 STALE = (
     "p.lat IS NOT NULL AND (p.place_at IS NULL"
@@ -46,12 +59,34 @@ def available() -> bool:
     return PLACES.exists()
 
 
+def names_file(lang: str):
+    return DIR / f"names-{lang}.tsv"
+
+
+def language() -> str:
+    """The chosen language for place names, '' for GeoNames' own spelling."""
+    return (db.get_setting("place_lang") or "").strip().lower()
+
+
+def has_ids() -> bool:
+    """Whether places.tsv carries GeoNames ids, which translations are keyed by.
+    Lists downloaded before translations existed do not."""
+    if not available():
+        return False
+    with PLACES.open(encoding="utf-8") as f:
+        return len(f.readline().rstrip("\n").split("\t")) >= 8
+
+
 def status() -> dict:
     pending = 0
     if available():
         pending = db.connect().execute(f"SELECT COUNT(*) c FROM photos p WHERE {STALE}").fetchone()["c"]
+    lang = language()
     return {"available": available(), "downloading": _download["running"],
-            "error": _download["error"], "pending": pending, "filling": _fill_lock.locked()}
+            "error": _download["error"], "pending": pending, "filling": _fill_lock.locked(),
+            "language": lang, "ids": has_ids(),
+            "translated": bool(lang) and names_file(lang).exists(),
+            "names": {k: _names[k] for k in ("running", "error", "lang", "done", "total")}}
 
 
 # ------------------------------------------------------------------ download
@@ -63,11 +98,13 @@ def download() -> None:
     _download.update(running=True, error=None)
     try:
         with urllib.request.urlopen(SOURCE + "admin1CodesASCII.txt", timeout=60) as r:
-            regions = {}
+            regions, region_ids = {}, {}
             for line in r.read().decode("utf-8").splitlines():
                 parts = line.split("\t")
                 if len(parts) >= 2:
                     regions[parts[0]] = parts[1]
+                if len(parts) >= 4:
+                    region_ids[parts[0]] = parts[3]
         with urllib.request.urlopen(SOURCE + "cities1000.zip", timeout=300) as r:
             archive = zipfile.ZipFile(io.BytesIO(r.read()))
         rows = []
@@ -76,21 +113,128 @@ def download() -> None:
                 c = raw.rstrip("\n").split("\t")
                 if len(c) < 11:
                     continue
-                region = regions.get(f"{c[8]}.{c[10]}", "")
+                key = f"{c[8]}.{c[10]}"
                 pop = c[14] if len(c) > 14 else ""
-                rows.append("\t".join((c[1], c[4], c[5], c[8], region, pop)))
+                # name, lat, lon, country, region, population, id, region id
+                rows.append("\t".join((c[1], c[4], c[5], c[8], regions.get(key, ""), pop,
+                                       c[0], region_ids.get(key, ""))))
         DIR.mkdir(parents=True, exist_ok=True)
         tmp = PLACES.with_suffix(".tmp")
         tmp.write_text("\n".join(rows), encoding="utf-8")
         tmp.replace(PLACES)
         global _index
         _index = None
+        rename()
     except Exception as exc:  # network, disk: reported to the settings dialog
         _download["error"] = str(exc)
     finally:
         _download["running"] = False
+    lang = language()
+    if lang and not names_file(lang).exists():
+        download_names(lang)
     if available():
         fill()
+
+
+def download_names(lang: str) -> None:
+    """Fetch GeoNames' alternate names and keep one language's, for the places
+    on our list. The archive is about 190 MB; it is streamed to a temporary file
+    (a zip has to be seekable), read once, and deleted, leaving a table of a few
+    megabytes. Run in a thread; see status()."""
+    lang = lang.strip().lower()
+    if _names["running"] or not lang:
+        return
+    _names.update(running=True, error=None, lang=lang, done=0, total=0)
+    part = None
+    try:
+        if not has_ids():
+            raise RuntimeError("the place list predates translations: download place names again first")
+        wanted = set()
+        for line in PLACES.read_text(encoding="utf-8").splitlines():
+            c = line.split("\t")
+            wanted.add(c[6])
+            if c[7]:
+                wanted.add(c[7])
+        DIR.mkdir(parents=True, exist_ok=True)
+        fd, part = tempfile.mkstemp(dir=DIR, suffix=".zip.part")
+        with os.fdopen(fd, "wb") as out, urllib.request.urlopen(SOURCE + "alternateNamesV2.zip", timeout=120) as r:
+            _names["total"] = int(r.headers.get("Content-Length") or 0)
+            while True:
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                out.write(chunk)
+                _names["done"] += len(chunk)
+        best: dict = {}
+        with zipfile.ZipFile(part) as archive:
+            member = next(n for n in archive.namelist() if n.startswith("alternateNames") and n.endswith(".txt"))
+            with archive.open(member) as f:
+                for raw in io.TextIOWrapper(f, encoding="utf-8"):
+                    c = raw.rstrip("\n").split("\t")
+                    # id, geonameid, language, name, preferred, short, colloquial, historic, from, to
+                    if len(c) < 4 or c[2] != lang or c[1] not in wanted:
+                        continue
+                    flag = lambda k: len(c) > k and c[k] == "1"  # noqa: E731
+                    if flag(6) or flag(7) or (len(c) > 9 and c[9]):
+                        continue  # slang, or a former name
+                    rank = 0 if flag(4) else 2 if flag(5) else 1
+                    if c[1] not in best or rank < best[c[1]][0]:
+                        best[c[1]] = (rank, c[3])
+        tmp = names_file(lang).with_suffix(".tmp")
+        tmp.write_text("\n".join(f"{k}\t{v[1]}" for k, v in best.items()), encoding="utf-8")
+        tmp.replace(names_file(lang))
+        _translated.pop(lang, None)
+        if language() == lang:
+            rename()
+    except Exception as exc:  # network, disk, a changed archive layout
+        _names["error"] = str(exc)
+    finally:
+        _names["running"] = False
+        if part and os.path.exists(part):
+            os.remove(part)
+    kick()
+
+
+def set_language(lang: str) -> dict:
+    """Choose the language place names are shown in; '' for GeoNames' own.
+    Fetches that language's names when they are not here yet, and renames
+    every photo either way."""
+    lang = (lang or "").strip().lower()[:8]
+    if lang and not all(ch.isalpha() or ch == "-" for ch in lang):
+        raise ValueError("Not a language code")
+    if lang == language():
+        return status()
+    db.set_setting("place_lang", lang)
+    global _folded
+    _folded = None
+    rename()
+    if lang and not names_file(lang).exists() and has_ids():
+        threading.Thread(target=download_names, args=(lang,), daemon=True).start()
+    kick()
+    return status()
+
+
+def rename() -> None:
+    """Mark every named photo for naming again, in the current language."""
+    conn = db.connect()
+    with db.write_lock:
+        conn.execute("UPDATE photos SET place_at=NULL WHERE place_at IS NOT NULL")
+        conn.commit()
+
+
+def _names_for(lang: str) -> dict:
+    if not lang:
+        return {}
+    if lang not in _translated:
+        path = names_file(lang)
+        table = {}
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                gid, _, name = line.partition("\t")
+                if name:
+                    table[gid] = name
+        _translated[lang] = table
+    return _translated[lang]
 
 
 # --------------------------------------------------------------------- lookup
@@ -100,18 +244,20 @@ def _load():
     with _index_lock:
         if _index is None:
             names, lats, lons, ccs, regions, grid = [], [], [], [], [], {}
-            pops = []
+            pops, ids, region_ids = [], [], []
             for i, line in enumerate(PLACES.read_text(encoding="utf-8").splitlines()):
-                # Files written before population was kept have five columns.
+                # Older lists have five columns (no population) or six (no ids).
                 name, lat, lon, cc, region, *rest = line.split("\t")
                 lat, lon = float(lat), float(lon)
                 names.append(name); lats.append(lat); lons.append(lon)
                 ccs.append(cc); regions.append(region)
                 pops.append(int(rest[0]) if rest and rest[0].isdigit() else 0)
+                ids.append(rest[1] if len(rest) > 1 else "")
+                region_ids.append(rest[2] if len(rest) > 2 else "")
                 grid.setdefault((math.floor(lat), math.floor(lon)), []).append(i)
             _index = (names, lats, lons, ccs, regions, grid)
-            global _pops, _folded
-            _pops = pops
+            global _pops, _folded, _ids, _region_ids
+            _pops, _ids, _region_ids = pops, ids, region_ids
             _folded = None
     return _index
 
@@ -140,8 +286,18 @@ def lookup(lat: float, lon: float) -> tuple[str, str]:
                         best, best_km = i, km
     if best is None or best_km > COUNTRY_KM:
         return "", ""
-    place = ", ".join(p for p in (names[best], regions[best]) if p) if best_km <= PLACE_KM else ""
-    return place, ccs[best]
+    if best_km > PLACE_KM:
+        return "", ccs[best]
+    name, region = _local(best)
+    return ", ".join(p for p in (name, region) if p), ccs[best]
+
+
+def _local(i: int) -> tuple[str, str]:
+    """Place i's name and region, in the chosen language where GeoNames has it."""
+    names, _, _, _, regions, _ = _load()
+    table = _names_for(language())
+    return (table.get(_ids[i]) or names[i],
+            (table.get(_region_ids[i]) if _region_ids[i] else None) or regions[i])
 
 
 def place_for(photo: dict) -> dict:
@@ -206,16 +362,24 @@ def search(query: str, limit: int = 10) -> list[dict]:
     names, lats, lons, ccs, regions, _ = _load()
     global _folded
     if _folded is None:
-        _folded = [_fold(n) for n in names]
+        # Both spellings are searched: "Vienna" and "Wien" find the same place.
+        table = _names_for(language())
+        _folded = [(_fold(n), _fold(table.get(_ids[i], ""))) for i, n in enumerate(names)]
     hits = []
-    for i, name in enumerate(_folded):
-        if q not in name:
-            continue
-        rank = 0 if name == q else 1 if name.startswith(q) else 2 if f" {q}" in name else 3
-        hits.append((rank, -_pops[i], i))
+    for i, pair in enumerate(_folded):
+        rank = 9
+        for name in pair:
+            if name and q in name:
+                rank = min(rank, 0 if name == q else 1 if name.startswith(q) else 2 if f" {q}" in name else 3)
+        if rank < 9:
+            hits.append((rank, -_pops[i], i))
     hits.sort()
-    return [{"name": names[i], "region": regions[i], "cc": ccs[i],
-             "lat": lats[i], "lon": lons[i], "population": _pops[i]} for _, _, i in hits[:limit]]
+    out = []
+    for _, _, i in hits[:limit]:
+        name, region = _local(i)
+        out.append({"name": name, "local": names[i] if name != names[i] else "", "region": region,
+                    "cc": ccs[i], "lat": lats[i], "lon": lons[i], "population": _pops[i]})
+    return out
 
 
 # GeoNames' continent for each country and territory code. Fixed: borders do
