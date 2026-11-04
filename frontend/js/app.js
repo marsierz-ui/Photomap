@@ -12,6 +12,9 @@ import { initCloud } from './cloud.js';
 import { initDupes } from './dupes.js';
 import { initJournal } from './journal.js';
 import { initTheme } from './theme.js';
+import { initTrips } from './trips.js';
+import { initPlaces } from './places.js';
+import { initTracks, geotagDialog } from './tracklog.js';
 import { setFavorite, deleteDialog, fixLocationsDialog, setLocationDialog, undoLocationDialog } from './actions.js';
 
 // ------------------------------------------------------------------- views
@@ -25,6 +28,7 @@ function showView(name) {
   if (name === 'gallery') emit('galleryShown');
   if (name === 'journal') emit('journalShown');
   if (name === 'insights') emit('insightsShown');
+  if (name === 'trips') emit('tripsShown');
   if (name === 'dupes') emit('dupesShown');
 }
 
@@ -74,6 +78,7 @@ function wireSelection() {
   el('sel-clear').onclick = () => { state.selection.clear(); emit('selection'); };
   el('sel-album').onclick = () => pickAlbumDialog([...state.selection]);
   el('sel-fav').onclick = () => setFavorite([...state.selection], true);
+  el('sel-track').onclick = () => geotagDialog([...state.selection]);
   el('sel-locfix').onclick = () => fixLocationsDialog([...state.selection]);
   el('sel-setloc').onclick = () => setLocationDialog([...state.selection]);
   el('sel-undoloc').onclick = () => undoLocationDialog([...state.selection]);
@@ -106,6 +111,9 @@ async function main() {
   initCloud();
   initDupes();
   initJournal();
+  initTrips();
+  initPlaces();
+  initTracks();
   wireSelection();
   wireDrawer();
 
@@ -115,6 +123,7 @@ async function main() {
   });
   on('showMap', () => showView('map'));
   on('showJournal', () => showView('journal'));
+  on('showView', (name) => showView(name));
 
   document.addEventListener('keydown', (e) => {
     // isContentEditable, not a selector: without it the single-letter view
@@ -129,6 +138,7 @@ async function main() {
     if (e.key === 'm') showView('map');
     if (e.key === 'i') showView('insights');
     if (e.key === 'j') showView('journal');
+    if (e.key === 't') showView('trips');
   });
 
   await refreshAll();

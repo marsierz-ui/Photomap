@@ -1,5 +1,5 @@
 import { api, guard } from './api.js';
-import { state, params, on, fmtNum, fmtBytes, fmtDate } from './state.js';
+import { state, params, on, emit, setFilters, fmtNum, fmtBytes, fmtDate, flag } from './state.js';
 import { el, escapeHtml, toast } from './ui.js';
 import { countryName } from './lightbox.js';
 
@@ -12,6 +12,13 @@ export function initInsights() {
   on('insightsShown', render);
   on('filters', () => { if (state.view === 'insights') render(); });
   el('insights').addEventListener('click', async (e) => {
+    const row = e.target.closest('[data-cc]');
+    if (row) {
+      // A country row narrows everything to it; the map is where that shows.
+      setFilters({ country: state.filters.country === row.dataset.cc ? '' : row.dataset.cc });
+      emit('showMap');
+      return;
+    }
     if (e.target.dataset.act !== 'places') return;
     e.target.disabled = true;
     await guard(api.post('/api/geocode/download'), 'Could not start the download');
@@ -44,9 +51,10 @@ async function render() {
       ${card('On disk', fmtBytes(stats.bytes))}
       ${card('First photo', fmtDate(stats.first_ts))}
       ${card('Latest photo', fmtDate(stats.last_ts))}
-      ${countries.items.length ? card('Countries', fmtNum(countries.items.length)) : ''}
+      ${countries.items.length ? card('Countries', `${fmtNum(countries.items.length)} <span class="muted" style="font-size:13px">(${worldPct(countries.world)} of the world)</span>`) : ''}
       ${stats.missing ? card('Missing files', fmtNum(stats.missing)) : ''}
     </div>
+    ${countries.items.length ? continentChart(countries) : ''}
     ${countryChart(countries, stats.geo)}
     ${barChart('By hour of day', hour.items, (k) => `${k}`, 24, (i) => i)}
     ${barChart('By weekday', dow.items, (k) => DOW[k], 7, (i) => i)}
@@ -77,8 +85,8 @@ function countryChart(res, located) {
   } else if (!res.items.length) {
     body = `<span class="muted">${res.pending ? `Naming ${fmtNum(res.pending)} photos…` : 'No located photos for these filters'}</span>`;
   } else {
-    const rows = res.items.map((c) => `<div class="hbar">
-      <span title="${escapeHtml(countryName(c.cc))}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(countryName(c.cc))}</span>
+    const rows = res.items.map((c) => `<div class="hbar clickable${state.filters.country === c.cc ? ' active' : ''}" data-cc="${escapeHtml(c.cc)}" title="Show only ${escapeHtml(countryName(c.cc))}">
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${flag(c.cc)} ${escapeHtml(countryName(c.cc))}</span>
       <span class="track"><span class="fill" style="width:${((c.c / res.items[0].c) * 100).toFixed(2)}%"></span></span>
       <span class="n">${fmtNum(c.c)} <span class="muted">· ${fmtNum(c.days)} day${c.days === 1 ? '' : 's'} · ${fmtNum(c.places)} place${c.places === 1 ? '' : 's'} · ${fmtDate(c.first_ts)} - ${fmtDate(c.last_ts)}</span></span>
     </div>`).join('');
@@ -87,6 +95,28 @@ function countryChart(res, located) {
   return `<div class="chart countries">
     <h4>Countries <span class="muted" style="font-weight:400">${res.items.length ? `photos in each, of ${fmtNum(located)} located` : ''}</span></h4>
     ${body}
+  </div>`;
+}
+
+const CONTINENT_NAMES = {
+  EU: 'Europe', AS: 'Asia', AF: 'Africa', NA: 'North America', SA: 'South America', OC: 'Oceania', AN: 'Antarctica',
+};
+
+/** Share of the world's countries and territories (GeoNames counts 250). */
+const worldPct = (w) => {
+  const pct = w.total ? (w.visited / w.total) * 100 : 0;
+  return `${pct >= 1 ? Math.round(pct) : pct.toFixed(1)}%`;
+};
+
+/** The scratch-map view: how much of each continent has a photo in it. */
+function continentChart(res) {
+  const rows = res.continents
+    .filter((c) => c.visited || c.code !== 'AN')
+    .sort((a, b) => b.visited / b.total - a.visited / a.total)
+    .map((c) => hbar(`${CONTINENT_NAMES[c.code]} · ${c.visited} of ${c.total}`, c.visited, c.total)).join('');
+  return `<div class="chart">
+    <h4>Seen of the world <span class="muted" style="font-weight:400">${fmtNum(res.world.visited)} of ${fmtNum(res.world.total)} countries and territories · ${worldPct(res.world)}</span></h4>
+    ${rows}
   </div>`;
 }
 

@@ -118,7 +118,69 @@ the lightbox. **Photos** turns the bubbles off when they get in the way.
 the GeoNames list of places with 1,000+ people (CC BY 4.0, about 11 MB, downloaded once
 from **⚙ → Place names** or the Insights tab). Each photo gets the nearest place, so a
 photo taken right at a border can be filed under the neighbour. Positions changed later
-are named again on their own. The lightbox shows the place; Insights lists countries.
+are named again on their own. The lightbox shows the place, gallery tiles show the town
+next to the date, and the search box finds photos by place ("Kilronan") or by country,
+typed in the browser's own language ("Irland" works in German). Insights lists countries
+with a flag each - click one to narrow everything to it - and a scratch-map card: how many
+of the world's 250 countries and territories you have photos in, and how much of each
+continent.
+
+**Trips** - worked out from the photos, nothing to set up. A day is *away* when a photo
+that day was taken more than 50 km from home (15-200 km, chosen on the Trips tab); away
+days in a row are one trip, and so are away days a day or two apart with no photos in
+between, because nobody photographs every day of a holiday. A day with photos only at
+home ends it. Each trip card has a cover (a favourite if there is one), dates, the
+countries with their flags, the towns, how far it went and how far you travelled between
+photos. **Map** and **Photos** narrow the other views to its dates, **Replay** flies the
+route, **Rename** replaces the generated name, and **Book** makes it a printable photo book
+(below).
+
+Home is the saved place marked as home. Without one it is guessed - the spot with photos
+on the most different days - and the Trips tab says so and offers to save it. Trips are
+recomputed every time the tab opens (0.4 s for 100,000 photos), so a fixed location or a
+GPX import shows up straight away, and nothing can go stale.
+
+**Trip book** - a print layout of one trip: a cover photo with the title and dates, a
+route map, then each day with its towns, its journal note and its photos. Photos are laid
+in justified rows, every row the full page width, and each page's rows are then stretched
+to fill the page, cropping a little (at most 30%) rather than leaving half a page white;
+a lone photo at the end of a day joins the row above. A4 portrait or landscape, or a 21 cm
+square; fewer or more photos per page; favourites only. **Print or save as PDF** uses the
+browser's own print dialog - nothing is uploaded, and the PDF is yours to print anywhere.
+
+**Saved places** - give a spot a name ("Home", "Grandma's", "the cottage") and a size,
+from a building to a city. Right-click the map, or **+ New** in the sidebar, where a town
+name, coordinates or a click on the map all work. Clicking a place narrows every view to
+the photos inside it; ⌂ makes it home. They are drawn on the map, and the map's **Find a
+place…** box searches them along with every GeoNames town, offline.
+
+**GPS tracks** - GPX files from a watch or logger app, and Google location exports:
+Takeout's `Records.json`, the monthly Semantic Location History files, the newer
+on-device Timeline export (Android `Timeline.json` and the iPhone variant), or a whole
+Takeout `.zip`. Import them in **⚙ → GPS tracks**; **Tracks** on the map draws them.
+
+Their main use is placing photos from a camera with no GPS, the way Lightroom does it:
+each photo goes where the track says you were when it was taken, interpolated between the
+two nearest track points when both are within the largest gap (30 minutes by default).
+The catch is the clock - tracks keep UTC, cameras keep whatever they were set to - so
+**Place photos from tracks…** works the offset out: it tries every quarter hour from
+-14 h to +14 h against the photos that do have GPS from the same time (your phone's) and
+picks the offset that puts them closest to the track. Without such photos it falls back to
+this computer's time zone on each photo's date, or an offset you type, and shows how many
+photos each choice would place before anything changes. Placed photos are tagged
+**From a GPS track** in the Location filter, survive a rescan, and **Undo location
+changes** puts them back.
+
+**No-location queue** - photos without a position never reach the map, which is how they
+get forgotten. The sidebar counts them; **Review** opens them in the gallery, and then
+offers the ways to place them: from GPS tracks, from the nearest phone photo within two
+hours, or all of them on one spot. The timeline marks the days that have any with an
+amber tick under the bars.
+
+**Your data** - **⚙ → Your data** downloads every located photo as GeoJSON or CSV
+(path, time, coordinates, place, country, camera, note) and every track as GPX. The index
+lives in one SQLite file on this machine, and these exports open in any map, GIS or
+spreadsheet without this app.
 
 **Videos** - clips are indexed beside photos rather than in a section of their own:
 one row, one point on the map, one place in the timeline, one tile in the gallery with
@@ -1089,8 +1151,13 @@ backend/
   videometa.py   the same, out of an .mp4/.mov container, standard library only
   scanner.py     threaded folder walk and index upsert
   thumbs.py      on-demand thumbnail/preview cache, video frames via ffmpeg
+  geocode.py     offline place names and place search from GeoNames
+  places.py      saved places: named circles, one of them home
+  trips.py       trips worked out from distance to home, day by day
+  tracks.py      GPX / Google Timeline import, clock-offset matching, geotagging
 frontend/
   index.html     single page, no build step
+  book.html      the printable trip book
   js/            ES modules: map, globe, gallery, journal, timeline, sidebar,
                  lightbox, insights, theme
   vendor/        leaflet + maplibre, served from here rather than a CDN
@@ -1110,9 +1177,16 @@ data/            photomap.db + thumbs/ (created on first run, safe to delete)
 
 Run the tests with `.venv\Scripts\python.exe tests\test_sync.py`,
 `tests\test_writeback.py`, `tests\test_nametime.py`, `tests\test_dupes.py`,
-`tests\test_videometa.py`, `tests\test_fixes.py`, `node tests\test_worker.mjs`, `node tests\test_exif.mjs`,
+`tests\test_videometa.py`, `tests\test_fixes.py`, `tests\test_places.py`, `tests\test_trips.py`, `node tests\test_worker.mjs`, `node tests\test_exif.mjs`,
 `node tests\test_uploadq.mjs`, `node tests\test_sw.mjs`, and (after
 `pip install botocore`) `tests\test_sigv4.py`.
+
+`tests\bench_large.py` builds a synthetic 100,000-photo library and times the map,
+trips, insights and export requests against a budget (`--photos N` for another size,
+`--serve PORT` to keep a server running on it). On a laptop-class machine every request
+is well inside its budget: the whole map's points in 0.2 s, trips in 0.4 s, the full
+GeoJSON export in 1 s. In the browser, the heat map draws 96,000 points in 0.7 s and
+switching to clusters takes 0.2 s.
 
 Rescanning is incremental: files whose size and mtime are unchanged are skipped.
 
@@ -1127,8 +1201,18 @@ because it is not part of the library any more.
 Everything the UI uses is a plain HTTP endpoint on `127.0.0.1:8712`, so the index is
 scriptable: `/api/points`, `/api/photos`, `/api/timeline`, `/api/dist`, `/api/stats`,
 `/api/albums`. All of them accept the same filter query params
-(`from`, `to`, `bbox`, `album`, `camera`, `gps`, `fav`, `q`), where `q` matches the
-path or the note.
+(`from`, `to`, `bbox`, `album`, `camera`, `gps`, `fav`, `q`, `near`, `country`), where
+`q` matches the path, the note or the place name (add `cc=IE,FR` to match those countries
+too), `near` is a saved place id and `country` a two-letter code.
+
+Saved places are `GET/POST /api/places` and `PATCH/DELETE /api/places/<id>`; place
+search is `GET /api/geocode/search?q=`. Trips are `GET /api/trips?away_km=50`, and
+`PUT /api/trips/<key>/title` names one. Tracks: `POST /api/tracks/import?name=<file>` with
+the file as the body, `GET /api/tracks`, `DELETE /api/tracks/<id>`,
+`GET /api/tracks/points`, `GET /api/tracks/offset` (the estimated camera clock offset)
+and `POST /api/tracks/geotag` (`offset_s`, `gap_min`, `include_approx`, `ids`,
+`dry_run`). Exports: `GET /api/export/locations?format=geojson|csv` (takes the filters)
+and `GET /api/export/tracks.gpx`.
 
 A video plays from `/api/photos/<id>/video`, which answers `Range` requests so a
 player can seek; `/api/photos/<id>/original` still hands over the whole file for a

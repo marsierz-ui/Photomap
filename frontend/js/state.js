@@ -3,7 +3,7 @@
 // every date read/write here uses UTC accessors on purpose.
 
 export const state = {
-  filters: { from: null, to: null, gps: 'any', album: null, camera: '', q: '', fav: false },
+  filters: { from: null, to: null, gps: 'any', album: null, camera: '', q: '', fav: false, near: null, country: '' },
   bounds: null,
   followMap: false,
   sort: 'date_desc',
@@ -14,6 +14,7 @@ export const state = {
   view: 'map',
   config: null,
   albums: [],
+  places: [],
 };
 
 const listeners = new Map();
@@ -41,7 +42,13 @@ export function params(opts = {}) {
   if (f.gps && f.gps !== 'any') p.set('gps', f.gps);
   if (f.album) p.set('album', f.album);
   if (f.camera) p.set('camera', f.camera);
-  if (f.q) p.set('q', f.q);
+  if (f.q) {
+    p.set('q', f.q);
+    const codes = countriesMatching(f.q);
+    if (codes.length) p.set('cc', codes.join(','));
+  }
+  if (f.near) p.set('near', f.near);
+  if (f.country) p.set('country', f.country);
   if (f.fav) p.set('fav', '1');
   if (bbox && state.followMap && state.bounds) p.set('bbox', state.bounds);
   Object.entries(opts.extra || {}).forEach(([k, v]) => p.set(k, v));
@@ -100,4 +107,45 @@ export function isoToTs(value, endOfDay = false) {
 export function tsToIso(ts) {
   if (ts == null) return '';
   return new Date(ts * 1000).toISOString().slice(0, 10);
+}
+
+// ------------------------------------------------------------------ countries
+
+const REGION_NAMES = (() => {
+  try { return new Intl.DisplayNames(undefined, { type: 'region' }); } catch { return null; }
+})();
+
+/** A country's name in the browser's language. */
+export const countryName = (cc) => {
+  try { return (REGION_NAMES && REGION_NAMES.of(cc)) || cc; } catch { return cc; }
+};
+
+/** A flag from a two-letter code: two regional indicator symbols. */
+export const flag = (cc) => (/^[A-Z]{2}$/.test(cc || '')
+  ? String.fromCodePoint(...[...cc].map((c) => 0x1f1a5 + c.charCodeAt(0))) : '');
+
+let ALL_CODES = null;
+function allCodes() {
+  if (ALL_CODES) return ALL_CODES;
+  ALL_CODES = [];
+  for (let a = 65; a <= 90; a += 1) {
+    for (let b = 65; b <= 90; b += 1) {
+      const cc = String.fromCharCode(a, b);
+      const name = countryName(cc);
+      // DisplayNames hands unknown codes back unchanged.
+      if (name && name !== cc) ALL_CODES.push([cc, fold(name)]);
+    }
+  }
+  return ALL_CODES;
+}
+
+const fold = (text) => String(text).normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+
+/** Country codes whose name, in the browser's language, starts with the query:
+ *  "irel" finds IE, so the search box finds photos by country name although the
+ *  index only stores the code. Needs three letters, so "a" is not 40 countries. */
+export function countriesMatching(query) {
+  const q = fold(query.trim());
+  if (q.length < 3) return [];
+  return allCodes().filter(([, name]) => name.startsWith(q) || name.includes(` ${q}`)).map(([cc]) => cc).slice(0, 12);
 }

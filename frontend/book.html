@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trip book</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>📖</text></svg>">
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<style>
+  :root { --paper: #fff; --ink: #1b2430; --soft: #5c6875; --bg: #e5eaf1; --accent: #0b72d8; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 Georgia, 'Times New Roman', serif; }
+  .bar {
+    position: sticky; top: 0; z-index: 10; display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center;
+    padding: 10px 16px; background: #fff; border-bottom: 1px solid #d5dde6; font: 13px system-ui, sans-serif;
+  }
+  .bar input[type=text] { font: inherit; padding: 4px 8px; border: 1px solid #c2ccd8; border-radius: 6px; width: 260px; }
+  .bar select { font: inherit; padding: 3px; }
+  .bar button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+  .bar .muted { color: var(--soft); }
+  #pages { display: flex; flex-direction: column; align-items: center; gap: 18px; padding: 20px 16px 60px; }
+  .page {
+    width: var(--pw); height: var(--ph); padding: 12mm; background: var(--paper); overflow: hidden;
+    box-shadow: 0 2px 12px rgba(20, 30, 45, .18); display: flex; flex-direction: column; position: relative;
+  }
+  .page .folio { position: absolute; bottom: 5mm; left: 0; right: 0; text-align: center; font-size: 9pt; color: var(--soft); }
+  .cover { justify-content: flex-end; padding: 0; color: #fff; background: #222 center / cover no-repeat; }
+  .cover .veil { padding: 14mm; background: linear-gradient(transparent, rgba(0,0,0,.72)); }
+  .cover h1 { font-size: 34pt; line-height: 1.1; margin: 0 0 4mm; font-weight: 600; }
+  .cover p { margin: 0; font-size: 12pt; opacity: .92; }
+  .mappage h2 { margin: 0 0 4mm; font-size: 16pt; font-weight: 500; }
+  .mappage .map { flex: 1; border-radius: 2mm; }
+  .mappage .stats { margin-top: 4mm; display: flex; gap: 10mm; font-size: 10pt; color: var(--soft); }
+  .mappage .stats b { display: block; font-size: 16pt; color: var(--ink); font-weight: 500; }
+  .dayhead { margin: 0 0 3mm; }
+  .dayhead h3 { margin: 0; font-size: 14pt; font-weight: 500; }
+  .dayhead .where { font-size: 10pt; color: var(--soft); }
+  .dayhead .note { margin-top: 2mm; font-size: 10.5pt; white-space: pre-wrap; }
+  .row { display: flex; gap: var(--gap); margin-bottom: var(--gap); flex: none; }
+  .row img { display: block; object-fit: cover; border-radius: 1mm; background: #eef1f5; }
+  @media print {
+    body { background: none; }
+    .bar { display: none; }
+    #pages { padding: 0; gap: 0; }
+    .page { box-shadow: none; page-break-after: always; break-after: page; }
+  }
+</style>
+</head>
+<body>
+<div class="bar">
+  <input type="text" id="b-title" aria-label="Title">
+  <label>Paper <select id="b-paper"><option value="a4p">A4 portrait</option><option value="a4l">A4 landscape</option><option value="sq">Square 21 cm</option></select></label>
+  <label>Photos per page <select id="b-density"><option value="1.6">Fewer, bigger</option><option value="1" selected>Normal</option><option value="0.7">More</option></select></label>
+  <label><input type="checkbox" id="b-favs"> Favourites only</label>
+  <label><input type="checkbox" id="b-notes" checked> Journal notes</label>
+  <label><input type="checkbox" id="b-map" checked> Route map</label>
+  <span class="muted" id="b-status"></span>
+  <span style="flex:1"></span>
+  <button id="b-print">Print or save as PDF</button>
+</div>
+<div id="pages"></div>
+<script src="vendor/leaflet/leaflet.js"></script>
+<script type="module" src="js/book.js"></script>
+</body>
+</html>

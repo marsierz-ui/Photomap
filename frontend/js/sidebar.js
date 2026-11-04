@@ -1,14 +1,17 @@
 import { api, guard } from './api.js';
-import { state, params, emit, on, setFilters, fmtNum, fmtDate, isoToTs, tsToIso } from './state.js';
+import { state, params, emit, on, setFilters, fmtNum, fmtDate, isoToTs, tsToIso, countryName } from './state.js';
 import { el, modal, toast, confirmModal, escapeHtml } from './ui.js';
 import { flyToBounds } from './mapview.js';
+import { fixLocationsDialog } from './actions.js';
+import { geotagDialog } from './tracklog.js';
 
 export function initSidebar() {
   wireFilters();
   el('album-new').addEventListener('click', () => createAlbumDialog([]));
   el('album-list').addEventListener('click', onAlbumClick);
 
-  on('filters', () => { syncInputs(); renderAlbums(); summarize(); });
+  on('filters', () => { syncInputs(); renderAlbums(); summarize(); renderQueue(); });
+  el('nogeo-review').addEventListener('click', reviewQueue);
   on('dataChanged', refreshAll);
 }
 
@@ -28,7 +31,7 @@ function wireFilters() {
     state.followMap = false;
     el('f-viewport').checked = false;
     el('search').value = '';
-    setFilters({ from: null, to: null, gps: 'any', album: null, camera: '', q: '', fav: false });
+    setFilters({ from: null, to: null, gps: 'any', album: null, camera: '', q: '', fav: false, near: null, country: '' });
   });
 
   let searchTimer = null;
@@ -57,9 +60,11 @@ function summarize() {
   if (f.gps !== 'any') {
     bits.push({
       yes: 'with GPS', no: 'without GPS', approx: 'approximate location',
-      neighbour: 'location from a neighbour', manual: 'location set by hand',
+      neighbour: 'location from a neighbour', manual: 'location set by hand', track: 'placed from a GPS track',
     }[f.gps]);
   }
+  if (f.near) bits.push(`at ${state.places.find((p) => p.id === Number(f.near))?.name ?? 'a saved place'}`);
+  if (f.country) bits.push(`in ${countryName(f.country)}`);
   if (f.fav) bits.push('favourites');
   if (state.followMap) bits.push('map viewport');
   el('filter-summary').textContent = bits.join(' · ');
@@ -73,6 +78,8 @@ export async function refreshAll() {
     api.get('/api/stats'),
   ]);
   state.albums = albums;
+  unlocated = Math.max(0, (stats.total || 0) - (stats.geo || 0));
+  renderQueue();
 
   renderAlbums();
 
@@ -271,5 +278,45 @@ export function pickAlbumDialog(ids, done) {
     });
     box.querySelector('[data-act=new]').onclick = () => { close(); createAlbumDialog(ids, null, done); };
     box.querySelector('[data-act=cancel]').onclick = close;
+  });
+}
+
+// --------------------------------------------------------- no-location queue
+//
+// Photos with no position never reach the map, which is how they get
+// forgotten. The count sits under the filters, and Review opens them in the
+// gallery with the ways of placing them one click away.
+
+let unlocated = 0;
+
+function renderQueue() {
+  const reviewing = state.filters.gps === 'no';
+  el('nogeo-queue').classList.toggle('hidden', !unlocated);
+  el('nogeo-text').textContent = reviewing
+    ? `${fmtNum(unlocated)} without a location. Place them:`
+    : `${fmtNum(unlocated)} photo${unlocated === 1 ? '' : 's'} without a location`;
+  el('nogeo-review').textContent = reviewing ? 'Options…' : 'Review';
+}
+
+async function reviewQueue() {
+  if (state.filters.gps !== 'no') {
+    setFilters({ gps: 'no' });
+    emit('showView', 'gallery');
+    return;
+  }
+  const { ids } = await api.get('/api/photos/ids', params({ extra: { limit: 5000 } }));
+  modal(`
+    <h3>${fmtNum(ids.length)} photos without a location</h3>
+    <p class="small">For photos from a camera without GPS, the best source is where your phone was at the time.</p>
+    <div class="queue-opts">
+      <button class="btn" data-act="tracks">From GPS tracks…<span class="muted small">GPX or Google Timeline, matched by time</span></button>
+      <button class="btn" data-act="near">From the nearest photo…<span class="muted small">copy a phone photo's position from within 2 hours</span></button>
+      <button class="btn" data-act="pick">Select them all<span class="muted small">then Set location… puts them on one spot</span></button>
+    </div>
+    <div class="actions"><button class="btn" data-act="cancel">Close</button></div>`, (box, close) => {
+    box.querySelector('[data-act=cancel]').onclick = close;
+    box.querySelector('[data-act=tracks]').onclick = () => { close(); geotagDialog(ids); };
+    box.querySelector('[data-act=near]').onclick = () => { close(); fixLocationsDialog(ids, { unlocated: true }); };
+    box.querySelector('[data-act=pick]').onclick = () => { close(); emit('selectMany', ids); };
   });
 }

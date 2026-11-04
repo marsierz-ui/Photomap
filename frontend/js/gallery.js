@@ -1,6 +1,6 @@
 import { api, thumbUrl } from './api.js';
-import { state, params, emit, on, fmtDate, fmtNum } from './state.js';
-import { el, toast } from './ui.js';
+import { state, params, emit, on, fmtDate, fmtNum, countryName } from './state.js';
+import { el, toast, escapeHtml } from './ui.js';
 
 // Videos are ordinary library rows with an ordinary place and time; the only
 // thing the grid does differently is say which ones they are.
@@ -167,7 +167,7 @@ function append(rows) {
       <img loading="lazy" src="${thumbUrl(row.id, size)}" alt="">
       <span class="pick"></span>
       <span class="flags">${row.note ? '<span class="note-flag" title="Has a note">✎</span>' : ''}${row.favorite ? '<span class="dot" style="background:#ffd166"></span>' : ''}${dots}</span>
-      <span class="meta">${fmtDate(row.taken_ts)}${row.lat == null ? ' <span class="nogeo">· no GPS</span>' : ''}${isApprox(row) ? ' <span class="nogeo">· approx.</span>' : ''}${row.gps_method === 'NEIGHBOUR' ? ' <span class="nogeo">· from neighbour</span>' : ''}</span>
+      <span class="meta" title="${escapeHtml([row.place, row.country && countryName(row.country)].filter(Boolean).join(', '))}">${fmtDate(row.taken_ts)}${row.place ? ` <span class="where">· ${escapeHtml(row.place.split(',')[0])}</span>` : ''}${row.lat == null ? ' <span class="nogeo">· no GPS</span>' : ''}${isApprox(row) ? ' <span class="nogeo">· approx.</span>' : ''}${row.gps_method === 'NEIGHBOUR' ? ' <span class="nogeo">· from neighbour</span>' : ''}</span>
       ${isVideo(row) ? `<span class="vidmark">▶ ${row.duration ? clock(row.duration) : 'video'}</span>` : ''}
     </div>`;
   }).join('');

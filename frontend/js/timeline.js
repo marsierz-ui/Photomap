@@ -125,6 +125,12 @@ function draw() {
       ctx.fillStyle = inRange ? '#4aa3ff' : '#31465e';
       ctx.fillRect(bx, PAD.t + h - gh, barW, gh);
     }
+    // A tick under the axis where photos have no location: the gaps to fill,
+    // findable without switching any filter on.
+    if (count > geo) {
+      ctx.fillStyle = inRange ? '#f0a020' : '#6b5420';
+      ctx.fillRect(bx, PAD.t + h + 2, barW, 2);
+    }
   });
 
   // axis

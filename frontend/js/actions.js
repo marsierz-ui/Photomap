@@ -91,7 +91,7 @@ export function undoLocationDialog(ids) {
 }
 
 /** Copy a real position onto cell-tower photos from the nearest photo in time. */
-export function fixLocationsDialog(ids) {
+export function fixLocationsDialog(ids, { unlocated = false } = {}) {
   modal(`
     <h3>Fix locations of ${fmtNum(ids.length)} selected photo${ids.length === 1 ? '' : 's'}</h3>
     <p>Each photo whose location was guessed from mobile towers gets the position of the
@@ -99,16 +99,20 @@ export function fixLocationsDialog(ids) {
     <p class="muted small">Photos with no such neighbour, and photos that were never a
     tower guess, are left alone. The changed photos are tagged, and can be listed with
     Location: Set from a neighbouring photo.</p>
+    <label class="check"><input type="checkbox" id="fix-unlocated" ${unlocated ? 'checked' : ''}>
+      Also photos with no location at all</label>
     <div class="actions">
       <button class="btn" data-act="cancel">Cancel</button>
       <button class="btn primary" data-act="ok">Fix locations</button>
     </div>`, (box, close) => {
     box.querySelector('[data-act=cancel]').onclick = close;
     box.querySelector('[data-act=ok]').onclick = async () => {
+      const withMissing = box.querySelector('#fix-unlocated').checked;
       close();
-      const res = await guard(api.post('/api/photos/fix-locations', { ids }), 'Fixing locations failed');
+      const res = await guard(api.post('/api/photos/fix-locations', { ids, include_unlocated: withMissing }),
+        'Fixing locations failed');
       toast(`${fmtNum(res.fixed)} fixed · ${fmtNum(res.no_neighbour)} had no GPS photo within `
-        + `${res.window_hours} h · ${fmtNum(res.skipped)} were not tower guesses`);
+        + `${res.window_hours} h · ${fmtNum(res.skipped)} ${withMissing ? 'already had a good location' : 'were not tower guesses'}`);
       emit('dataChanged');
       emit('filters');
     };
