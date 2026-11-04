@@ -192,7 +192,8 @@ DEFAULTS = {
 }
 
 # Never leave the machine running the server.
-SECRET_SETTINGS = {"access_token", "r2_secret_key", "r2_access_key_id", "open_meteo_key"}
+SECRET_SETTINGS = {"access_token", "r2_secret_key", "r2_access_key_id", "open_meteo_key",
+                   "spotify_refresh_token"}
 
 
 def connect() -> sqlite3.Connection:

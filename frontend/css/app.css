@@ -276,17 +276,17 @@ button, input, select { font: inherit; color: inherit; }
 .replay-bar .where { white-space: nowrap; }
 .replay-card {
   position: absolute; left: 12px; bottom: 140px; z-index: 600; cursor: pointer;
-  display: flex; gap: 10px; align-items: center; padding: 8px;
+  display: flex; flex-direction: column; gap: 6px; padding: 8px; width: 336px;
   background: var(--overlay); border: 1px solid var(--line); border-radius: var(--radius);
   animation: replay-pop .35s ease-out;
 }
-.replay-card img { width: 120px; height: 90px; object-fit: cover; border-radius: 4px; display: block; }
+.replay-card img { width: 320px; height: 240px; object-fit: cover; border-radius: 4px; display: block; }
 @keyframes replay-pop { from { opacity: 0; transform: translateY(8px) scale(.96); } to { opacity: 1; transform: none; } }
 @media (max-width: 700px) {
   .replay-bar { bottom: 80px; left: 8px; right: 8px; transform: none; max-width: none; }
   .replay-bar .where { display: none; }
-  .replay-card { bottom: 132px; left: 8px; }
-  .replay-card img { width: 80px; height: 60px; }
+  .replay-card { bottom: 132px; left: 8px; width: 196px; }
+  .replay-card img { width: 180px; height: 135px; }
 }
 
 .note-pin i {
@@ -728,7 +728,7 @@ button, input, select { font: inherit; color: inherit; }
 .trip-body h4 { margin: 0; font-size: 15px; }
 .trip-body h4 [data-act=rename] { cursor: text; }
 .trip-body .flags { letter-spacing: 2px; }
-.trip-towns { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trip-towns { overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; }
 .trip-acts { display: flex; flex-wrap: wrap; gap: 4px; margin-top: auto; padding-top: 6px; }
 .empty { padding: 30px 10px; text-align: center; }
 
@@ -886,4 +886,6 @@ label.btn { cursor: pointer; }
 .music-player.hidden { display: none; }
 .music-embed { flex: 1; min-width: 0; }
 .music-player iframe { display: block; border: 0; border-radius: 8px; }
-.replay-card .tune { margin-top: 2px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.replay-card .tune { margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tv-place { display: flex; align-items: center; gap: 8px; padding: 3px 4px; border-radius: 4px; cursor: pointer; }
+.tv-place:hover { background: var(--hover); }

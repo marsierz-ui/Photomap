@@ -265,10 +265,27 @@ export async function openTrip(card, awayKm) {
       <div class="small">${shown.join(' · ')}</div></div>`;
   }
 
+  /** The places reached, in order, with when and how many photos; a click
+   *  centres the map on one. */
+  function placesList(list) {
+    if (!list.length) return '<p class="muted small">No named places: the photos were taken outside any town.</p>';
+    return list.map((v) => {
+      const day = new Date(Math.floor(v.first / DAY) * DAY * 1000);
+      const when = `${WEEKDAY.format(day)} ${day.getUTCDate()}, ${clock(v.first)}${v.last !== v.first ? `–${clock(v.last)}` : ''}`;
+      return `<div class="tv-place" data-lat="${v.lat}" data-lon="${v.lon}" title="Show on the map">
+        <span class="tv-dot" style="background:${dayColor(v.first)}"></span>
+        <span class="tv-leg-name">${flag(v.cc)} ${escapeHtml(v.name)}</span>
+        <span class="muted small">${when} · ${fmtNum(v.photos)} photo${v.photos === 1 ? '' : 's'}</span>
+      </div>`;
+    }).join('');
+  }
+
   function drawDay() {
     const target = slot('day');
     if (selected == null) {
       target.innerHTML = `
+        <h4>Places visited <span class="muted small">${fmtNum(new Set(trip.visited.map((v) => v.name)).size)} places, in order</span></h4>
+        ${placesList(trip.visited)}
         <h4>All legs <span class="muted small">pick a day in the chart to look at it on its own</span></h4>
         ${trip.legs.length ? trip.days_detail.map((d) => {
           const legs = trip.legs.filter((l) => l.day === d.day);
@@ -286,6 +303,8 @@ export async function openTrip(card, awayKm) {
         <button class="btn tiny ghost" data-act="all-days">Whole trip</button></h4>
       <div class="small">${d.towns.length ? `${escapeHtml(d.towns.join(', '))} · ` : ''}${fmtNum(d.photos)} photos${d.first_ts ? ` between ${clock(d.first_ts)} and ${clock(d.last_ts)}` : ''} · ${fmtNum(Math.round(d.km))} km between them${d.walk_km || d.steps ? ` · walked ${d.walk_km ? `${fmtNum(d.walk_km)} km` : ''}${d.walk_km && d.steps ? ', ' : ''}${d.steps ? `${fmtNum(d.steps)} steps` : ''}` : ''}</div>
       ${d.ids.length ? `<div class="tv-thumbs">${d.ids.slice(0, 30).map((id) => `<img loading="lazy" src="${thumbUrl(id, 256)}" data-photo="${id}" alt="">`).join('')}${d.ids.length > 30 ? `<span class="muted small">+${fmtNum(d.ids.length - 30)}</span>` : ''}</div>` : ''}
+      <h4>Places visited</h4>
+      ${placesList(trip.visited.filter((v) => dayOf(v.first) === d.day))}
       <h4>Legs ${legs.length > 1 ? `<label class="inline small">All of this day <select data-act="day-mode">${modeOptions('', 'Choose…')}</select></label>` : ''}</h4>
       ${legs.length ? legs.map(legRow).join('') : '<p class="muted small">No movement between photos this day.</p>'}
       ${acts.length ? `<h4>Workouts</h4>${acts.map(actRow).join('')}` : ''}`;
@@ -315,6 +334,8 @@ export async function openTrip(card, awayKm) {
     const metricBtn = e.target.closest('[data-metric]');
     const bar = e.target.closest('.tv-bar');
     const photo = e.target.closest('[data-photo]');
+    const place = e.target.closest('.tv-place');
+    if (place) { map.setView([Number(place.dataset.lat), Number(place.dataset.lon)], 14); return; }
     if (metricBtn) { metric = metricBtn.dataset.metric; drawChart(); return; }
     if (bar) {
       const day = Number(bar.dataset.day);

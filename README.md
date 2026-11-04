@@ -165,8 +165,8 @@ that day was taken more than 50 km from home (15-200 km, chosen on the Trips tab
 days in a row are one trip, and so are away days a day or two apart with no photos in
 between, because nobody photographs every day of a holiday. A day with photos only at
 home ends it. Each trip card has a cover (a favourite if there is one), dates, the
-countries with their flags, the towns, how far it went and how far you travelled between
-photos. **Open** (or the cover) opens the trip in a window of its own (below), **Map** and
+countries with their flags, every place it reached in order (Paris → Lyon → Annecy), how
+far it went and how far you travelled between photos. **Open** (or the cover) opens the trip in a window of its own (below), **Map** and
 **Photos** narrow the other views to its dates, **Replay** flies the route, **Rename**
 replaces the generated name, and **Book** makes it a printable photo book (below).
 
@@ -189,8 +189,10 @@ mode chosen for the whole trip. **Travelled by** sets the whole trip, a day's **
 day** sets its legs, and each leg has its own. Legs are drawn in their mode's colour,
 flights and assumed legs dashed. The chart shows distance (stacked by mode), photos,
 workout distance, moving time or climb per day; clicking a day zooms the map to it, dims
-the rest, and lists its towns, photos, legs and workouts. Modes are kept per trip, keyed by
-its first day, like its name.
+the rest, and lists its places, photos, legs and workouts. **Places visited** lists every
+named place the trip reached, in order, with when and how many photos; going back somewhere
+counts as a second visit, and a click centres the map on it. Modes are kept per trip, keyed
+by its first day, like its name.
 
 What the panel measures follows how the trip was travelled. Moving time, climb, speed and
 heart rate describe a ride or a hike, so they appear only when the trip's mode is bike or on
@@ -218,13 +220,28 @@ the larger count wins. A watch records a route only during a workout; the all-da
 where you were is the phone's, imported under **GPS tracks** (Google Timeline).
 
 **Music** - Spotify listening history beside the photos. Spotify's API only reaches back 50
-plays, so it comes from the account's data download (Account, Privacy settings, *Download
+plays, so the past comes from the account's data download (Account, Privacy settings, *Download
 your data*): *Extended streaming history* covers the whole account with playable tracks
 (Spotify takes up to 30 days to send it); *Account data* comes sooner but covers a year and
 names songs without ids, so they cannot be played. Import the .zip or the .json files in **⚙
 → Music**. The lightbox then shows the song playing when the photo was taken, or failing that
-the day's most played, with a ▶ that plays it; **♪ Music** in the Replay bar plays each
-stop's song as the replay reaches it, and the replay card names it. A photo's time is a wall
+the day's most played, with a ▶ that plays it. Replay plays each stop's song as it reaches
+the stop, and the card names it under the photo; it is on until turned off with **♪ Music**
+in the Replay bar or by closing the player, and that choice is remembered.
+
+From now on, plays can also be saved by themselves: **⚙ → Music → Spotify account**. Once,
+create an app at [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard)
+(tick Web API), add the redirect URI Settings shows (`http://127.0.0.1:8712/api/spotify/callback`),
+and paste the app's Client ID; then **Connect Spotify**. Sign-in uses PKCE, so there is no
+client secret to keep, and the refresh token stays on this computer with the other secrets.
+Every half hour while the app runs it saves the recently played list (the last 50 plays,
+about two and a half hours of music), so a long stretch of listening while the computer is
+off can fall through; the data download fills those gaps. Spotify allows plain http only
+for a loopback IP, never `localhost`, so connecting has to happen in a browser on this
+computer. Spotify does not say whether a play's `played_at` is when the song started or
+ended; it is taken as the end, like the download's `ts`, so a play can be placed one song
+out. Each person uses their own app, which keeps every installation within the user limit
+Spotify sets on apps that have not been granted its extended quota. A photo's time is a wall
 clock and Spotify's is UTC, so the photo's time zone comes from the weather lookup when there
 is one, else from its longitude. Playback is Spotify's own embedded player, whose script is
 loaded from open.spotify.com only once something is played: whole songs when signed in to
@@ -1261,6 +1278,7 @@ backend/
   home.py        the home timeline, and suggesting one from the photos
   activities.py  workouts (GPX / TCX / FIT / Strava zip / Apple Health) and daily steps
   music.py       Spotify listening history, matched to photo times
+  spotify.py     Spotify account sign-in (PKCE) and saving recent plays every half hour
   borders.py     town borders from OpenStreetMap (Overpass), cached per 500 m cell
   tracks.py      GPX / Google Timeline import, clock-offset matching, geotagging
 frontend/
@@ -1285,7 +1303,7 @@ data/            photomap.db + thumbs/ (created on first run, safe to delete)
 
 Run the tests with `.venv\Scripts\python.exe tests\test_sync.py`,
 `tests\test_writeback.py`, `tests\test_nametime.py`, `tests\test_dupes.py`,
-`tests\test_videometa.py`, `tests\test_fixes.py`, `tests\test_places.py`, `tests\test_placenames.py`, `tests\test_trips.py`, `tests\test_homeline.py`, `node tests\test_worker.mjs`, `node tests\test_exif.mjs`,
+`tests\test_videometa.py`, `tests\test_fixes.py`, `tests\test_places.py`, `tests\test_placenames.py`, `tests\test_trips.py`, `tests\test_homeline.py`, `tests\test_spotify.py`, `node tests\test_worker.mjs`, `node tests\test_exif.mjs`,
 `node tests\test_uploadq.mjs`, `node tests\test_sw.mjs`, and (after
 `pip install botocore`) `tests\test_sigv4.py`.
 
@@ -1322,7 +1340,9 @@ travelled. The home timeline is `GET/PUT /api/home-timeline` (`items`: `since`, 
 `lat`, `lon`). Workouts: `POST /api/activities/import?name=<file>` with the file as the
 body (workouts and daily summaries alike), `GET /api/activities`, `DELETE /api/activities/<id>`,
 `GET/DELETE /api/activities/daily`. Music: `POST /api/music/import?name=<file>`,
-`GET/DELETE /api/music`, `GET /api/photos/<id>/music`. Town borders: `GET /api/borders`
+`GET/DELETE /api/music`, `GET /api/photos/<id>/music`; the Spotify account is `GET /api/spotify`,
+`POST /api/spotify/config` (`client_id`), `GET /api/spotify/login` (starts sign-in),
+`POST /api/spotify/sync` and `DELETE /api/spotify`. Town borders: `GET /api/borders`
 (on or off, spots done and pending) and `POST /api/borders` with `{"enabled": true}`. `GET /api/photos/ids` takes
 `sort` like `/api/photos`. Tracks: `POST /api/tracks/import?name=<file>` with
 the file as the body, `GET /api/tracks`, `DELETE /api/tracks/<id>`,

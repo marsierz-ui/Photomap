@@ -180,6 +180,19 @@ def _describe(run: list[int], days: dict, named: dict, away_km: float) -> dict:
     pool = favs or trip
     cover = pool[len(pool) // 2]["id"]
     key = str(run[0])
+    # Every named place in the order it was reached; going back somewhere is
+    # listed again, since that is a second visit.
+    visited: list[dict] = []
+    for r in trip:
+        name = (r["place"] or "").split(",")[0]
+        if not name:
+            continue
+        if visited and visited[-1]["name"] == name:
+            visited[-1]["last"] = r["taken_ts"]
+            visited[-1]["photos"] += 1
+            continue
+        visited.append({"name": name, "cc": r["country"] or "", "first": r["taken_ts"], "last": r["taken_ts"],
+                        "photos": 1, "lat": r["lat"], "lon": r["lon"]})
     lats = [r["lat"] for r in trip]
     lons = [r["lon"] for r in trip]
     return {
@@ -194,6 +207,7 @@ def _describe(run: list[int], days: dict, named: dict, away_km: float) -> dict:
         "cover": cover,
         "countries": [{"cc": cc, "c": c} for cc, c in countries.most_common()],
         "places": [{"name": n, "c": c} for n, c in towns.most_common(6)],
+        "visited": visited,
         "far_km": round(max(d for _, d in photos), 1),
         "route_km": round(route, 1),
         "bbox": [min(lats), min(lons), max(lats), max(lons)],

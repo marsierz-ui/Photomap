@@ -6,7 +6,7 @@
 // and this module owns only the camera, the timing and its own controls.
 import { thumbUrl } from './api.js';
 import { toast } from './ui.js';
-import { emit, fmtNum, fmtDateTime } from './state.js';
+import { emit, on, fmtNum, fmtDateTime } from './state.js';
 import { musicFor, pick, play as playMusic, pause as pauseMusic, label as trackLabel } from './music.js';
 
 // Past this many stops a replay is a slideshow nobody sits through, so nearby
@@ -28,9 +28,10 @@ let speed = 1;
 let playing = false;
 let runToken = 0;
 // Play the song from each stop's moment (or that day's favourite) as the replay
-// reaches it. Remembered in the browser, like the rest of the replay's look.
+// reaches it. On unless turned off - with the Music button or by closing the
+// player - and that choice is remembered in the browser.
 let withMusic = (() => {
-  try { return localStorage.getItem('pm-replay-music') === '1'; } catch { return false; }
+  try { return localStorage.getItem('pm-replay-music') !== '0'; } catch { return true; }
 })();
 
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
@@ -100,7 +101,7 @@ function drawRoute(upto, part = 0) {
 function showCard(stop) {
   if (!stop) { card.classList.add('hidden'); return; }
   const img = card.querySelector('img');
-  img.src = thumbUrl(stop.ids[0], 256);
+  img.src = thumbUrl(stop.ids[0], 512);
   const when = stop.first == null ? 'No date'
     : stop.last !== stop.first && fmtDateTime(stop.last).slice(0, 10) !== fmtDateTime(stop.first).slice(0, 10)
       ? `${fmtDateTime(stop.first)} - ${fmtDateTime(stop.last)}`
@@ -213,6 +214,9 @@ function jump(i) {
 }
 
 // --------------------------------------------------------------- controls
+
+// Closing the player is turning the music off, not skipping a song.
+on('musicStopped', () => { withMusic = false; syncBar(); });
 
 function build(box) {
   bar = document.createElement('div');

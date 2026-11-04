@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import (
     activities, auth, borders, days, db, dupes, geocode, home, music, nametime, netinfo, photometa, places, r2,
-    scanner, snapshot, sync, thumbs, tracks, trips, weather,
+    scanner, snapshot, spotify, sync, thumbs, tracks, trips, weather,
 )
 from .photometa import HEIF_ERROR, HEIF_OK, IMAGE_EXTS
 
@@ -46,6 +46,8 @@ sync.start_watching()
 geocode.kick()
 # Same for the weather, when it is turned on.
 weather.kick()
+# New Spotify plays, every half hour, once an account is connected.
+spotify.start_polling()
 
 
 @app.middleware("http")
@@ -1580,6 +1582,56 @@ async def import_music(request: Request, name: str = "StreamingHistory.json"):
 def clear_music():
     music.clear()
     return music.status()
+
+
+@app.get("/api/spotify")
+def spotify_status():
+    return {**spotify.status(), **music.status()}
+
+
+@app.post("/api/spotify/config")
+def spotify_config(body: dict = Body(...)):
+    try:
+        return spotify.set_client_id(str(body.get("client_id") or ""))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/api/spotify/login")
+def spotify_login():
+    try:
+        return RedirectResponse(spotify.login_url(), status_code=303)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/api/spotify/callback")
+def spotify_callback(code: str = "", state: str = "", error: str = ""):
+    """Where Spotify sends the browser back after sign-in."""
+    if error or not code:
+        message = f"Spotify did not connect: {error or 'no code returned'}."
+    else:
+        try:
+            spotify.finish_login(code, state)
+            message = "Spotify is connected. New plays are saved every half hour while Photo Map runs."
+        except Exception as exc:  # an expired sign-in, a refused code, no network
+            message = f"Spotify did not connect: {exc}"
+    return HTMLResponse(
+        "<!doctype html><meta charset=utf-8><title>Photo Map</title>"
+        "<body style='font:15px system-ui;padding:40px;max-width:520px'>"
+        f"<p>{message}</p><p>You can close this tab and go back to Photo Map.</p>"
+        "<script>setTimeout(() => window.close(), 2500)</script></body>")
+
+
+@app.post("/api/spotify/sync")
+def spotify_sync():
+    added = spotify.sync()
+    return {**spotify.status(), **music.status(), "added": added}
+
+
+@app.delete("/api/spotify")
+def spotify_disconnect():
+    return spotify.disconnect()
 
 
 @app.get("/api/photos/{photo_id}/music")

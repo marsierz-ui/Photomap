@@ -51,6 +51,8 @@ function ensurePlayer() {
     controller?.pause();
     box.classList.add('hidden');
     current = null;
+    try { localStorage.setItem('pm-replay-music', '0'); } catch { /* private window */ }
+    emit('musicStopped');
   };
   loading = new Promise((resolve, reject) => {
     // Spotify calls this once its script has loaded; it has to exist first.
@@ -99,7 +101,67 @@ export function musicBlock() {
     <div class="actions" style="justify-content:flex-start;margin:6px 0 0">
       <label class="btn tiny">Import…<input type="file" id="s-music-file" multiple accept=".zip,.json" hidden></label>
       <button class="btn tiny ghost" data-act="music-clear">Remove listening history</button>
-    </div>`;
+    </div>
+    <div class="muted small" style="margin:10px 0 6px">Spotify account
+      <span style="opacity:.8">- saves new plays by itself from now on, every half hour while Photo Map runs (Spotify only
+      shows an app the last 50 plays, so it cannot fetch the past; that is what the download above is for). Once:
+      at <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">developer.spotify.com/dashboard</a>
+      create an app, tick Web API, add the redirect URI below, save, and paste the app's Client ID here.</span></div>
+    <div class="row"><label>Client ID</label><input type="text" id="s-sp-client" autocomplete="off" spellcheck="false"
+      placeholder="From your app in the Spotify dashboard" style="flex:1"></div>
+    <div class="row"><label>Redirect URI</label><code id="s-sp-redirect" class="small" style="flex:1;user-select:all"></code>
+      <button class="btn tiny" data-act="sp-copy">Copy</button></div>
+    <div class="row"><label></label><span id="s-sp-status" class="small muted" style="flex:1"></span></div>`;
+}
+
+const ON_THIS_COMPUTER = ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname);
+
+/** The Spotify account rows: connect, status, sync now, disconnect. */
+async function spotifyRows(root) {
+  const slot = root.querySelector('#s-sp-status');
+  const st = await api.get('/api/spotify');
+  if (!slot.isConnected) return;
+  root.querySelector('#s-sp-client').value = st.client_id;
+  root.querySelector('#s-sp-redirect').textContent = st.redirect_uri;
+  const when = st.last_sync ? new Date(st.last_sync * 1000).toLocaleTimeString() : '';
+  if (st.connected) {
+    slot.innerHTML = `${st.error ? `<span class="err-text">${escapeHtml(st.error)}</span> ` : 'Connected'}${when ? ` · checked at ${escapeHtml(when)}, ${fmtNum(st.last_added)} new` : ''}
+      <button class="btn tiny" data-act="sp-sync">Save new plays now</button>
+      ${st.error ? '<button class="btn tiny" data-act="sp-connect">Connect again</button>' : ''}
+      <button class="btn tiny ghost" data-act="sp-off">Disconnect</button>`;
+  } else if (!ON_THIS_COMPUTER) {
+    slot.textContent = 'Connect from the computer running Photo Map: Spotify only returns to 127.0.0.1.';
+  } else {
+    slot.innerHTML = st.client_id ? '<button class="btn tiny primary" data-act="sp-connect">Connect Spotify</button>'
+      : 'Paste the Client ID first';
+  }
+}
+
+function wireSpotify(root) {
+  spotifyRows(root);
+  root.querySelector('#s-sp-client').addEventListener('change', async (e) => {
+    await guard(api.post('/api/spotify/config', { client_id: e.target.value }), 'Could not save the Client ID');
+    spotifyRows(root);
+  });
+  root.addEventListener('click', async (e) => {
+    const act = e.target.dataset.act;
+    if (act === 'sp-copy') {
+      try { await navigator.clipboard.writeText(root.querySelector('#s-sp-redirect').textContent); toast('Copied'); } catch { /* select it by hand */ }
+    } else if (act === 'sp-connect') {
+      window.open('/api/spotify/login', '_blank');
+      // Back from Spotify in the other tab; look again when this one is used.
+      window.addEventListener('focus', () => spotifyRows(root), { once: true });
+    } else if (act === 'sp-sync') {
+      const res = await guard(api.post('/api/spotify/sync', {}), 'Could not reach Spotify');
+      toast(res.error ? res.error : `${fmtNum(res.added)} new plays saved`, Boolean(res.error));
+      cache.clear();
+      status = null;
+      spotifyRows(root);
+    } else if (act === 'sp-off') {
+      await guard(api.del('/api/spotify'), 'Failed');
+      spotifyRows(root);
+    }
+  });
 }
 
 export function wireMusic(root) {
@@ -112,6 +174,7 @@ export function wireMusic(root) {
       : '<span class="muted">None imported yet</span>';
   };
   render();
+  wireSpotify(root);
   root.querySelector('#s-music-file').addEventListener('change', async (e) => {
     for (const file of e.target.files) {
       toast(`Reading ${file.name}…`);

@@ -370,6 +370,15 @@ db.set_setting("place_borders", "0")
 check("turned off: the range rule again", geocode.lookup(*GALWAY)[0].startswith("Galway, Connacht"),
       geocode.lookup(*GALWAY))
 
+# ------------------------------------------------------------ places visited
+
+geocode.rename()
+geocode.fill()
+france = next(t for t in main.list_trips()["items"] if (t["start_ts"] - T0) // DAY == 170)
+check("a trip lists the places it reached, in order",
+      [v["name"] for v in france["visited"]] == ["Paris", "Lyon"]
+      and [v["photos"] for v in france["visited"]] == [2, 2], france["visited"])
+
 print()
 print("FAILED:" if failures else "All passed.", ", ".join(failures))
 sys.exit(1 if failures else 0)

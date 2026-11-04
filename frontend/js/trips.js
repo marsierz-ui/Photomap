@@ -88,7 +88,9 @@ async function render() {
 
 function card(t, i, homeCc) {
   const flags = t.countries.map((c) => `<span title="${escapeHtml(countryName(c.cc))}: ${fmtNum(c.c)} photos">${flag(c.cc)}</span>`).join('');
-  const towns = t.places.map((p) => escapeHtml(p.name)).join(' · ');
+  // Every place the trip reached, in order, each once.
+  const order = [...new Set(t.visited.map((v) => v.name))];
+  const towns = order.map((n) => escapeHtml(n)).join(' → ');
   const when = Math.floor(t.start_ts / DAY) === Math.floor(t.end_ts / DAY)
     ? fmtDate(t.start_ts) : `${fmtDate(t.start_ts)} – ${fmtDate(t.end_ts)}`;
   return `<article class="trip" data-i="${i}">
@@ -97,7 +99,7 @@ function card(t, i, homeCc) {
       <h4><span class="flags">${flags}</span> <span data-act="rename" title="Rename">${escapeHtml(tripTitle(t, homeCc))}</span></h4>
       <div class="muted small">${when}</div>
       <div class="small">${t.days === 1 ? 'Day trip' : `${fmtNum(t.days)} days`} · ${fmtNum(t.photos)} photos · ${fmtNum(Math.round(t.route_km))} km travelled · ${fmtNum(Math.round(t.far_km))} km from home at the furthest</div>
-      ${towns ? `<div class="muted small trip-towns">${towns}</div>` : ''}
+      ${towns ? `<div class="muted small trip-towns" title="${order.length} places: ${towns}">${towns}</div>` : ''}
       <div class="trip-acts">
         <button class="btn tiny primary" data-act="open">Open</button>
         <button class="btn tiny" data-act="map">Map</button>

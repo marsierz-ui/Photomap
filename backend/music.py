@@ -91,6 +91,11 @@ def import_file(name: str, data: bytes) -> dict:
     plays = parse(name, data)
     if not plays:
         raise ValueError(f"{name}: no plays found. Use the streaming history files from Spotify's data download.")
+    return {"read": len(plays), "added": store(plays), **status()}
+
+
+def store(plays: list[tuple]) -> int:
+    """Save (end_ts, ms, track, artist, album, uri) rows; returns how many were new."""
     conn = db.connect()
     with db.write_lock:
         before = conn.execute("SELECT COUNT(*) c FROM music_plays").fetchone()["c"]
@@ -101,7 +106,7 @@ def import_file(name: str, data: bytes) -> dict:
             " album=COALESCE(excluded.album, album)", plays)
         conn.commit()
         after = conn.execute("SELECT COUNT(*) c FROM music_plays").fetchone()["c"]
-    return {"read": len(plays), "added": after - before, **status()}
+    return after - before
 
 
 def status() -> dict:
