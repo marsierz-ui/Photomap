@@ -1,8 +1,10 @@
 import datetime
+import json
 import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -13,7 +15,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 
 from . import (
-    auth, days, db, dupes, nametime, netinfo, photometa, r2, scanner, snapshot, sync, thumbs,
+    auth, days, db, dupes, geocode, nametime, netinfo, photometa, r2, scanner, snapshot, sync, thumbs, weather,
 )
 from .photometa import HEIF_ERROR, HEIF_OK, IMAGE_EXTS
 
@@ -27,12 +29,17 @@ except ImportError:
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
 
 db.init()
+weather.init_schema()
 app = FastAPI(title="Photo Map", docs_url=None, redoc_url=None)
 
 # Photos added on a phone reach the bucket immediately and the library only on a
 # sync, so while this is running it looks for them itself. The thread is a daemon
 # and does nothing at all until the bucket has something new in it.
 sync.start_watching()
+# Name whatever was located since the last run, or moved.
+geocode.kick()
+# Same for the weather, when it is turned on.
+weather.kick()
 
 
 @app.middleware("http")
@@ -110,7 +117,10 @@ def _filters(request: Request) -> tuple[str, list]:
         params.extend(box[1])
 
     if q.get("album"):
-        where.append("p.id IN (SELECT photo_id FROM album_photos WHERE album_id=?)")
+        where.append(
+            f"p.id IN ({ALBUM_TREE} SELECT ap.photo_id FROM album_photos ap"
+            " JOIN tree t ON ap.album_id = t.id WHERE t.root=?)"
+        )
         params.append(int(q["album"]))
     if q.get("camera"):
         where.append("COALESCE(p.camera_make,'') || ' ' || COALESCE(p.camera_model,'') LIKE ?")
@@ -304,6 +314,75 @@ def update_settings(body: dict = Body(...)):
     return {"ok": True}
 
 
+_mapbox_lock = threading.Lock()
+
+
+@app.post("/api/mapbox/usage")
+def mapbox_usage(body: dict = Body(...)):
+    """Add the Mapbox tiles a browser requested to this month's tally.
+
+    Kept here rather than in the browser so every tab and device on this server
+    counts against one total. Months are UTC calendar months."""
+    month = time.strftime("%Y-%m", time.gmtime())
+    with _mapbox_lock:
+        try:
+            usage = json.loads(db.get_setting("mapbox_usage", "") or "{}")
+        except ValueError:
+            usage = {}
+        if usage.get("month") != month:
+            usage = {"month": month, "styles": 0, "raster": 0, "loads": 0}
+        for kind in ("styles", "raster", "loads"):
+            usage[kind] = int(usage.get(kind) or 0) + max(0, int(body.get(kind) or 0))
+        db.set_setting("mapbox_usage", json.dumps(usage))
+    return usage
+
+
+@app.get("/api/weather")
+def weather_status():
+    return weather.status()
+
+
+@app.post("/api/weather/fill")
+def weather_fill():
+    weather.kick()
+    return weather.status()
+
+
+@app.get("/api/photos/{photo_id}/weather")
+def photo_weather(photo_id: int):
+    """The weather when and where the photo was taken. Fetched from Open-Meteo
+    the first time it is asked for, if weather is turned on, then cached."""
+    return weather.for_photo(photo_id)
+
+
+@app.get("/api/geocode")
+def geocode_status():
+    geocode.kick()
+    return geocode.status()
+
+
+@app.post("/api/geocode/download")
+def geocode_download():
+    if not geocode.status()["downloading"]:
+        threading.Thread(target=geocode.download, daemon=True).start()
+    return geocode.status()
+
+
+@app.get("/api/countries")
+def countries(request: Request):
+    """Located photos per country, with how many places and days in each."""
+    geocode.kick()
+    where, params = _filters(request)
+    rows = db.connect().execute(
+        f"SELECT p.country AS cc, COUNT(*) AS c, COUNT(DISTINCT p.place) AS places,"
+        f" COUNT(DISTINCT p.taken_ts / 86400) AS days, MIN(p.taken_ts) AS first_ts, MAX(p.taken_ts) AS last_ts"
+        f" FROM photos p WHERE {where} AND p.lat IS NOT NULL AND p.country IS NOT NULL AND p.country != ''"
+        f" GROUP BY p.country ORDER BY c DESC",
+        params,
+    ).fetchall()
+    return {"items": [dict(r) for r in rows], **geocode.status()}
+
+
 @app.get("/api/browse")
 def browse(path: str = ""):
     """Minimal folder picker so roots can be chosen without typing a path."""
@@ -443,7 +522,7 @@ def photo_detail(photo_id: int):
         r["album_id"] for r in conn.execute("SELECT album_id FROM album_photos WHERE photo_id=?", (photo_id,))
     ]
     data["exists"] = os.path.exists(row["path"])
-    return data
+    return geocode.place_for(data)
 
 
 def _serve_cached(photo_id: int, size: int):
@@ -873,20 +952,51 @@ def save_day(day: str, body: dict = Body(...)):
 
 # --------------------------------------------------------------------------- albums
 
+# Every album paired with itself and each album below it. An album shows the
+# photos of its subalbums too, the way a folder holds what is in its folders.
+ALBUM_TREE = (
+    "WITH RECURSIVE tree(root, id) AS ("
+    " SELECT id, id FROM albums"
+    " UNION SELECT t.root, a.id FROM albums a JOIN tree t ON a.parent_id = t.id)"
+)
+
+
 @app.get("/api/albums")
 def list_albums():
-    rows = db.connect().execute(
-        "SELECT a.id, a.name, a.color, a.created_ts,"
-        " (SELECT COUNT(*) FROM album_photos ap WHERE ap.album_id=a.id) AS photo_count,"
-        " (SELECT COUNT(*) FROM album_photos ap JOIN photos p ON p.id=ap.photo_id"
-        "   WHERE ap.album_id=a.id AND p.lat IS NOT NULL) AS geo_count,"
-        " (SELECT MIN(p.taken_ts) FROM album_photos ap JOIN photos p ON p.id=ap.photo_id"
-        "   WHERE ap.album_id=a.id) AS start_ts,"
-        " (SELECT MAX(p.taken_ts) FROM album_photos ap JOIN photos p ON p.id=ap.photo_id"
-        "   WHERE ap.album_id=a.id) AS end_ts"
-        " FROM albums a ORDER BY a.name COLLATE NOCASE"
-    ).fetchall()
-    return [dict(r) for r in rows]
+    conn = db.connect()
+    stats = {
+        r["root"]: dict(r) for r in conn.execute(
+            f"{ALBUM_TREE} SELECT t.root, COUNT(DISTINCT ap.photo_id) AS photo_count,"
+            " COUNT(DISTINCT CASE WHEN p.lat IS NOT NULL THEN p.id END) AS geo_count,"
+            " MIN(p.taken_ts) AS start_ts, MAX(p.taken_ts) AS end_ts"
+            " FROM tree t JOIN album_photos ap ON ap.album_id = t.id"
+            " JOIN photos p ON p.id = ap.photo_id GROUP BY t.root"
+        )
+    }
+    out = []
+    for r in conn.execute(
+        "SELECT id, name, color, created_ts, parent_id FROM albums ORDER BY name COLLATE NOCASE"
+    ):
+        s = stats.get(r["id"], {})
+        out.append({**dict(r), "photo_count": s.get("photo_count", 0), "geo_count": s.get("geo_count", 0),
+                    "start_ts": s.get("start_ts"), "end_ts": s.get("end_ts")})
+    return out
+
+
+def _check_parent(album_id: int | None, parent_id) -> int | None:
+    """A parent that exists and is not the album itself or one of its descendants,
+    which would make a loop nothing could be listed under."""
+    if parent_id in (None, "", 0):
+        return None
+    parent_id = int(parent_id)
+    conn = db.connect()
+    if not conn.execute("SELECT 1 FROM albums WHERE id=?", (parent_id,)).fetchone():
+        raise HTTPException(400, "Parent album not found")
+    if album_id is not None:
+        below = {r["id"] for r in conn.execute(f"{ALBUM_TREE} SELECT id FROM tree WHERE root=?", (album_id,))}
+        if parent_id in below:
+            raise HTTPException(400, "An album cannot go inside itself")
+    return parent_id
 
 
 @app.post("/api/albums")
@@ -894,12 +1004,13 @@ def create_album(body: dict = Body(...)):
     name = (body.get("name") or "").strip()
     if not name:
         raise HTTPException(400, "Name required")
+    parent = _check_parent(None, body.get("parent_id"))
     conn = db.connect()
     try:
         with db.write_lock:
             cur = conn.execute(
-                "INSERT INTO albums(name, color, created_ts) VALUES (?,?,?)",
-                (name, body.get("color") or "#ff5a5f", int(time.time())),
+                "INSERT INTO albums(name, color, created_ts, parent_id) VALUES (?,?,?,?)",
+                (name, body.get("color") or "#ff5a5f", int(time.time()), parent),
             )
             conn.commit()
     except Exception:
@@ -921,6 +1032,9 @@ def update_album(album_id: int, body: dict = Body(...)):
     if "color" in body:
         fields.append("color=?")
         params.append(body["color"])
+    if "parent_id" in body:
+        fields.append("parent_id=?")
+        params.append(_check_parent(album_id, body["parent_id"]))
     if not fields:
         return {"ok": True}
     with db.write_lock:
@@ -933,6 +1047,11 @@ def update_album(album_id: int, body: dict = Body(...)):
 def delete_album(album_id: int):
     conn = db.connect()
     with db.write_lock:
+        # Subalbums move up a level rather than going with it.
+        conn.execute(
+            "UPDATE albums SET parent_id=(SELECT parent_id FROM albums WHERE id=?) WHERE parent_id=?",
+            (album_id, album_id),
+        )
         conn.execute("DELETE FROM albums WHERE id=?", (album_id,))
         conn.commit()
     return {"ok": True}

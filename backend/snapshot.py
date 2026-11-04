@@ -234,6 +234,14 @@ def build(progress=None) -> tuple[dict, dict]:
         # can drop its local copies. A low-water mark, not a high one: an import
         # still waiting for its full-resolution half holds it back.
         "import_watermark": int(db.get_setting("import_watermark", 0) or 0),
+        # Public by nature: it rides in every tile URL the viewer requests.
+        "carto_key": db.get_setting("carto_key", "") or "",
+        # A public (pk.) token, so the same reasoning applies. The usage is the
+        # desktop's tally as of this sync: the viewer cannot add to it, so it
+        # falls back on that and on Mapbox refusing a tile.
+        "map_provider": db.get_setting("map_provider", "free") or "free",
+        "mapbox_token": db.get_setting("mapbox_token", "") or "",
+        "mapbox_usage": db.get_setting("mapbox_usage", "") or "",
         "first_ts": min(stamps) if stamps else None,
         "last_ts": max(stamps) if stamps else None,
         "total_photos": totals["total"] or 0,

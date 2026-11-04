@@ -2025,15 +2025,89 @@ const map = L.map('map', {
   boxZoom:false,  // shift-drag is box select here, as it is on the desktop
 });
 
-const bases = {
-  dark: L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-    { attribution:'&copy; OpenStreetMap, &copy; CARTO', maxZoom:22, maxNativeZoom:20, subdomains:'abcd' }),
-  streets: L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-    { attribution:'&copy; OpenStreetMap contributors', maxZoom:22, maxNativeZoom:19 }),
-  satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-    { attribution:'Imagery &copy; Esri', maxZoom:22, maxNativeZoom:19 }),
-};
-bases.dark.addTo(map);
+// The same choice the desktop's basemaps.js makes, from the manifest. The viewer
+// cannot add to the desktop's Mapbox tally, so it goes by that tally as of the
+// last sync, and by Mapbox refusing a tile (an account without a card stops at
+// its free tier). The manifest lands after the map is up, so the bases are
+// rebuilt at boot; until then they are the free set.
+const MAPBOX_FREE = { styles:200000, raster:750000 };
+const MAPBOX_STYLES = { dark:'mapbox/dark-v11', streets:'mapbox/streets-v12' };
+const MAPBOX_ATTR = '&copy; <a href="https://www.mapbox.com/about/maps/" target="_blank">Mapbox</a> '
+  + '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> '
+  + '<a href="https://www.mapbox.com/map-feedback/" target="_blank">Improve this map</a>';
+let mapboxRefused = null;
+
+function useMapbox(kind) {
+  if (!M || M.map_provider !== 'mapbox' || !M.mapbox_token || mapboxRefused) return false;
+  let u = null;
+  try { u = JSON.parse(M.mapbox_usage || 'null'); } catch { /* no tally yet */ }
+  return !(u && u.month === new Date().toISOString().slice(0, 7) && u[kind] >= MAPBOX_FREE[kind]);
+}
+
+/** Tiles for one base; maxzoom is in the tile's own zoom levels. */
+function tileSpec(name, retina) {
+  const kind = name === 'satellite' ? 'raster' : 'styles';
+  if (useMapbox(kind)) {
+    const token = encodeURIComponent(M.mapbox_token);
+    // 512px tiles cover what four 256px tiles do, so a quarter of the requests.
+    return name === 'satellite'
+      ? { url:`https://api.mapbox.com/v4/mapbox.satellite/{z}/{x}/{y}@2x.jpg90?access_token=${token}`,
+          tileSize:512, maxzoom:19, attribution:MAPBOX_ATTR, mapbox:true }
+      : { url:`https://api.mapbox.com/styles/v1/${MAPBOX_STYLES[name]}/tiles/512/{z}/{x}/{y}${retina}?access_token=${token}`,
+          tileSize:512, maxzoom:21, attribution:MAPBOX_ATTR, mapbox:true };
+  }
+  if (name === 'dark') {
+    // CARTO serves an "API key required" watermark in place of every tile without one.
+    return { url:`https://basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}${retina}.png?key=${encodeURIComponent(M?.carto_key || '')}`,
+      tileSize:256, maxzoom:20, attribution:'&copy; OpenStreetMap contributors, &copy; CARTO' };
+  }
+  if (name === 'streets') {
+    return { url:'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+      tileSize:256, maxzoom:19, attribution:'&copy; OpenStreetMap contributors' };
+  }
+  return { url:'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    tileSize:256, maxzoom:19, attribution:'Imagery &copy; Esri' };
+}
+
+/** Mapbox said no: 401/403 is a bad token or an account stopped at its free
+ *  tier, 429 the rate limit. The free set for the rest of this session. */
+function mapboxRefusedWith(status) {
+  if (mapboxRefused) return;
+  mapboxRefused = status;
+  toast('Mapbox is not serving maps right now - switched to the free maps', true);
+  refreshBases();
+}
+
+let probing = false;
+const bases = {};
+
+function makeBase(name) {
+  const t = tileSpec(name, '{r}');
+  const offset = t.tileSize === 512 ? -1 : 0;   // a 512px tile at z is drawn as 256px tiles at z+1
+  const layer = L.tileLayer(t.url, { attribution:t.attribution, maxZoom:22,
+    maxNativeZoom:t.maxzoom - offset, tileSize:t.tileSize, zoomOffset:offset });
+  // An image cannot say why it failed, so one tile is asked for again to read
+  // the status. A missing tile or a blip is left alone.
+  if (t.mapbox) layer.on('tileerror', async (e) => {
+    if (mapboxRefused || probing) return;
+    probing = true;
+    try {
+      const res = await fetch(e.tile.src);
+      if ([401, 403, 429].includes(res.status)) mapboxRefusedWith(res.status);
+    } catch { /* offline */ } finally { probing = false; }
+  });
+  return layer;
+}
+
+/** (Re)build the bases from the current manifest, on both maps. The first
+ *  build runs before the globe's state exists, hence the flag. */
+function refreshBases(globeToo = true) {
+  Object.values(bases).forEach((l) => map.removeLayer(l));
+  ['dark', 'streets', 'satellite'].forEach((name) => { bases[name] = makeBase(name); });
+  bases[base].addTo(map);
+  if (globeToo) globeRebuildSkins();
+}
+refreshBases(false);
 
 function setBase(name) {
   if (!bases[name] || map.hasLayer(bases[name])) return;
@@ -2318,19 +2392,30 @@ const G = { lib:null, map:null, ready:false, booting:false, skin:'map', hovered:
 const GLOBE_EMPTY = { type:'FeatureCollection', features:[] };
 const RETINA = window.devicePixelRatio > 1 ? '@2x' : '';
 
+// `base` is the same basemap on the flat map; tileSpec decides who serves it.
 const GLOBE_SKINS = {
-  map: { layer:'skin-map', source:{ type:'raster', tileSize:256, maxzoom:20,
-    tiles:[...'abcd'].map((s) => `https://${s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}${RETINA}.png`),
-    attribution:'&copy; OpenStreetMap, &copy; CARTO' } },
-  // Same tile source as the flat map's Streets basemap: a single host, no
-  // retina variant - unlike CARTO, raw OSM tiles do not offer an @2x set.
-  streets: { layer:'skin-streets', source:{ type:'raster', tileSize:256, maxzoom:19,
-    tiles:['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-    attribution:'&copy; OpenStreetMap contributors' } },
-  satellite: { layer:'skin-satellite', source:{ type:'raster', tileSize:256, maxzoom:19,
-    tiles:['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
-    attribution:'Imagery &copy; Esri' } },
+  map: { layer:'skin-map', base:'dark' },
+  streets: { layer:'skin-streets', base:'streets' },
+  satellite: { layer:'skin-satellite', base:'satellite' },
 };
+
+function globeSkinSource(name) {
+  const t = tileSpec(GLOBE_SKINS[name].base, RETINA);
+  return { type:'raster', tiles:[t.url], tileSize:t.tileSize, maxzoom:t.maxzoom, attribution:t.attribution };
+}
+
+/** A source's tile size cannot change in place, so each skin is removed and
+ *  added again, under the path line as in the style. */
+function globeRebuildSkins() {
+  if (!G.ready) return;
+  Object.entries(GLOBE_SKINS).forEach(([name, def]) => {
+    G.map.removeLayer(def.layer);
+    G.map.removeSource(def.layer);
+    G.map.addSource(def.layer, globeSkinSource(name));
+    G.map.addLayer({ id:def.layer, type:'raster', source:def.layer,
+      layout:{ visibility: name === G.skin ? 'visible' : 'none' } }, 'path-line');
+  });
+}
 
 const globeTint = () => (byDay ? ['get', 'c'] : BASE_COLOR);
 
@@ -2345,9 +2430,9 @@ function globeStyle() {
            'sky-horizon-blend':0.6,
            'atmosphere-blend':['interpolate',['linear'],['zoom'],0,0.9,5,0.4,8,0] },
     sources: {
-      'skin-map': GLOBE_SKINS.map.source,
-      'skin-streets': GLOBE_SKINS.streets.source,
-      'skin-satellite': GLOBE_SKINS.satellite.source,
+      'skin-map': globeSkinSource('map'),
+      'skin-streets': globeSkinSource('streets'),
+      'skin-satellite': globeSkinSource('satellite'),
       photos: { type:'geojson', data:GLOBE_EMPTY },
       path: { type:'geojson', data:GLOBE_EMPTY },
       added: { type:'geojson', data:GLOBE_EMPTY },
@@ -2428,7 +2513,11 @@ function globeCreate(box) {
     globeWire();
     if (mode === 'globe') drawMap();
   });
-  G.map.on('error', (e) => console.warn('globe:', e.error?.message || e.type));
+  G.map.on('error', (e) => {
+    const err = e.error;
+    if ([401, 403, 429].includes(err?.status) && (err.url || '').startsWith('https://api.mapbox.com/')) mapboxRefusedWith(err.status);
+    else console.warn('globe:', err?.message || e.type);
+  });
 }
 
 function globeWire() {
@@ -4273,7 +4362,9 @@ async function watchSnapshot() {
  *  and the date range is left alone. */
 async function adoptSnapshot(m) {
   const grew = (m.n || 0) - (M.n || 0);
+  const basesChanged = ['carto_key', 'map_provider', 'mapbox_token', 'mapbox_usage'].some((k) => m[k] !== M[k]);
   M = m;
+  if (basesChanged) refreshBases();
   $('summary').textContent =
     `${fmtNum(m.n)} photos · ${fmtNum(m.geo_n)} located · updated ${fmtDate(m.generated)}`;
   readVideoIndex();
@@ -4328,6 +4419,7 @@ fetch('manifest.json', { cache:'no-cache' })
   .then(async (m) => {
     M = m;
     if (!M.ids) throw new Error('This snapshot predates gallery support - run a sync from the app');
+    refreshBases();
     $('loading').style.display = 'none';
     $('summary').textContent =
       `${fmtNum(m.n)} photos · ${fmtNum(m.geo_n)} located · updated ${fmtDate(m.generated)}`;

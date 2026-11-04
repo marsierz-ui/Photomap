@@ -1,24 +1,40 @@
-import { api } from './api.js';
+import { api, guard } from './api.js';
 import { state, params, on, fmtNum, fmtBytes, fmtDate } from './state.js';
-import { el, escapeHtml } from './ui.js';
+import { el, escapeHtml, toast } from './ui.js';
+import { countryName } from './lightbox.js';
 
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
+let retry = null;
+
 export function initInsights() {
   on('insightsShown', render);
   on('filters', () => { if (state.view === 'insights') render(); });
+  el('insights').addEventListener('click', async (e) => {
+    if (e.target.dataset.act !== 'places') return;
+    e.target.disabled = true;
+    await guard(api.post('/api/geocode/download'), 'Could not start the download');
+    toast('Downloading place names…');
+    render();
+  });
 }
 
 async function render() {
+  clearTimeout(retry);
   const target = el('insights');
-  const [stats, hour, dow, month, year] = await Promise.all([
+  const [stats, hour, dow, month, year, countries] = await Promise.all([
     api.get('/api/stats', params()),
     api.get('/api/dist', params({ extra: { field: 'hour' } })),
     api.get('/api/dist', params({ extra: { field: 'dow' } })),
     api.get('/api/dist', params({ extra: { field: 'month' } })),
     api.get('/api/dist', params({ extra: { field: 'year' } })),
+    api.get('/api/countries', params()),
   ]);
+  // Still downloading, or still naming photos: look again shortly.
+  if (state.view === 'insights' && (countries.downloading || countries.pending)) {
+    retry = setTimeout(render, 4000);
+  }
 
   const geoPct = stats.total ? Math.round((stats.geo / stats.total) * 100) : 0;
   target.innerHTML = `
@@ -28,8 +44,10 @@ async function render() {
       ${card('On disk', fmtBytes(stats.bytes))}
       ${card('First photo', fmtDate(stats.first_ts))}
       ${card('Latest photo', fmtDate(stats.last_ts))}
+      ${countries.items.length ? card('Countries', fmtNum(countries.items.length)) : ''}
       ${stats.missing ? card('Missing files', fmtNum(stats.missing)) : ''}
     </div>
+    ${countryChart(countries, stats.geo)}
     ${barChart('By hour of day', hour.items, (k) => `${k}`, 24, (i) => i)}
     ${barChart('By weekday', dow.items, (k) => DOW[k], 7, (i) => i)}
     ${barChart('By month', month.items, (k) => MONTHS[k - 1], 12, (i) => i + 1)}
@@ -45,6 +63,31 @@ async function render() {
           })()
         : '<span class="muted">No camera data</span>'}
     </div>`;
+}
+
+function countryChart(res, located) {
+  let body;
+  if (!res.available) {
+    body = res.downloading
+      ? '<span class="muted">Downloading place names…</span>'
+      : `<div class="muted small" style="margin-bottom:8px">${res.error ? `Download failed: ${escapeHtml(res.error)}. ` : ''}
+         Countries and place names are worked out on this computer from the GeoNames list of
+         places (about 11 MB, downloaded once). Nothing about your photos is sent anywhere.</div>
+         <button class="btn tiny" data-act="places">Download place names</button>`;
+  } else if (!res.items.length) {
+    body = `<span class="muted">${res.pending ? `Naming ${fmtNum(res.pending)} photos…` : 'No located photos for these filters'}</span>`;
+  } else {
+    const rows = res.items.map((c) => `<div class="hbar">
+      <span title="${escapeHtml(countryName(c.cc))}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(countryName(c.cc))}</span>
+      <span class="track"><span class="fill" style="width:${((c.c / res.items[0].c) * 100).toFixed(2)}%"></span></span>
+      <span class="n">${fmtNum(c.c)} <span class="muted">· ${fmtNum(c.days)} day${c.days === 1 ? '' : 's'} · ${fmtNum(c.places)} place${c.places === 1 ? '' : 's'} · ${fmtDate(c.first_ts)} - ${fmtDate(c.last_ts)}</span></span>
+    </div>`).join('');
+    body = (res.pending ? `<div class="muted small">Still naming ${fmtNum(res.pending)} photos…</div>` : '') + rows;
+  }
+  return `<div class="chart countries">
+    <h4>Countries <span class="muted" style="font-weight:400">${res.items.length ? `photos in each, of ${fmtNum(located)} located` : ''}</span></h4>
+    ${body}
+  </div>`;
 }
 
 function card(label, value) {
