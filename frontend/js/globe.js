@@ -13,7 +13,7 @@
 // the same machinery that draws a normal map: there is no memory to police, and
 // the renderer sleeps when nothing moves instead of spinning a frame loop.
 import { thumbUrl } from './api.js';
-import { emit, fmtNum, fmtDateTime, dayColor } from './state.js';
+import { state, emit, on, fmtNum, fmtDateTime, dayColor } from './state.js';
 import { el, toast } from './ui.js';
 
 // Vendored rather than fetched from a CDN, so an outage cannot take the globe
@@ -38,6 +38,11 @@ const EMPTY = { type: 'FeatureCollection', features: [] };
 // them the way the 2D map's {r} placeholder does: only where they show.
 const RETINA = window.devicePixelRatio > 1 ? '@2x' : '';
 
+// Read when the style is built, not at import: this module loads before the
+// config does. Without a key CARTO serves a watermark instead of every tile.
+const cartoTiles = (key) =>
+  [`https://basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}${RETINA}.png?key=${encodeURIComponent(key || '')}`];
+
 // Both skins live in the style at once and are switched by visibility. MapLibre
 // only fetches tiles for a source a visible layer uses, so the hidden one costs
 // nothing, the visible one keeps whatever it had cached when you switch back,
@@ -47,10 +52,9 @@ const SKINS = {
     layer: 'skin-map',
     source: {
       type: 'raster',
-      tiles: [...'abcd'].map((s) => `https://${s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}${RETINA}.png`),
       tileSize: 256,
       maxzoom: 20,
-      attribution: '&copy; OpenStreetMap, &copy; CARTO',
+      attribution: '&copy; OpenStreetMap contributors, &copy; CARTO',
     },
   },
   // Same tile source as the 2D map's Streets basemap: a single host, no retina
@@ -90,6 +94,8 @@ let tip = null;
 
 const container = () => el('globe');
 
+on('cartoKey', (key) => map?.getSource('skin-map')?.setTiles(cartoTiles(key)));
+
 // ------------------------------------------------------------------ loading
 
 // MapLibre is around half a megabyte and most sessions never open the globe, so
@@ -127,7 +133,7 @@ function style() {
       'atmosphere-blend': ['interpolate', ['linear'], ['zoom'], 0, 0.9, 5, 0.4, 8, 0],
     },
     sources: {
-      'skin-map': SKINS.map.source,
+      'skin-map': { ...SKINS.map.source, tiles: cartoTiles(state.config?.settings?.carto_key) },
       'skin-streets': SKINS.streets.source,
       'skin-satellite': SKINS.satellite.source,
       photos: { type: 'geojson', data: EMPTY },

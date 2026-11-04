@@ -2025,9 +2025,14 @@ const map = L.map('map', {
   boxZoom:false,  // shift-drag is box select here, as it is on the desktop
 });
 
+// The key comes from the manifest, which lands after the map is up, so the dark
+// layer is re-pointed at boot. Without a key CARTO serves a watermark tile.
+const cartoUrl = (key) =>
+  `https://basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png?key=${encodeURIComponent(key || '')}`;
+
 const bases = {
-  dark: L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-    { attribution:'&copy; OpenStreetMap, &copy; CARTO', maxZoom:22, maxNativeZoom:20, subdomains:'abcd' }),
+  dark: L.tileLayer(cartoUrl(''),
+    { attribution:'&copy; OpenStreetMap contributors, &copy; CARTO', maxZoom:22, maxNativeZoom:20 }),
   streets: L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
     { attribution:'&copy; OpenStreetMap contributors', maxZoom:22, maxNativeZoom:19 }),
   satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
@@ -2319,9 +2324,9 @@ const GLOBE_EMPTY = { type:'FeatureCollection', features:[] };
 const RETINA = window.devicePixelRatio > 1 ? '@2x' : '';
 
 const GLOBE_SKINS = {
+  // Tiles are filled in when the style is built, once the manifest has the key.
   map: { layer:'skin-map', source:{ type:'raster', tileSize:256, maxzoom:20,
-    tiles:[...'abcd'].map((s) => `https://${s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}${RETINA}.png`),
-    attribution:'&copy; OpenStreetMap, &copy; CARTO' } },
+    attribution:'&copy; OpenStreetMap contributors, &copy; CARTO' } },
   // Same tile source as the flat map's Streets basemap: a single host, no
   // retina variant - unlike CARTO, raw OSM tiles do not offer an @2x set.
   streets: { layer:'skin-streets', source:{ type:'raster', tileSize:256, maxzoom:19,
@@ -2345,7 +2350,8 @@ function globeStyle() {
            'sky-horizon-blend':0.6,
            'atmosphere-blend':['interpolate',['linear'],['zoom'],0,0.9,5,0.4,8,0] },
     sources: {
-      'skin-map': GLOBE_SKINS.map.source,
+      'skin-map': { ...GLOBE_SKINS.map.source,
+        tiles:[`https://basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}${RETINA}.png?key=${encodeURIComponent(M.carto_key || '')}`] },
       'skin-streets': GLOBE_SKINS.streets.source,
       'skin-satellite': GLOBE_SKINS.satellite.source,
       photos: { type:'geojson', data:GLOBE_EMPTY },
@@ -4273,6 +4279,7 @@ async function watchSnapshot() {
  *  and the date range is left alone. */
 async function adoptSnapshot(m) {
   const grew = (m.n || 0) - (M.n || 0);
+  if (m.carto_key !== M.carto_key) bases.dark.setUrl(cartoUrl(m.carto_key));
   M = m;
   $('summary').textContent =
     `${fmtNum(m.n)} photos · ${fmtNum(m.geo_n)} located · updated ${fmtDate(m.generated)}`;
@@ -4328,6 +4335,7 @@ fetch('manifest.json', { cache:'no-cache' })
   .then(async (m) => {
     M = m;
     if (!M.ids) throw new Error('This snapshot predates gallery support - run a sync from the app');
+    bases.dark.setUrl(cartoUrl(M.carto_key));
     $('loading').style.display = 'none';
     $('summary').textContent =
       `${fmtNum(m.n)} photos · ${fmtNum(m.geo_n)} located · updated ${fmtDate(m.generated)}`;

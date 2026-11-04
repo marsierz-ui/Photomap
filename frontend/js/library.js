@@ -104,6 +104,9 @@ export async function openSettings() {
         <option value="2400">2400px</option>
       </select>
     </div>
+    <div class="row"><label>CARTO key</label>
+      <input type="text" id="s-carto" placeholder="Needed for the dark map - free at carto.com/basemaps/apikey" autocomplete="off" spellcheck="false">
+    </div>
 
     ${shareBlock(c.share)}
     ${cloudBlock()}
@@ -123,6 +126,7 @@ export async function openSettings() {
     </div>`, (box, close) => {
     box.querySelector('#s-thumb').value = c.settings.thumb_size || '256';
     box.querySelector('#s-preview').value = c.settings.preview_size || '1600';
+    box.querySelector('#s-carto').value = c.settings.carto_key || '';
     box.querySelector('#s-theme').value = themeChoice();
     box.querySelector('#s-theme').onchange = (e) => setTheme(e.target.value);
     renderRoots(box);
@@ -137,6 +141,12 @@ export async function openSettings() {
     };
     box.querySelector('#s-thumb').onchange = (e) => api.post('/api/config/settings', { thumb_size: e.target.value });
     box.querySelector('#s-preview').onchange = (e) => api.post('/api/config/settings', { preview_size: e.target.value });
+    box.querySelector('#s-carto').onchange = async (e) => {
+      const key = e.target.value.trim();
+      await guard(api.post('/api/config/settings', { carto_key: key }), 'Could not save the key');
+      state.config.settings.carto_key = key;
+      emit('cartoKey', key);
+    };
     box.querySelector('[data-act=rethumb]').onclick = async () => {
       const res = await api.post('/api/thumbs/clear', {});
       toast(`${fmtNum(res.removed)} cached thumbnails cleared`);

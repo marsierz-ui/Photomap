@@ -39,6 +39,10 @@ function hasSize() {
 
 const bases = {};
 
+// CARTO serves an "API key required" watermark in place of every tile without one.
+const cartoUrl = (key) =>
+  `https://basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png?key=${encodeURIComponent(key || '')}`;
+
 export function initMap() {
   map = L.map('map', {
     center: [25, 10],
@@ -50,9 +54,9 @@ export function initMap() {
     boxZoom: false,
   });
 
-  bases.dark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-    attribution: '&copy; OpenStreetMap, &copy; CARTO',
-    maxZoom: 22, maxNativeZoom: 20, subdomains: 'abcd',
+  bases.dark = L.tileLayer(cartoUrl(state.config?.settings?.carto_key), {
+    attribution: '&copy; OpenStreetMap contributors, &copy; CARTO',
+    maxZoom: 22, maxNativeZoom: 20,
   });
   bases.streets = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap contributors',
@@ -94,6 +98,7 @@ export function initMap() {
   on('globeReady', () => { if (mode === 'globe') render(); });
   on('selection', () => { if (mode === 'points') render(); });
   on('dayNoteSaved', () => { if (showNotes) drawNotes(); });
+  on('cartoKey', (key) => bases.dark.setUrl(cartoUrl(key)));
   // A dark basemap under a light UI reads as a bug, so the two move together.
   on('theme', (mode2) => setBase(mode2 === 'light' ? 'streets' : 'dark'));
 }
