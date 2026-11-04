@@ -24,6 +24,7 @@ function wireFilters() {
   el('f-to').addEventListener('change', (e) => setFilters({ to: isoToTs(e.target.value, true) }));
   el('f-gps').addEventListener('change', (e) => setFilters({ gps: e.target.value }));
   el('f-camera').addEventListener('change', (e) => setFilters({ camera: e.target.value }));
+  el('f-label').addEventListener('change', (e) => setFilters({ label: e.target.value }));
   el('f-fav').addEventListener('change', (e) => setFilters({ fav: e.target.checked }));
   el('f-viewport').addEventListener('change', (e) => {
     state.followMap = e.target.checked;
@@ -33,7 +34,7 @@ function wireFilters() {
     state.followMap = false;
     el('f-viewport').checked = false;
     el('search').value = '';
-    setFilters({ from: null, to: null, gps: 'any', album: null, camera: '', q: '', fav: false, near: null, country: '' });
+    setFilters({ from: null, to: null, gps: 'any', album: null, camera: '', q: '', fav: false, near: null, country: '', label: '' });
   });
 
   let searchTimer = null;
@@ -49,6 +50,7 @@ function syncInputs() {
   el('f-to').value = tsToIso(f.to);
   el('f-gps').value = f.gps;
   el('f-camera').value = f.camera || '';
+  el('f-label').value = f.label || '';
   el('f-fav').checked = !!f.fav;
 }
 
@@ -58,6 +60,7 @@ function summarize() {
   if (f.from || f.to) bits.push(`${f.from ? fmtDate(f.from) : '…'} → ${f.to ? fmtDate(f.to) : '…'}`);
   if (f.album) bits.push(`album: ${state.albums.find((a) => a.id === Number(f.album))?.name ?? f.album}`);
   if (f.camera) bits.push(`camera: ${f.camera}`);
+  if (f.label) bits.push(f.label === 'other' ? 'not from Camera or Whatsapp' : `from ${f.label}`);
   if (f.q) bits.push(`"${f.q}"`);
   if (f.gps !== 'any') {
     bits.push({
@@ -90,6 +93,13 @@ export async function refreshAll() {
   select.innerHTML = '<option value="">Any</option>'
     + stats.cameras.map((c) => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)} (${fmtNum(c.c)})</option>`).join('');
   select.value = current;
+
+  // Where photos came from, by folder: Camera, Whatsapp, everything else.
+  const labels = el('f-label');
+  const name = (l) => (l === 'other' ? 'Other folders' : l);
+  labels.innerHTML = '<option value="">All</option>'
+    + stats.labels.map((l) => `<option value="${escapeHtml(l.label)}">${escapeHtml(name(l.label))} (${fmtNum(l.c)})</option>`).join('');
+  labels.value = state.filters.label || '';
   summarize();
 }
 

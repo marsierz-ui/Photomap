@@ -123,7 +123,10 @@ range (a mountain top, open sea near a coast) keeps its country and no town, and
 **Find a place** or the lightbox's coordinates still say where it was. Nearest-in-range is
 not a border test, so a photo taken right at a border can be filed under the neighbour.
 Positions changed later are named again on their own, and every photo was named again
-once when the range rule replaced the old flat 40 km.
+once when the range rule replaced the old flat 40 km. Ranges need the populations in the
+list; one downloaded by an older version has none, so every town keeps the flat 40 km
+until **⚙ → Place names → Download again** fetches the current list (which also brings the
+ids that names in other languages need, and ranks the biggest Paris first in search).
 
 **Town borders** - a range is a guess at where a town ends; OpenStreetMap has the borders
 themselves, the same ones a map draws. **⚙ → Town borders → OpenStreetMap** names each photo
@@ -289,11 +292,23 @@ within two hours, or all of them on one spot.
 
 **One by one** shows them in a window of their own, oldest first, within the current
 filters: the photo on the left, a search box (towns, saved places, typed coordinates) and
-a map on the right. Pick a search result or click the map (the pin can be dragged), and
-**Enter** saves it as a hand-set position and brings up the next photo. Suggestions above
-the map offer the last position used and the nearest photos in time that have a real fix.
-**→** skips, **←** goes back, **Esc** closes. The timeline marks the days that have any with an
-amber tick under the bars.
+a map on the right. Type a place, **↑ ↓** to move through the results, and **Enter** saves
+the highlighted one as a hand-set position and brings up the next photo - one key from a
+typed name to the next photo. Enter pressed before the results arrive takes the first one
+when they do. Clicking the map (the pin can be dragged) or a suggestion sets the place
+too, and then Enter saves it. Suggestions above the map offer the last position used and
+the nearest photos in time that have a real fix. **← →** move between photos whenever the
+search box is empty, which it is after every save, and the photos either side are loaded
+ahead so stepping is instant; **Esc** closes. The timeline marks the days that have any with
+an amber tick under the bars.
+
+**Source** - where a photo came from, read off its folder: **Camera** for a camera roll
+(a folder called Camera or DCIM), **Whatsapp** for anything in a WhatsApp folder (Syncthing's
+`Whatsapp` and `Whatsapp video`, Android's "WhatsApp Images"). Gallery tiles and the
+lightbox show it, and the **Source** filter narrows every view to one - which with
+*Without GPS* and **One by one** is a quick way through WhatsApp photos, which carry no
+location. It is worked out from the folder on every query rather than stored, so it needs
+no rescan.
 
 **Your data** - **⚙ → Your data** downloads every located photo as GeoJSON or CSV
 (path, time, coordinates, place, country, camera, note) and every track as GPX. The index
@@ -1327,9 +1342,10 @@ because it is not part of the library any more.
 Everything the UI uses is a plain HTTP endpoint on `127.0.0.1:8712`, so the index is
 scriptable: `/api/points`, `/api/photos`, `/api/timeline`, `/api/dist`, `/api/stats`,
 `/api/albums`. All of them accept the same filter query params
-(`from`, `to`, `bbox`, `album`, `camera`, `gps`, `fav`, `q`, `near`, `country`), where
+(`from`, `to`, `bbox`, `album`, `camera`, `gps`, `fav`, `q`, `near`, `country`, `label`), where
 `q` matches the path, the note or the place name (add `cc=IE,FR` to match those countries
-too), `near` is a saved place id and `country` a two-letter code.
+too), `near` is a saved place id, `country` a two-letter code and `label` `Camera`, `Whatsapp` or
+`other`.
 
 Saved places are `GET/POST /api/places` and `PATCH/DELETE /api/places/<id>`; place
 search is `GET /api/geocode/search?q=`, and `GET /api/geocode/reverse?lat=&lon=` names a

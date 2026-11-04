@@ -258,6 +258,7 @@ async function show() {
     <span id="lb-music" class="hidden"></span>
     <span id="lb-suggest">${isApprox(data) ? '<button data-act="fixloc">Fix location</button>' : ''}</span>
     <span><span class="k">Camera</span> ${escapeHtml([data.camera_make, data.camera_model].filter(Boolean).join(' ') || '—')}</span>
+    ${data.label ? `<span><span class="k">Source</span> <span class="src-tag">${escapeHtml(data.label)}</span></span>` : ''}
     <span><span class="k">Size</span> ${data.width || '?'}×${data.height || '?'} · ${fmtBytes(data.filesize)}${video ? ` · ▶ ${data.duration ? clock(data.duration) : 'video'}` : ''}</span>
     ${albums ? `<span><span class="k">Albums</span> ${albums}</span>` : ''}
     <textarea id="lb-note" class="lb-note" rows="1" maxlength="1000" spellcheck="false"

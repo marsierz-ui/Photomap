@@ -330,6 +330,15 @@ async function placesStatus(box) {
     };
     return;
   }
+  if (!st.populations) {
+    // An old list: no populations to size towns by, no ids for other languages.
+    slot.insertAdjacentHTML('beforeend', ` · this list is from an older version
+      <button class="btn tiny" data-act="places-again" title="Town ranges sized by population, and names in other languages">Download again (about 11 MB)</button>`);
+    slot.querySelector('[data-act=places-again]').onclick = async () => {
+      await guard(api.post('/api/geocode/download'), 'Could not start the download');
+      placesStatus(box);
+    };
+  }
   languageStatus(box, st);
   if (st.downloading || st.pending || st.names.running) setTimeout(() => placesStatus(box), 3000);
 }

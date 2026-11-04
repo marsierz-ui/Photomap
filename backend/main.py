@@ -92,6 +92,18 @@ def _bbox(value: str | None) -> tuple[str, list] | None:
     return "p.lat BETWEEN ? AND ? AND (p.lon >= ? OR p.lon <= ?)", [south, north, west, east]
 
 
+# Where a photo came from, read off its folder: a phone's camera roll or
+# WhatsApp, which is how Syncthing lays a phone out (Camera, Whatsapp,
+# Whatsapp video) and how Android and iOS name the folders themselves (DCIM,
+# "WhatsApp Images"). Worked out in the query rather than stored, so it needs
+# no rescan and cannot go stale when files move.
+LABEL_SQL = (
+    "CASE WHEN lower(p.folder) LIKE '%whatsapp%' THEN 'Whatsapp'"
+    " WHEN lower(p.folder) LIKE '%camera%' OR lower(p.folder) LIKE '%dcim%' THEN 'Camera' END"
+)
+LABELS = ("Camera", "Whatsapp")
+
+
 def _filters(request: Request) -> tuple[str, list]:
     q = request.query_params
     where = ["p.missing=0"] if q.get("missing") != "1" else ["p.missing=1"]
@@ -166,6 +178,11 @@ def _filters(request: Request) -> tuple[str, list]:
         params.append(q["country"].upper())
     if q.get("fav") == "1":
         where.append("p.favorite=1")
+    if q.get("label") in LABELS:
+        where.append(f"({LABEL_SQL}) = ?")
+        params.append(q["label"])
+    elif q.get("label") == "other":
+        where.append(f"({LABEL_SQL}) IS NULL")
     if q.get("ids"):
         ids = [int(x) for x in q["ids"].split(",") if x.strip().isdigit()]
         where.append(f"p.id IN ({','.join('?' * len(ids))})" if ids else "0")
@@ -544,7 +561,7 @@ def _photo_page(where: str, params: list, limit: int, offset: int, sort: str) ->
     rows = conn.execute(
         f"SELECT p.id, p.filename, p.path, p.ext, p.taken_ts, p.taken_src, p.lat, p.lon,"
         f" p.width, p.height, p.favorite, p.filesize, p.camera_make, p.camera_model,"
-        f" p.note, p.duration, p.gps_method, p.place, p.country, p.orientation"
+        f" p.note, p.duration, p.gps_method, p.place, p.country, p.orientation, ({LABEL_SQL}) AS label"
         f" FROM photos p WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
         params + [min(limit, 1000), offset],
     ).fetchall()
@@ -576,7 +593,7 @@ def photo_ids(request: Request, limit: int = 200000, sort: str = "date_desc"):
 @app.get("/api/photos/{photo_id}")
 def photo_detail(photo_id: int):
     conn = db.connect()
-    row = conn.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone()
+    row = conn.execute(f"SELECT p.*, ({LABEL_SQL}) AS label FROM photos p WHERE p.id=?", (photo_id,)).fetchone()
     if not row:
         raise HTTPException(404, "Not found")
     data = dict(row)
@@ -1334,11 +1351,16 @@ def stats(request: Request):
         f" COUNT(*) c FROM photos p WHERE {where} GROUP BY name ORDER BY c DESC LIMIT 12",
         params,
     ).fetchall()
+    labels = conn.execute(
+        f"SELECT ({LABEL_SQL}) AS label, COUNT(*) c FROM photos p WHERE {where} GROUP BY label ORDER BY c DESC",
+        params,
+    ).fetchall()
     missing = conn.execute("SELECT COUNT(*) c FROM photos WHERE missing=1").fetchone()["c"]
     return {
         **dict(base),
         "missing": missing,
         "cameras": [dict(r) for r in cameras if r["name"]],
+        "labels": [{"label": r["label"] or "other", "c": r["c"]} for r in labels],
     }
 
 

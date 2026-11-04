@@ -823,7 +823,7 @@ label.btn { cursor: pointer; }
   padding: 6px 8px; color: inherit; font: inherit;
 }
 .lp-find .place-results { left: 0; right: 0; width: auto; z-index: 1000; }
-.lp-find .place-results button.first { background: var(--hover); }
+.lp-find .place-results button.hi { background: var(--active); }
 .lp-map { flex: 1; min-height: 220px; border-radius: var(--radius); border: 1px solid var(--line); isolation: isolate; }
 
 .modal-box:has(.home-tl) { max-width: 760px; width: min(760px, calc(100vw - 24px)); }
@@ -889,3 +889,9 @@ label.btn { cursor: pointer; }
 .replay-card .tune { margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tv-place { display: flex; align-items: center; gap: 8px; padding: 3px 4px; border-radius: 4px; cursor: pointer; }
 .tv-place:hover { background: var(--hover); }
+
+/* Where a photo came from (Camera, Whatsapp), read off its folder. */
+.src-tag {
+  display: inline-block; padding: 0 5px; border-radius: 3px; font-size: 10px; line-height: 15px;
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--muted); white-space: nowrap;
+}

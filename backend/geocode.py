@@ -44,15 +44,19 @@ PLACES = DIR / "places.tsv"
 RANGE_BASE_KM = 3.0
 RANGE_PER_SQRT_POP = 0.0103
 RANGE_MAX_KM = 60.0
+# A place list downloaded before populations were kept cannot size a town, so
+# every town reaches this far, as all of them used to.
+LEGACY_KM = 40.0
 COUNTRY_KM = 150
 # Bumped when the naming rule changes, so every photo is named again once.
-RULE = "range-1"
+RULE = "range-2"
 
 
 def range_km(population: int) -> float:
     return min(RANGE_MAX_KM, RANGE_BASE_KM + RANGE_PER_SQRT_POP * math.sqrt(max(population, 1000)))
 
 _index = None
+_has_pop = True
 _pops: list = []
 _ids: list = []
 _region_ids: list = []
@@ -83,6 +87,15 @@ def language() -> str:
     return (db.get_setting("place_lang") or "").strip().lower()
 
 
+def has_population() -> bool:
+    """Whether places.tsv carries populations, which town ranges are sized by.
+    Lists downloaded before ranges existed have five columns and do not."""
+    if not available():
+        return False
+    with PLACES.open(encoding="utf-8") as f:
+        return len(f.readline().rstrip("\r\n").split("\t")) >= 6
+
+
 def has_ids() -> bool:
     """Whether places.tsv carries GeoNames ids, which translations are keyed by.
     Lists downloaded before translations existed do not."""
@@ -99,7 +112,7 @@ def status() -> dict:
     lang = language()
     return {"available": available(), "downloading": _download["running"],
             "error": _download["error"], "pending": pending, "filling": _fill_lock.locked(),
-            "language": lang, "ids": has_ids(),
+            "language": lang, "ids": has_ids(), "populations": has_population(),
             "translated": bool(lang) and names_file(lang).exists(),
             "names": {k: _names[k] for k in ("running", "error", "lang", "done", "total")}}
 
@@ -271,8 +284,9 @@ def _load():
                 region_ids.append(rest[2] if len(rest) > 2 else "")
                 grid.setdefault((math.floor(lat), math.floor(lon)), []).append(i)
             _index = (names, lats, lons, ccs, regions, grid)
-            global _pops, _folded, _ids, _region_ids
+            global _pops, _folded, _ids, _region_ids, _has_pop
             _pops, _ids, _region_ids = pops, ids, region_ids
+            _has_pop = any(pops)
             _folded = None
     return _index
 
@@ -303,7 +317,7 @@ def lookup(lat: float, lon: float) -> tuple[str, str]:
                     km = 6371 * math.hypot(x, y)
                     if km < best_km:
                         best, best_km = i, km
-                    if km < town_km and km <= range_km(_pops[i]):
+                    if km < town_km and km <= (range_km(_pops[i]) if _has_pop else LEGACY_KM):
                         town, town_km = i, km
     near = best is not None and best_km <= COUNTRY_KM
     # A town border from OpenStreetMap, where one is known, beats any range.

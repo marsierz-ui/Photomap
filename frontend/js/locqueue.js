@@ -26,7 +26,7 @@ export async function openLocationQueue() {
       <strong>Place photos without a location</strong>
       <span class="muted" data-slot="count"></span>
       <div class="spacer"></div>
-      <span class="muted small">Enter confirms · → skips · ← goes back · Esc closes</span>
+      <span class="muted small">Type a place, ↑ ↓ to pick, Enter saves and goes on · ← → move between photos when the box is empty · Esc closes</span>
     </header>
     <div class="lq-body">
       <div class="lq-photo">
@@ -51,6 +51,7 @@ export async function openLocationQueue() {
   const picker = locationPicker(panel.querySelector('.lq-picker'), {
     onChange: (at) => { ok.disabled = !at; },
     onEnter: () => confirm(),
+    enterConfirms: true,
   });
 
   let index = 0;
@@ -59,15 +60,26 @@ export async function openLocationQueue() {
   let suggestions = {};
   let busy = false;
 
+  // The photos either side, fetched ahead so stepping with the arrows is instant.
+  const preload = (i) => { if (ids[i] != null) new Image().src = previewUrl(ids[i]); };
+
   async function show() {
     if (index >= ids.length) { finish(); return; }
     const id = ids[index];
     slot('count').textContent = `${fmtNum(index + 1)} of ${fmtNum(ids.length)} · ${fmtNum(placed)} placed`;
     panel.querySelector('.lq-photo img').src = previewUrl(id);
+    preload(index + 1);
+    preload(index - 1);
+    // Cleared now rather than once the details arrive: typing can start at once
+    // and must not be wiped by a slow answer.
+    picker.clear();
+    ok.disabled = true;
+    picker.focus();
+    slot('chips').innerHTML = '';
     const photo = await api.get(`/api/photos/${id}`);
     if (ids[index] !== id) return;
     const camera = [photo.camera_make, photo.camera_model].filter(Boolean).join(' ');
-    slot('meta').innerHTML = `<strong>${fmtDateTime(photo.taken_ts)}</strong> · ${escapeHtml(photo.filename)}${camera ? ` · ${escapeHtml(camera)}` : ''}
+    slot('meta').innerHTML = `<strong>${fmtDateTime(photo.taken_ts)}</strong> · ${escapeHtml(photo.filename)}${camera ? ` · ${escapeHtml(camera)}` : ''}${photo.label ? ` · <span class="src-tag">${escapeHtml(photo.label)}</span>` : ''}
       <div class="muted">${escapeHtml(photo.folder)}</div>`;
     suggestions = {};
     try {
@@ -81,9 +93,14 @@ export async function openLocationQueue() {
     slot('chips').innerHTML = chips.length ? `<span class="muted small">Suggestions:</span> ${chips.join('')}` : '';
     // Start where the answer most likely is, without choosing it for them.
     const near = suggestions.before || suggestions.after || last;
-    picker.clear(near ? { lat: near.lat, lon: near.lon, zoom: 12 } : null);
-    ok.disabled = true;
-    picker.focus();
+    if (near && !picker.get()) picker.map.setView([near.lat, near.lon], 12);
+  }
+
+  function step(by) {
+    const to = Math.max(0, Math.min(ids.length - 1, index + by));
+    if (to === index) return;
+    index = to;
+    show();
   }
 
   async function confirm() {
@@ -115,12 +132,13 @@ export async function openLocationQueue() {
 
   function onKey(e) {
     if (!document.getElementById('modal').classList.contains('hidden')) return;
-    const typing = e.target.matches('input, select, textarea');
     if (e.key === 'Escape') { e.preventDefault(); close(); return; }
-    if (typing) return;
+    // The search box only needs the arrows while there is text in it.
+    const inEmptySearch = e.target === picker.input && !picker.input.value;
+    if (e.target.matches('input, select, textarea') && !inEmptySearch) return;
     if (e.key === 'Enter') { e.preventDefault(); confirm(); }
-    if (e.key === 'ArrowRight') { e.preventDefault(); index += 1; show(); }
-    if (e.key === 'ArrowLeft' && index > 0) { e.preventDefault(); index -= 1; show(); }
+    if (e.key === 'ArrowRight') { e.preventDefault(); step(1); }
+    if (e.key === 'ArrowLeft') { e.preventDefault(); step(-1); }
   }
   document.addEventListener('keydown', onKey);
 
@@ -130,7 +148,7 @@ export async function openLocationQueue() {
     if (act === 'close') close();
     if (act === 'ok') confirm();
     if (act === 'skip') { index += 1; show(); }
-    if (act === 'back' && index > 0) { index -= 1; show(); }
+    if (act === 'back') step(-1);
     if (chip === 'last') picker.set(last.lat, last.lon, { label: last.label });
     if (chip === 'before' || chip === 'after') {
       const s = suggestions[chip];

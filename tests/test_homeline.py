@@ -66,6 +66,18 @@ outside = geocode.lookup(50.08, 10.0)  # ~9 km out
 check("outside every range keeps only the country", outside == ("", "DE"), outside)
 check("a city's outskirts are the city", geocode.lookup(53.40, -6.40)[0].startswith("Dublin"))
 
+# A list from before populations were kept: every town reaches the old 40 km.
+full_list = geocode.PLACES.read_text(encoding="utf-8")
+geocode.PLACES.write_text("\n".join("\t".join(line.split("\t")[:5]) for line in full_list.splitlines()),
+                          encoding="utf-8")
+geocode._index = None
+check("old list is recognised", not geocode.has_population())
+check("old list: towns keep the flat 40 km", geocode.lookup(50.08, 10.0)[0].startswith("Tinyville"),
+      geocode.lookup(50.08, 10.0))
+geocode.PLACES.write_text(full_list, encoding="utf-8")
+geocode._index = None
+check("new list: ranges again", geocode.has_population() and geocode.lookup(50.08, 10.0) == ("", "DE"))
+
 # ------------------------------------------------------------ photos
 
 DAY = 86400
@@ -369,6 +381,25 @@ check("cells are asked about once", len(sent) == 1, len(sent))
 db.set_setting("place_borders", "0")
 check("turned off: the range rule again", geocode.lookup(*GALWAY)[0].startswith("Galway, Connacht"),
       geocode.lookup(*GALWAY))
+
+# ------------------------------------------------------------- source labels
+
+conn.executemany("INSERT INTO photos(id, path, folder, filename, lat, lon, taken_ts) VALUES (?,?,?,?,?,?,?)", [
+    (9001, r"C:\s\Syncthing\Camera\a.jpg", r"C:\s\Syncthing\Camera", "a.jpg", None, None, T0),
+    (9002, r"C:\s\Syncthing\Whatsapp\Sent\b.jpg", r"C:\s\Syncthing\Whatsapp\Sent", "b.jpg", None, None, T0),
+    (9003, r"C:\s\Syncthing\Whatsapp video\c.mp4", r"C:\s\Syncthing\Whatsapp video", "c.mp4", None, None, T0),
+    (9004, r"C:\phone\DCIM\Camera\d.jpg", r"C:\phone\DCIM\Camera", "d.jpg", None, None, T0),
+])
+conn.commit()
+labelled = lambda label: {i["id"] for i in main.list_photos(request(label=label), limit=1000)["items"]}  # noqa: E731
+check("Camera from the folder name", labelled("Camera") == {9001, 9004}, labelled("Camera"))
+check("Whatsapp includes its video folder", labelled("Whatsapp") == {9002, 9003}, labelled("Whatsapp"))
+check("other folders have no label", 9001 not in labelled("other") and 1 in labelled("other"))
+check("the lightbox gets the label", main.photo_detail(9003)["label"] == "Whatsapp")
+counts = {x["label"]: x["c"] for x in main.stats(request())["labels"]}
+check("counts per label for the filter", counts.get("Camera") == 2 and counts.get("Whatsapp") == 2, counts)
+conn.execute("DELETE FROM photos WHERE id >= 9001")
+conn.commit()
 
 # ------------------------------------------------------------ places visited
 

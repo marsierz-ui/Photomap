@@ -8,7 +8,9 @@ import { escapeHtml } from './ui.js';
 import { baseLayer } from './mapview.js';
 import { parseCoordinates } from './actions.js';
 
-export function locationPicker(root, { onChange = () => {}, onEnter = null } = {}) {
+// With `enterConfirms`, Enter on a search result chooses it and calls onEnter
+// at once - one key from a typed name to a saved location, for the queue.
+export function locationPicker(root, { onChange = () => {}, onEnter = null, enterConfirms = false } = {}) {
   root.classList.add('lp');
   root.innerHTML = `
     <div class="lp-find">
@@ -28,6 +30,9 @@ export function locationPicker(root, { onChange = () => {}, onEnter = null } = {
   let marker = null;
   let current = null;
   let results = [];
+  let hi = 0; // the highlighted result, moved with the up and down arrows
+  let searching = false;
+  let enterWaiting = false; // Enter pressed before the results arrived
   let timer = null;
   let token = 0;
 
@@ -67,6 +72,9 @@ export function locationPicker(root, { onChange = () => {}, onEnter = null } = {
     if (marker) { map.removeLayer(marker); marker = null; }
     at.textContent = 'Search above, or click the map';
     input.value = '';
+    results = [];
+    enterWaiting = false;
+    close();
     if (view) map.setView([view.lat, view.lon], view.zoom ?? 11);
   }
 
@@ -78,16 +86,39 @@ export function locationPicker(root, { onChange = () => {}, onEnter = null } = {
     input.value = r.label;
     set(r.lat, r.lon, { label: r.name || r.label, zoom: r.zoom });
   };
+  const enter = () => {
+    if (!list.classList.contains('hidden') && results.length) {
+      choose(results[hi]);
+      if (enterConfirms && onEnter) onEnter();
+    } else if (searching || timer) {
+      enterWaiting = true;
+    } else if (onEnter && current) {
+      onEnter();
+    }
+  };
+  const highlight = (i) => {
+    hi = Math.max(0, Math.min(i, results.length - 1));
+    list.querySelectorAll('[data-i]').forEach((b) => b.classList.toggle('hi', Number(b.dataset.i) === hi));
+    list.querySelector('.hi')?.scrollIntoView({ block: 'nearest' });
+  };
   input.addEventListener('input', () => {
     clearTimeout(timer);
     const q = input.value.trim();
-    if (q.length < 2) { close(); results = []; return; }
+    enterWaiting = false;
+    if (q.length < 2) { close(); results = []; timer = null; return; }
     timer = setTimeout(async () => {
+      timer = null;
+      searching = true;
       const typed = parseCoordinates(q);
       const ql = q.toLowerCase();
       const saved = (state.places || []).filter((p) => p.name.toLowerCase().includes(ql))
         .map((p) => ({ label: p.name, name: p.name, lat: p.lat, lon: p.lon, zoom: 15, note: 'saved place' }));
-      const res = await api.get('/api/geocode/search', new URLSearchParams({ q, limit: 8 }));
+      let res;
+      try {
+        res = await api.get('/api/geocode/search', new URLSearchParams({ q, limit: 8 }));
+      } finally {
+        searching = false;
+      }
       if (input.value.trim() !== q) return;
       results = [
         ...(typed ? [{ label: q, name: '', lat: typed.lat, lon: typed.lon, zoom: 15, note: 'coordinates' }] : []),
@@ -97,23 +128,34 @@ export function locationPicker(root, { onChange = () => {}, onEnter = null } = {
           zoom: h.population > 500000 ? 11 : 13, note: `${h.local ? `${h.local} · ` : ''}${flag(h.cc)} ${countryName(h.cc)}`,
         })),
       ];
-      list.innerHTML = results.map((r, i) => `<button type="button" data-i="${i}" class="${i ? '' : 'first'}">${escapeHtml(r.label)} <span class="muted">${escapeHtml(r.note)}</span></button>`).join('')
+      hi = 0;
+      list.innerHTML = results.map((r, i) => `<button type="button" data-i="${i}" class="${i ? '' : 'hi'}">${escapeHtml(r.label)} <span class="muted">${escapeHtml(r.note)}</span></button>`).join('')
         || `<span class="muted small" style="padding:6px">${res.available ? 'Nothing by that name' : 'Download place names in Settings to search by name'}</span>`;
       list.classList.remove('hidden');
+      if (enterWaiting) {
+        enterWaiting = false;
+        if (results.length) enter();
+      }
     }, 180);
   });
   input.addEventListener('keydown', (e) => {
+    const open = !list.classList.contains('hidden') && results.length;
     if (e.key === 'Enter') {
       e.preventDefault();
       e.stopPropagation();
-      if (!list.classList.contains('hidden') && results.length) choose(results[0]);
-      else if (onEnter && current) onEnter();
+      enter();
+    }
+    if (open && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      e.preventDefault();
+      highlight(hi + (e.key === 'ArrowDown' ? 1 : -1));
     }
     if (e.key === 'Escape' && !list.classList.contains('hidden')) { e.stopPropagation(); close(); }
   });
   list.addEventListener('click', (e) => {
     const r = results[Number(e.target.closest('[data-i]')?.dataset.i)];
-    if (r) choose(r);
+    if (!r) return;
+    choose(r);
+    if (enterConfirms && onEnter) onEnter();
   });
   root.addEventListener('focusout', (e) => { if (!root.querySelector('.lp-find').contains(e.relatedTarget)) setTimeout(close, 150); });
 
@@ -121,6 +163,7 @@ export function locationPicker(root, { onChange = () => {}, onEnter = null } = {
     set, clear, map,
     get: () => current,
     focus: () => input.focus(),
+    input,
     destroy: () => { sizer.disconnect(); map.remove(); },
   };
 }
