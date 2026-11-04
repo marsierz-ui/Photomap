@@ -125,6 +125,15 @@ with a flag each - click one to narrow everything to it - and a scratch-map card
 of the world's 250 countries and territories you have photos in, and how much of each
 continent.
 
+**Place names in your language** - GeoNames spells places the local way (Wien,
+Gaillimh, Kraków). **⚙ → Names in** switches to another language: the first time, it
+streams GeoNames' alternate names (about 190 MB), keeps only that language's name for each
+town and region on the list - a few MB - and deletes the archive. Historic and slang
+names are left out, and a place with no name in that language keeps its own. Every photo
+is renamed in the background, and search finds places by either spelling ("Vienna" and
+"Wien" both work). A place list downloaded before this feature carries no GeoNames ids,
+so Settings asks to download it once more first.
+
 **Trips** - worked out from the photos, nothing to set up. A day is *away* when a photo
 that day was taken more than 50 km from home (15-200 km, chosen on the Trips tab); away
 days in a row are one trip, and so are away days a day or two apart with no photos in
@@ -1177,7 +1186,7 @@ data/            photomap.db + thumbs/ (created on first run, safe to delete)
 
 Run the tests with `.venv\Scripts\python.exe tests\test_sync.py`,
 `tests\test_writeback.py`, `tests\test_nametime.py`, `tests\test_dupes.py`,
-`tests\test_videometa.py`, `tests\test_fixes.py`, `tests\test_places.py`, `tests\test_trips.py`, `node tests\test_worker.mjs`, `node tests\test_exif.mjs`,
+`tests\test_videometa.py`, `tests\test_fixes.py`, `tests\test_places.py`, `tests\test_placenames.py`, `tests\test_trips.py`, `node tests\test_worker.mjs`, `node tests\test_exif.mjs`,
 `node tests\test_uploadq.mjs`, `node tests\test_sw.mjs`, and (after
 `pip install botocore`) `tests\test_sigv4.py`.
 
