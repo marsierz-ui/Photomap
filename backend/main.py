@@ -1,4 +1,5 @@
 import datetime
+import io
 import json
 import os
 import shutil
@@ -10,12 +11,13 @@ from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import (
-    FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse,
+    FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
 
 from . import (
-    auth, days, db, dupes, geocode, nametime, netinfo, photometa, r2, scanner, snapshot, sync, thumbs,
+    auth, days, db, dupes, geocode, nametime, netinfo, photometa, places, r2, scanner, snapshot, sync,
+    thumbs, tracks, trips,
 )
 from .photometa import HEIF_ERROR, HEIF_OK, IMAGE_EXTS
 
@@ -102,6 +104,8 @@ def _filters(request: Request) -> tuple[str, list]:
         where.append("p.gps_method='MANUAL'")
     elif gps == "neighbour":
         where.append("p.gps_method='NEIGHBOUR'")
+    elif gps == "track":
+        where.append("p.gps_method='TRACK'")
     elif gps == "approx":
         # Positions guessed from towers or wifi, which are the ones worth fixing.
         marks = ",".join("?" * len(photometa.APPROX_METHODS))
@@ -126,10 +130,31 @@ def _filters(request: Request) -> tuple[str, list]:
         where.append("p.folder LIKE ?")
         params.append(f"{q['folder']}%")
     if q.get("q"):
-        # One box searches both, because "the shot with the broken bike" is a
-        # note and "IMG_4021" is a filename, and nobody wants to pick first.
-        where.append("(p.path LIKE ? OR p.note LIKE ?)")
-        params.extend([f"%{q['q']}%", f"%{q['q']}%"])
+        # One box searches all of them, because "the shot with the broken bike"
+        # is a note, "IMG_4021" is a filename and "Kilronan" is a place, and
+        # nobody wants to pick first. Country names are in the browser's
+        # language, so it is the browser that turns "Ireland" into IE and
+        # sends the codes along as cc.
+        term = f"%{q['q']}%"
+        ors = ["p.path LIKE ?", "p.note LIKE ?", "p.place LIKE ?"]
+        args = [term, term, term]
+        codes = [c.strip().upper() for c in q.get("cc", "").split(",") if len(c.strip()) == 2]
+        if codes:
+            ors.append(f"p.country IN ({','.join('?' * len(codes))})")
+            args.extend(codes)
+        where.append(f"({' OR '.join(ors)})")
+        params.extend(args)
+    if q.get("near"):
+        spot = places.get(int(q["near"])) if q["near"].isdigit() else None
+        if spot:
+            sql, args = places.circle_sql(spot["lat"], spot["lon"], spot["radius_m"])
+            where.append(f"({sql})")
+            params.extend(args)
+        else:
+            where.append("0")
+    if q.get("country"):
+        where.append("p.country = ?")
+        params.append(q["country"].upper())
     if q.get("fav") == "1":
         where.append("p.favorite=1")
     if q.get("ids"):
@@ -359,7 +384,18 @@ def countries(request: Request):
         f" GROUP BY p.country ORDER BY c DESC",
         params,
     ).fetchall()
-    return {"items": [dict(r) for r in rows], **geocode.status()}
+    items = [dict(r) for r in rows]
+    # The scratch-map figures: how much of each continent, and of the world.
+    seen = {i["cc"] for i in items}
+    continents = []
+    for code, members in geocode.CONTINENTS.items():
+        all_cc = members.split()
+        continents.append({"code": code, "visited": len(seen & set(all_cc)), "total": len(all_cc)})
+    for i in items:
+        i["continent"] = geocode.CONTINENT_OF.get(i["cc"], "")
+    return {"items": items, "continents": continents,
+            "world": {"visited": len(seen & set(geocode.CONTINENT_OF)), "total": len(geocode.CONTINENT_OF)},
+            **geocode.status()}
 
 
 @app.get("/api/browse")
@@ -461,7 +497,7 @@ def _photo_page(where: str, params: list, limit: int, offset: int, sort: str) ->
     rows = conn.execute(
         f"SELECT p.id, p.filename, p.path, p.ext, p.taken_ts, p.taken_src, p.lat, p.lon,"
         f" p.width, p.height, p.favorite, p.filesize, p.camera_make, p.camera_model,"
-        f" p.note, p.duration, p.gps_method"
+        f" p.note, p.duration, p.gps_method, p.place, p.country, p.orientation"
         f" FROM photos p WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
         params + [min(limit, 1000), offset],
     ).fetchall()
@@ -706,11 +742,13 @@ def fix_locations(body: dict = Body(...)):
     conn = db.connect()
     approx = ",".join("?" * len(photometa.APPROX_METHODS))
     estimated = ",".join("?" * len(photometa.ESTIMATED_METHODS))
+    # The no-location queue sends photos with no position at all as well.
+    unlocated = " OR lat IS NULL" if body.get("include_unlocated") else ""
     fixed = no_neighbour = skipped = 0
     for photo_id in ids:
         row = conn.execute(
             "SELECT path, taken_ts FROM photos WHERE id=? AND missing=0"
-            f" AND lat IS NOT NULL AND gps_method IN ({approx})",
+            f" AND ((lat IS NOT NULL AND gps_method IN ({approx})){unlocated})",
             [photo_id, *photometa.APPROX_METHODS],
         ).fetchone()
         if not row or row["taken_ts"] is None:
@@ -1255,6 +1293,178 @@ def stats(request: Request):
         "missing": missing,
         "cameras": [dict(r) for r in cameras if r["name"]],
     }
+
+
+# --------------------------------------------------------------------- places
+
+@app.get("/api/places")
+def list_places():
+    return places.list_all()
+
+
+@app.post("/api/places")
+def create_place(body: dict = Body(...)):
+    try:
+        return places.create(body)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.patch("/api/places/{place_id}")
+def update_place(place_id: int, body: dict = Body(...)):
+    try:
+        place = places.update(place_id, body)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if not place:
+        raise HTTPException(404, "Not found")
+    return place
+
+
+@app.delete("/api/places/{place_id}")
+def delete_place(place_id: int):
+    if not places.delete(place_id):
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+@app.get("/api/geocode/search")
+def geocode_search(q: str = "", limit: int = 10):
+    """Places by name, from the offline GeoNames list, for jumping the map."""
+    return {"items": geocode.search(q, min(limit, 50)), "available": geocode.available()}
+
+
+# ---------------------------------------------------------------------- trips
+
+@app.get("/api/trips")
+def list_trips(away_km: float = trips.AWAY_KM):
+    geocode.kick()
+    return trips.compute(away_km=max(5.0, min(away_km, 2000.0)))
+
+
+@app.put("/api/trips/{key}/title")
+def name_trip(key: str, body: dict = Body(...)):
+    if not key.isdigit():
+        raise HTTPException(400, "Not a trip")
+    trips.set_title(key, str(body.get("title") or ""))
+    return {"key": key, "title": trips.titles().get(key, "")}
+
+
+# --------------------------------------------------------------------- tracks
+
+# Takeout's Records.json runs to hundreds of megabytes for a decade of history.
+TRACK_MAX_BYTES = 1024 * 1024 * 1024
+
+
+@app.get("/api/tracks")
+def list_tracks():
+    return {"items": tracks.list_all()}
+
+
+@app.post("/api/tracks/import")
+async def import_track(request: Request, name: str = "track.gpx"):
+    """The file is the request body, as sent by fetch(url, {body: file}): no
+    multipart parser needed, and nothing is held twice."""
+    data = bytearray()
+    async for chunk in request.stream():
+        data.extend(chunk)
+        if len(data) > TRACK_MAX_BYTES:
+            raise HTTPException(413, "File too large")
+    try:
+        saved = tracks.import_file(name, bytes(data))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:  # malformed XML, a broken zip
+        raise HTTPException(400, f"Could not read {name}: {exc}")
+    if not saved:
+        raise HTTPException(400, f"No timed positions found in {name}")
+    return {"items": saved}
+
+
+@app.delete("/api/tracks/{track_id}")
+def delete_track(track_id: int):
+    if not tracks.delete(track_id):
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+@app.get("/api/tracks/points")
+def track_points(request: Request, limit: int = 20000):
+    q = request.query_params
+    start = int(float(q["from"])) if q.get("from") else None
+    end = int(float(q["to"])) if q.get("to") else None
+    return JSONResponse(tracks.points(start, end, max(100, min(limit, 100000))))
+
+
+@app.get("/api/tracks/offset")
+def track_offset(gap_min: int = 30):
+    est = tracks.estimate_offset(gap_min * 60)
+    est["local_offset_s"] = tracks.local_offset(int(time.time()))
+    return est
+
+
+@app.post("/api/tracks/geotag")
+def track_geotag(body: dict = Body(default={})):
+    offset = body.get("offset_s")
+    ids = [int(i) for i in body.get("ids") or []] or None
+    return tracks.geotag(
+        None if offset in (None, "", "auto") else int(offset),
+        gap=int(body.get("gap_min", 30)) * 60,
+        include_approx=bool(body.get("include_approx")),
+        ids=ids,
+        dry_run=bool(body.get("dry_run", True)),
+    )
+
+
+# --------------------------------------------------------------------- export
+
+EXPORT_COLUMNS = ("id", "path", "filename", "taken", "lat", "lon", "altitude", "place", "country",
+                  "gps_method", "camera", "favorite", "note")
+
+
+@app.get("/api/export/locations")
+def export_locations(request: Request, format: str = "geojson"):
+    """Every located photo the filters select, as GeoJSON or CSV: the index is
+    yours, and so is getting it out again without this app."""
+    where, params = _filters(request)
+    rows = db.connect().execute(
+        f"SELECT p.id, p.path, p.filename, p.taken_ts, p.lat, p.lon, p.altitude, p.place, p.country,"
+        f" p.gps_method, TRIM(COALESCE(p.camera_make,'') || ' ' || COALESCE(p.camera_model,'')) AS camera,"
+        f" p.favorite, p.note FROM photos p WHERE {where} AND p.lat IS NOT NULL ORDER BY p.taken_ts",
+        params,
+    ).fetchall()
+
+    def taken(ts):
+        # A wall clock, not UTC: no zone suffix, so nothing reads it as one.
+        return None if ts is None else datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+    stamp = datetime.date.today().isoformat()
+    if format == "csv":
+        import csv
+        buf = io.StringIO()
+        out = csv.writer(buf)
+        out.writerow(EXPORT_COLUMNS)
+        for r in rows:
+            out.writerow([r["id"], r["path"], r["filename"], taken(r["taken_ts"]), r["lat"], r["lon"],
+                          r["altitude"], r["place"], r["country"], r["gps_method"], r["camera"],
+                          r["favorite"], r["note"]])
+        return Response(buf.getvalue(), media_type="text/csv", headers={
+            "Content-Disposition": f'attachment; filename="photomap-locations-{stamp}.csv"'})
+    features = [{
+        "type": "Feature",
+        "geometry": {"type": "Point", "coordinates": [r["lon"], r["lat"]] + ([r["altitude"]] if r["altitude"] is not None else [])},
+        "properties": {"id": r["id"], "path": r["path"], "filename": r["filename"], "taken": taken(r["taken_ts"]),
+                       "place": r["place"], "country": r["country"], "gps_method": r["gps_method"],
+                       "camera": r["camera"] or None, "favorite": bool(r["favorite"]), "note": r["note"]},
+    } for r in rows]
+    return JSONResponse({"type": "FeatureCollection", "features": features}, headers={
+        "Content-Disposition": f'attachment; filename="photomap-locations-{stamp}.geojson"'})
+
+
+@app.get("/api/export/tracks.gpx")
+def export_tracks(track: int | None = None):
+    return Response(tracks.gpx(track), media_type="application/gpx+xml", headers={
+        "Content-Disposition": 'attachment; filename="photomap-tracks.gpx"'})
 
 
 class AppFiles(StaticFiles):

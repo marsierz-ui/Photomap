@@ -743,3 +743,13 @@ function wireBoxOn(surf) {
     toast(`${fmtNum(ids.length)} photos selected`);
   });
 }
+
+/** The flat map, for layers that live in their own modules (saved places,
+ *  tracks). They draw on it directly; the photo layers stay in here. */
+export const leafletMap = () => map;
+
+/** Centre the flat map on a spot, at street level or the given zoom. */
+export function flyTo(lat, lon, zoom = 13) {
+  if (mode === 'globe') { globe.flyTo(lat, lon); return; }
+  map.setView([lat, lon], zoom);
+}

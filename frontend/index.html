@@ -28,12 +28,13 @@
   <div class="brand">Photo&nbsp;Map</div>
   <nav class="tabs">
     <button class="tab active" data-view="map">Map</button>
+    <button class="tab" data-view="trips">Trips</button>
     <button class="tab" data-view="gallery">Gallery</button>
     <button class="tab" data-view="journal">Journal</button>
     <button class="tab" data-view="insights">Insights</button>
     <button class="tab" data-view="dupes">Duplicates</button>
   </nav>
-  <input id="search" type="search" placeholder="Search filename, path or note…" autocomplete="off">
+  <input id="search" type="search" placeholder="Search names, notes, places…" autocomplete="off">
   <div class="spacer"></div>
   <div id="scan-chip" class="chip hidden"></div>
   <div id="cloud-chip" class="chip hidden"></div>
@@ -56,6 +57,7 @@
           <option value="no">Without GPS</option>
           <option value="approx">Approximate (cell tower)</option>
           <option value="neighbour">Set from a neighbouring photo</option>
+          <option value="track">From a GPS track</option>
           <option value="manual">Set by hand</option>
         </select>
       </div>
@@ -64,6 +66,10 @@
       <label class="check"><input type="checkbox" id="f-viewport"> Follow map viewport</label>
       <button id="f-reset" class="btn ghost wide">Reset filters</button>
       <div id="filter-summary" class="muted small"></div>
+      <div id="nogeo-queue" class="queue hidden">
+        <span id="nogeo-text"></span>
+        <button id="nogeo-review" class="btn tiny">Review</button>
+      </div>
     </section>
 
     <section class="panel">
@@ -73,6 +79,14 @@
       </div>
       <ul id="album-list" class="list"></ul>
     </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h3>Places</h3>
+        <button id="place-new" class="btn tiny">+ New</button>
+      </div>
+      <ul id="place-list" class="list"></ul>
+    </section>
   </aside>
 
   <main class="main">
@@ -80,6 +94,10 @@
       <div id="map"></div>
       <div id="globe" class="hidden"></div>
       <div class="map-controls">
+        <div class="place-find">
+          <input id="place-search" type="search" placeholder="Find a place…" autocomplete="off">
+          <div id="place-results" class="place-results hidden"></div>
+        </div>
         <div class="seg" id="view-mode">
           <button data-view="2d" class="active" title="Flat map: heat, clusters or points">2D</button>
           <button data-view="3d" title="Globe, with 3D buildings and lighting when Mapbox is on">3D</button>
@@ -112,9 +130,14 @@
         <button id="map-days" class="btn tiny hidden" title="Give every capture day its own colour">Colour by day</button>
         <button id="map-bubbles" class="btn tiny hidden" title="Show photo thumbnails over the points">Photos</button>
         <button id="map-notes" class="btn tiny" title="Show the journal days that have a location">Notes</button>
+        <button id="map-tracks" class="btn tiny" title="Draw imported GPS tracks (GPX, Google Timeline)">Tracks</button>
         <button id="map-select" class="btn tiny" title="Drag a box on the map (or hold Shift and drag)">Box select</button>
       </div>
       <div class="map-status" id="map-status"></div>
+    </div>
+
+    <div class="view hidden" id="view-trips">
+      <div id="trips"></div>
     </div>
 
     <div class="view hidden" id="view-gallery">
@@ -213,6 +236,7 @@
   <button id="sel-fav" class="btn tiny">Favourite</button>
   <button id="sel-setloc" class="btn tiny" title="Give every selected photo the same location">Set location…</button>
   <button id="sel-undoloc" class="btn tiny" title="Put the selected photos back to the location in their own file">Undo location changes…</button>
+  <button id="sel-track" class="btn tiny" title="Place the selected photos from imported GPS tracks">From tracks…</button>
   <button id="sel-locfix" class="btn tiny" title="Copy the position of the nearest photo with a real GPS fix within 2 hours">Fix locations…</button>
   <button id="sel-delete" class="btn tiny danger">Delete…</button>
   <div class="spacer"></div>

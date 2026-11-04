@@ -1,5 +1,6 @@
 import { api, guard } from './api.js';
-import { state, emit, fmtNum } from './state.js';
+import { state, emit, on, fmtNum } from './state.js';
+import { tracksBlock, wireTracks } from './tracklog.js';
 import { el, modal, toast, escapeHtml, confirmModal } from './ui.js';
 import { cloudBlock, refreshPanel } from './cloud.js';
 import { themeChoice, setTheme } from './theme.js';
@@ -10,6 +11,7 @@ let pollTimer = null;
 let scanning = false;
 
 export function initLibrary() {
+  on('openSettings', openSettings);
   el('btn-scan').addEventListener('click', () => {
     if (scanning) api.post('/api/scan/cancel');
     else startScan(false);
@@ -128,6 +130,16 @@ export async function openSettings() {
 
     <div class="row" style="margin-top:14px"><label>Place names</label><span id="s-places" class="muted small">…</span></div>
 
+    ${tracksBlock()}
+
+    <div class="muted small" style="margin:14px 0 6px">Your data <span style="opacity:.8">- everything stays on this computer.
+      Take the locations with you in open formats, for any other map or app.</span></div>
+    <div class="actions" style="justify-content:flex-start;margin:0">
+      <a class="btn tiny" href="/api/export/locations?format=geojson" download>Photo locations (GeoJSON)</a>
+      <a class="btn tiny" href="/api/export/locations?format=csv" download>Photo locations (CSV)</a>
+      <a class="btn tiny" href="/api/export/tracks.gpx" download>Tracks (GPX)</a>
+    </div>
+
     ${shareBlock(c.share)}
     ${cloudBlock()}
 
@@ -206,6 +218,7 @@ export async function openSettings() {
       box.querySelectorAll('input[data-heat]').forEach((input) => { input.value = HEAT_DEFAULTS[input.dataset.heat]; });
     };
     placesStatus(box);
+    wireTracks(box);
     box.querySelector('[data-act=close]').onclick = close;
     wireShare(box);
     refreshPanel();

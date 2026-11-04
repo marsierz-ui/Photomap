@@ -122,6 +122,40 @@ CREATE TABLE IF NOT EXISTS location_fixes (
     method TEXT NOT NULL DEFAULT 'MANUAL'
 );
 
+-- Places with a name of the person's choosing: "Home", "Grandma's". A circle,
+-- so "photos at the cottage" is a question the index can answer. At most one is
+-- home, which is what trips are measured from.
+CREATE TABLE IF NOT EXISTS saved_places (
+    id         INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL,
+    lat        REAL NOT NULL,
+    lon        REAL NOT NULL,
+    radius_m   INTEGER NOT NULL DEFAULT 300,
+    is_home    INTEGER NOT NULL DEFAULT 0,
+    created_ts INTEGER
+);
+
+-- Position logs imported from GPX files or a Google Timeline export: where a
+-- phone or a logger was, independent of any photo. Used to place photos from a
+-- camera with no GPS, and drawn on the map as the route itself.
+CREATE TABLE IF NOT EXISTS tracks (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    points      INTEGER NOT NULL DEFAULT 0,
+    first_ts    INTEGER,
+    last_ts     INTEGER,
+    imported_ts INTEGER
+);
+-- ts is real UTC, unlike photos.taken_ts, which is a wall clock.
+CREATE TABLE IF NOT EXISTS track_points (
+    track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    ts       INTEGER NOT NULL,
+    lat      REAL NOT NULL,
+    lon      REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_track_points_ts ON track_points(ts);
+
 -- Cached content hash of each snapshot thumbnail, keyed by photo. Recomputed
 -- only when the source file's mtime moves, so repeat syncs stay cheap.
 CREATE TABLE IF NOT EXISTS snapshot_thumbs (
