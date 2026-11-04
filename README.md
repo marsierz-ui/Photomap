@@ -3,7 +3,8 @@
 A local photo heat map. Points your photo folders at an index, reads GPS and capture
 time out of EXIF - and out of the container, for videos - and gives you a world map, a
 browsable gallery, a journal and time-series tools on top. Nothing leaves the machine
-except map tile requests.
+except map tile requests - and, if you turn weather on, positions and dates sent to
+Open-Meteo.
 
 ## Run
 
@@ -104,10 +105,20 @@ place stops being one blue blob and separates into the visits that made it. Hues
 the golden angle rather than running along a gradient, which is what keeps consecutive
 days apart instead of nearly identical. The status line counts the days on screen.
 
-The heat map's radius, blur and intensity are remembered between sessions. They live in
-the settings table rather than in the browser, so they follow you to the phone; the
-`value` attributes in the HTML stay the defaults, so there is one place to change those
-rather than two. The write waits for the slider to stop moving.
+The heat map rescales as you zoom: its intensity is measured against the busiest spot
+currently on screen, so the hottest place in view is red whether you are looking at a
+continent or a street. Radius, blur and intensity are set in **⚙ → Heat map** and kept in
+the settings table, so they follow you to the phone.
+
+**Points** draws a thumbnail bubble over the points, one per patch of screen, showing the
+latest photo taken there and how many share the patch. Clicking one opens those photos in
+the lightbox. **Photos** turns the bubbles off when they get in the way.
+
+**Places** - coordinates are turned into a place name and country on this machine, from
+the GeoNames list of places with 1,000+ people (CC BY 4.0, about 11 MB, downloaded once
+from **⚙ → Place names** or the Insights tab). Each photo gets the nearest place, so a
+photo taken right at a border can be filed under the neighbour. Positions changed later
+are named again on their own. The lightbox shows the place; Insights lists countries.
 
 **Videos** - clips are indexed beside photos rather than in a section of their own:
 one row, one point on the map, one place in the timeline, one tile in the gallery with
@@ -280,6 +291,40 @@ visible one keeps what it had cached when you switch back, and the attribution l
 follows on its own. CARTO's `@2x` tiles are asked for only where the display can show
 them; raw OpenStreetMap tiles, behind *Streets*, do not offer a retina set to ask for.
 
+**Style ▾** - every look option for the 3D view and Replay sits in one pop-up, closed
+until clicked, so the map controls stay compact. With Mapbox:
+
+- *Light* - **Auto**, or a fixed Dawn, Day, Dusk or Night. Auto follows the photo you are
+  looking at: zoom in past level 11 and the photo nearest the middle of the view sets the
+  light from where the sun was when it was taken (worked out from its time and position,
+  and exact once the weather lookup has given the real time zone). Zoom back out past 9 and
+  the planet goes back to daylight. A replay sets it per stop.
+- *Map* - Standard (3D buildings and landmarks) or Standard Satellite.
+- *Colours* - Default, Faded or Monochrome themes.
+- *Show* - weather of the photo, terrain (Mapbox's elevation model, slightly
+  exaggerated), 3D buildings, place / point-of-interest / road labels, and a slow spin of
+  the globe when nobody is touching it.
+
+On the free maps the pop-up holds the three skins and the spin, and says what Mapbox adds.
+The choices are remembered in the browser.
+
+**Weather** - off until turned on in **⚙ → Weather**, since it sends each photo's position
+and date to [Open-Meteo](https://open-meteo.com). It looks up the hour the photo was
+taken: conditions, temperature, rain or snow, cloud, wind and humidity, plus sunrise,
+sunset and the time zone. Requests are cached by 0.25° grid cell and day, and stretches of
+days go in one request, so a week in one city costs one lookup. Photos are filled in the
+background after turning it on and after each scan, and a photo opened before then is
+looked up on the spot. The lightbox shows it under *Where*.
+
+In 3D the weather is drawn when you zoom in on a photo or a replay reaches a stop: rain and
+snow particles (Mapbox GL JS 3.9+), fog that closes in for fog and thickens under cloud,
+and a faded map on grey days unless you chose a theme yourself. A chip at the top shows the
+photo's time and weather; click it to open the photo. The replay card shows it too.
+
+Open-Meteo is free for non-commercial use without a key. A commercial product needs one
+of its API plans: put the key in **⚙ → Open-Meteo key** and requests go to the customer
+endpoints. The key stays on the server, like the R2 secrets.
+
 `Path` works here too: its own line layer, drawn under the points rather than over them,
 so the dots it connects stay legible instead of getting a dashed line drawn across them.
 Capture order comes for free - `/api/points` already returns photos sorted by
@@ -343,10 +388,14 @@ and names without `(1)`/`copy` markers win - and you can pick a different one. E
 to the recycle bin; the API refuses any set that would not leave exactly one survivor.
 
 **Albums** - manual grouping. Each album has a colour that the map uses for its points,
-so a single album can be visualized on its own. Build one from a selection, or empty.
+so a single album can be visualized on its own. Build one from a selection, or empty, or
+from the lightbox's **+ Album**. Albums nest: **+** on an album makes a subalbum, and **✎**
+moves one elsewhere. An album shows its subalbums' photos too; deleting one moves its
+subalbums up a level. Names are unique across all levels.
 
 **Insights** - totals, GPS coverage, disk usage, and distributions by hour of day,
-weekday, month, year, plus a camera breakdown. Respects the active filters.
+weekday, month, year, plus a camera breakdown and photos, days and places per country.
+Respects the active filters.
 
 ## Deleting
 

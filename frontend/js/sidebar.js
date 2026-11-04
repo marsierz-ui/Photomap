@@ -84,20 +84,67 @@ export async function refreshAll() {
   summarize();
 }
 
+// Collapsed albums, remembered on this device only: it is a view preference.
+const collapsed = new Set((() => {
+  try { return JSON.parse(localStorage.getItem('pm-albums-collapsed') || '[]'); } catch { return []; }
+})());
+
+function saveCollapsed() {
+  try { localStorage.setItem('pm-albums-collapsed', JSON.stringify([...collapsed])); } catch { /* private window */ }
+}
+
+/** Albums in tree order, each with its depth. An album whose parent is gone is
+ *  shown at the top rather than lost. */
+export function albumTree(skipBelow = null) {
+  const ids = new Set(state.albums.map((a) => a.id));
+  const kids = new Map();
+  state.albums.forEach((a) => {
+    const parent = ids.has(a.parent_id) ? a.parent_id : null;
+    if (!kids.has(parent)) kids.set(parent, []);
+    kids.get(parent).push(a);
+  });
+  const out = [];
+  const walk = (parent, depth) => (kids.get(parent) || []).forEach((a) => {
+    if (a.id === skipBelow) return;
+    out.push({ album: a, depth, hasKids: kids.has(a.id) });
+    walk(a.id, depth + 1);
+  });
+  walk(null, 0);
+  return out;
+}
+
 function renderAlbums() {
   const active = Number(state.filters.album);
-  el('album-list').innerHTML = state.albums.map((a) => `
-    <li data-id="${a.id}" class="${a.id === active ? 'active' : ''}">
+  const hidden = new Set();
+  const rows = albumTree().filter(({ album }) => {
+    if (hidden.has(album.parent_id)) { hidden.add(album.id); return false; }
+    if (collapsed.has(album.id)) hidden.add(album.id);
+    return true;
+  });
+  el('album-list').innerHTML = rows.map(({ album: a, depth, hasKids }) => `
+    <li data-id="${a.id}" class="${a.id === active ? 'active' : ''}" style="padding-left:${6 + depth * 14}px">
+      <span class="twisty" ${hasKids ? 'data-act="fold"' : ''}>${hasKids ? (collapsed.has(a.id) ? '▸' : '▾') : ''}</span>
       <span class="dot" style="background:${escapeHtml(a.color)}"></span>
       <span class="name" title="${escapeHtml(a.name)}">${escapeHtml(a.name)}</span>
       <span class="count">${fmtNum(a.photo_count)}</span>
       <span class="acts">
+        <button class="icon-btn" data-act="sub" title="New subalbum">+</button>
         <button class="icon-btn" data-act="map" title="Show on map">◎</button>
-        <button class="icon-btn" data-act="edit" title="Rename / colour">✎</button>
+        <button class="icon-btn" data-act="edit" title="Rename / colour / move">✎</button>
         <button class="icon-btn" data-act="del" title="Delete album">✕</button>
       </span>
     </li>`).join('') || '<li class="muted small">No albums yet</li>';
 }
+
+/** A select of every album the given one could go under. */
+function parentSelect(current, self = null) {
+  const options = albumTree(self).map(({ album, depth }) =>
+    `<option value="${album.id}" ${album.id === current ? 'selected' : ''}>${' '.repeat(depth)}${escapeHtml(album.name)}</option>`);
+  return `<div class="row"><label>Inside</label><select id="al-parent">
+    <option value="">(top level)</option>${options.join('')}</select></div>`;
+}
+
+const chosenParent = (box) => Number(box.querySelector('#al-parent').value) || null;
 
 async function onAlbumClick(e) {
   const li = e.target.closest('li[data-id]');
@@ -107,7 +154,9 @@ async function onAlbumClick(e) {
   const act = e.target.dataset.act;
 
   if (act === 'del') {
-    if (await confirmModal('Delete album', `Delete "${escapeHtml(album.name)}"? Photos stay on disk.`, 'Delete album')) {
+    const subs = state.albums.some((a) => a.parent_id === id)
+      ? ' Its subalbums move up a level.' : '';
+    if (await confirmModal('Delete album', `Delete "${escapeHtml(album.name)}"? Photos stay on disk.${subs}`, 'Delete album')) {
       await guard(api.del(`/api/albums/${id}`), 'Delete failed');
       if (Number(state.filters.album) === id) setFilters({ album: null }, true);
       await refreshAll();
@@ -116,6 +165,13 @@ async function onAlbumClick(e) {
     return;
   }
   if (act === 'edit') { editAlbumDialog(album); return; }
+  if (act === 'sub') { createAlbumDialog([], id); return; }
+  if (act === 'fold') {
+    if (collapsed.has(id)) collapsed.delete(id); else collapsed.add(id);
+    saveCollapsed();
+    renderAlbums();
+    return;
+  }
   if (act === 'map') {
     setFilters({ album: id });
     const res = await api.get('/api/points', new URLSearchParams({ album: id, gps: 'yes' }));
@@ -134,11 +190,13 @@ async function onAlbumClick(e) {
   setFilters({ album: Number(state.filters.album) === id ? null : id });
 }
 
-export function createAlbumDialog(ids) {
+export function createAlbumDialog(ids, parentId = null, done = null) {
+  const parent = state.albums.find((a) => a.id === parentId);
   modal(`
-    <h3>New album</h3>
+    <h3>${parent ? `New album inside "${escapeHtml(parent.name)}"` : 'New album'}</h3>
     <input type="text" id="al-name" placeholder="Album name" autocomplete="off">
-    <div class="row"><label>Colour</label><input type="color" id="al-color" value="#ff5a5f"></div>
+    <div class="row"><label>Colour</label><input type="color" id="al-color" value="${escapeHtml(parent?.color || '#ff5a5f')}"></div>
+    ${parentSelect(parentId)}
     ${ids.length ? `<div class="muted small">${fmtNum(ids.length)} selected photos will be added.</div>` : ''}
     <div class="actions">
       <button class="btn" data-act="cancel">Cancel</button>
@@ -147,11 +205,14 @@ export function createAlbumDialog(ids) {
     const submit = async () => {
       const name = box.querySelector('#al-name').value.trim();
       if (!name) return;
-      await guard(api.post('/api/albums', { name, color: box.querySelector('#al-color').value, ids }), 'Create failed');
+      await guard(api.post('/api/albums', {
+        name, color: box.querySelector('#al-color').value, ids, parent_id: chosenParent(box),
+      }), 'Create failed');
       close();
       await refreshAll();
       toast(`Album "${name}" created`);
       emit('filters');
+      if (done) done();
     };
     box.querySelector('#al-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
     box.querySelector('[data-act=ok]').onclick = submit;
@@ -164,6 +225,7 @@ function editAlbumDialog(album) {
     <h3>Edit album</h3>
     <input type="text" id="al-name" value="${escapeHtml(album.name)}">
     <div class="row"><label>Colour</label><input type="color" id="al-color" value="${escapeHtml(album.color)}"></div>
+    ${parentSelect(album.parent_id, album.id)}
     <div class="actions">
       <button class="btn" data-act="cancel">Cancel</button>
       <button class="btn primary" data-act="ok">Save</button>
@@ -172,6 +234,7 @@ function editAlbumDialog(album) {
       await guard(api.patch(`/api/albums/${album.id}`, {
         name: box.querySelector('#al-name').value.trim(),
         color: box.querySelector('#al-color').value,
+        parent_id: chosenParent(box),
       }), 'Save failed');
       close();
       await refreshAll();
@@ -181,15 +244,15 @@ function editAlbumDialog(album) {
   });
 }
 
-/** Album chooser used by the selection bar. */
-export function pickAlbumDialog(ids) {
-  const list = state.albums.map((a) => `
-    <div data-id="${a.id}">
+/** Album chooser used by the selection bar and the lightbox. */
+export function pickAlbumDialog(ids, done) {
+  const list = albumTree().map(({ album: a, depth }) => `
+    <div data-id="${a.id}" style="padding-left:${10 + depth * 16}px">
       <span class="dot" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${escapeHtml(a.color)}"></span>
       ${escapeHtml(a.name)} <span class="muted small">${fmtNum(a.photo_count)}</span>
     </div>`).join('');
   modal(`
-    <h3>Add ${fmtNum(ids.length)} photos to album</h3>
+    <h3>${ids.length === 1 ? 'Add this photo to an album' : `Add ${fmtNum(ids.length)} photos to an album`}</h3>
     <div class="picker">${list || '<div class="muted">No albums yet</div>'}</div>
     <div class="actions">
       <button class="btn" data-act="cancel">Cancel</button>
@@ -202,10 +265,11 @@ export function pickAlbumDialog(ids) {
       await guard(api.post(`/api/albums/${id}/photos`, { ids }), 'Failed');
       close();
       await refreshAll();
-      toast(`Added ${fmtNum(ids.length)} photos`);
+      toast(ids.length === 1 ? 'Added to the album' : `Added ${fmtNum(ids.length)} photos`);
       emit('filters');
+      if (done) done();
     });
-    box.querySelector('[data-act=new]').onclick = () => { close(); createAlbumDialog(ids); };
+    box.querySelector('[data-act=new]').onclick = () => { close(); createAlbumDialog(ids, null, done); };
     box.querySelector('[data-act=cancel]').onclick = close;
   });
 }

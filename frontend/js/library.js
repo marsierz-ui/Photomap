@@ -3,6 +3,7 @@ import { state, emit, fmtNum } from './state.js';
 import { el, modal, toast, escapeHtml, confirmModal } from './ui.js';
 import { cloudBlock, refreshPanel } from './cloud.js';
 import { themeChoice, setTheme } from './theme.js';
+import { HEAT_DEFAULTS, HEAT_RANGES, heatSettings, setHeat } from './mapview.js';
 import { MAPBOX_FREE, usageNow, settingsChanged } from './basemaps.js';
 
 let pollTimer = null;
@@ -119,6 +120,24 @@ export async function openSettings() {
     </div>
     <div class="row"><label>Mapbox this month</label><span id="s-mapbox-usage" class="muted small"></span></div>
 
+    <div class="muted small" style="margin:14px 0 6px">Heat map <span style="opacity:.8">- intensity is relative to the busiest spot on screen, so it rescales as you zoom</span></div>
+    ${heatRow('heat_r', 'Radius')}
+    ${heatRow('heat_b', 'Blur')}
+    ${heatRow('heat_i', 'Intensity')}
+    <div class="actions" style="justify-content:flex-start;margin:4px 0 0"><button class="btn tiny" data-act="heat-reset">Reset heat map</button></div>
+
+    <div class="row" style="margin-top:14px"><label>Place names</label><span id="s-places" class="muted small">…</span></div>
+    <div class="row"><label>Weather</label>
+      <select id="s-weather">
+        <option value="0">Off</option>
+        <option value="1">On - look up the weather for each photo (Open-Meteo)</option>
+      </select>
+    </div>
+    <div class="row"><label>Open-Meteo key</label>
+      <input type="password" id="s-meteo" placeholder="Only for commercial use - leave empty for personal use" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="row"><label></label><span id="s-weather-status" class="muted small"></span></div>
+
     ${shareBlock(c.share)}
     ${cloudBlock()}
 
@@ -189,6 +208,28 @@ export async function openSettings() {
       emit('filters');
     };
     box.querySelector('[data-act=rescan]').onclick = () => { close(); startScan(true); };
+    box.querySelectorAll('input[data-heat]').forEach((input) => {
+      input.addEventListener('input', () => setHeat({ [input.dataset.heat]: Number(input.value) }));
+    });
+    box.querySelector('[data-act=heat-reset]').onclick = () => {
+      setHeat(HEAT_DEFAULTS);
+      box.querySelectorAll('input[data-heat]').forEach((input) => { input.value = HEAT_DEFAULTS[input.dataset.heat]; });
+    };
+    placesStatus(box);
+    box.querySelector('#s-weather').value = c.settings.weather_enabled === '1' ? '1' : '0';
+    box.querySelector('#s-weather').onchange = async (e) => {
+      const patch = { weather_enabled: e.target.value };
+      await guard(api.post('/api/config/settings', patch), 'Could not save the weather setting');
+      Object.assign(state.config.settings, patch);
+      if (patch.weather_enabled === '1') await api.post('/api/weather/fill', {});
+      weatherStatus(box);
+    };
+    box.querySelector('#s-meteo').onchange = async (e) => {
+      await guard(api.post('/api/config/settings', { open_meteo_key: e.target.value.trim() }), 'Could not save the key');
+      e.target.value = '';
+      weatherStatus(box);
+    };
+    weatherStatus(box);
     box.querySelector('[data-act=close]').onclick = close;
     wireShare(box);
     refreshPanel();
@@ -200,11 +241,59 @@ function mapboxUsage(box) {
   // The dialog may have closed while a save was on its way.
   if (!slot) return;
   const u = usageNow();
-  const pct = (kind) => Math.min(100, Math.round((u[kind] / MAPBOX_FREE[kind]) * 100));
+  const pct = (kind) => Math.min(100, Math.round(((u[kind] || 0) / MAPBOX_FREE[kind]) * 100));
   slot.textContent =
     `${fmtNum(u.styles)} of ${fmtNum(MAPBOX_FREE.styles)} map tiles (${pct('styles')}%) · `
-    + `${fmtNum(u.raster)} of ${fmtNum(MAPBOX_FREE.raster)} satellite tiles (${pct('raster')}%)`
+    + `${fmtNum(u.raster)} of ${fmtNum(MAPBOX_FREE.raster)} satellite tiles (${pct('raster')}%) · `
+    + `${fmtNum(u.loads || 0)} of ${fmtNum(MAPBOX_FREE.loads)} 3D map loads (${pct('loads')}%)`
     + (u.refused ? ` · refused by Mapbox (${u.refused}), using the free maps` : '');
+}
+
+function heatRow(key, label) {
+  const [min, max] = HEAT_RANGES[key];
+  return `<div class="row"><label>${label}</label>
+    <input type="range" data-heat="${key}" min="${min}" max="${max}" value="${heatSettings()[key]}" style="flex:1"></div>`;
+}
+
+/** Whether coordinates can be turned into places, and the button that makes it so. */
+async function placesStatus(box) {
+  const slot = box.querySelector('#s-places');
+  if (!slot) return;
+  const st = await api.get('/api/geocode');
+  if (!slot.isConnected) return;
+  if (st.available) {
+    slot.textContent = st.pending ? `On - naming ${fmtNum(st.pending)} photos…` : 'On (GeoNames, worked out on this computer)';
+  } else if (st.downloading) {
+    slot.textContent = 'Downloading…';
+  } else {
+    slot.innerHTML = `${st.error ? `Download failed: ${escapeHtml(st.error)} ` : 'Off '}
+      <button class="btn tiny" data-act="places">Download (about 11 MB, once)</button>`;
+    slot.querySelector('[data-act=places]').onclick = async () => {
+      await guard(api.post('/api/geocode/download'), 'Could not start the download');
+      placesStatus(box);
+    };
+    return;
+  }
+  if (st.downloading || st.pending) setTimeout(() => placesStatus(box), 3000);
+}
+
+/** How far the weather lookup has got. Sends positions and dates to
+ *  Open-Meteo, so it says so. */
+async function weatherStatus(box) {
+  const slot = box.querySelector('#s-weather-status');
+  if (!slot) return;
+  const st = await api.get('/api/weather');
+  if (!slot.isConnected) return;
+  const key = st.commercial ? 'commercial key set' : 'free, non-commercial';
+  if (!st.enabled) {
+    slot.textContent = `Off. When on, each photo's position and date are sent to open-meteo.com (${key}).`;
+    return;
+  }
+  slot.textContent = st.filling || st.pending
+    ? `Looking up ${fmtNum(st.pending)} photos… (${fmtNum(st.done)} done, ${key})`
+    : `${fmtNum(st.done)} photos have weather (${key})`;
+  if (st.error) slot.textContent += ` · last error: ${st.error}`;
+  if (st.filling) setTimeout(() => weatherStatus(box), 3000);
 }
 
 function shareBlock(share) {

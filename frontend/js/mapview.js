@@ -18,6 +18,10 @@ let showPath = false;
 let byDay = false;
 let showNotes = false;
 let notesLayer = null;
+let bubbleLayer = null;
+let showBubbles = (() => {
+  try { return localStorage.getItem('pm-bubbles') !== '0'; } catch { return true; }
+})();
 let picking = null;
 let armed = false;
 let loadToken = 0;
@@ -87,6 +91,11 @@ export function initMap() {
     if (state.followMap) emit('filters');
   });
   map.on('click', (e) => endPick(e.latlng));
+  // Rescaled to what is in view whenever the view changes; see visiblePeak.
+  map.on('zoomend moveend', () => {
+    if (heatLayer) heatLayer.setOptions(heatOptions());
+    if (mode === 'points' && !picking) drawBubbles();
+  });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') endPick(null); });
 
   restoreHeatControls();
@@ -118,6 +127,8 @@ export function pickLocation() {
     if (picking) picking(null);
     picking = resolve;
     map.getContainer().classList.add('selecting');
+    // A bubble would take the click meant for the map.
+    if (bubbleLayer) { map.removeLayer(bubbleLayer); bubbleLayer = null; }
     setStatus('Click the map to place it there · Esc to cancel');
   });
 }
@@ -212,10 +223,10 @@ function albumColor() {
 }
 
 function clearLayers() {
-  [heatLayer, clusterLayer, pointLayer, pathLayer].forEach((layer) => {
+  [heatLayer, clusterLayer, pointLayer, pathLayer, bubbleLayer].forEach((layer) => {
     if (layer) map.removeLayer(layer);
   });
-  heatLayer = clusterLayer = pointLayer = pathLayer = null;
+  heatLayer = clusterLayer = pointLayer = pathLayer = bubbleLayer = null;
 }
 
 function render() {
@@ -298,6 +309,7 @@ function render() {
     }
     bindPhotoEvents(pointLayer);
     pointLayer.addTo(map);
+    drawBubbles();
     setStatus((capped < n ? `${fmtNum(capped)} of ${fmtNum(n)} shown` : `${fmtNum(n)} located photos`)
       + daySuffix(capped));
   }
@@ -355,6 +367,48 @@ function bindPhotoEvents(layer) {
   });
 }
 
+// ------------------------------------------------------------------- bubbles
+
+const BUBBLE_CELL = 70;
+const MAX_BUBBLES = 160;
+
+/** Thumbnails over the points, one per patch of screen so they do not pile up:
+ *  the latest photo taken there, with how many share the patch. Rebuilt on
+ *  every pan and zoom, since what counts as one patch depends on the zoom. */
+function drawBubbles() {
+  if (bubbleLayer) { map.removeLayer(bubbleLayer); bubbleLayer = null; }
+  if (!showBubbles || mode !== 'points' || !data.n || !hasSize()) return;
+  const view = map.getBounds();
+  const size = map.getSize();
+  const cells = new Map();
+  for (let i = 0; i < data.n; i += 1) {
+    if (!view.contains([data.lat[i], data.lon[i]])) continue;
+    const p = map.latLngToContainerPoint([data.lat[i], data.lon[i]]);
+    if (p.x < 0 || p.y < 0 || p.x > size.x || p.y > size.y) continue;
+    const key = Math.floor(p.x / BUBBLE_CELL) * 65536 + Math.floor(p.y / BUBBLE_CELL);
+    const cell = cells.get(key);
+    // Points arrive in capture order, so the last one seen is the latest.
+    if (cell) { cell.ids.push(data.ids[i]); cell.at = i; } else cells.set(key, { ids: [data.ids[i]], at: i });
+  }
+  const chosen = [...cells.values()].sort((a, b) => b.ids.length - a.ids.length).slice(0, MAX_BUBBLES);
+  bubbleLayer = L.layerGroup(chosen.map((cell) => {
+    const id = data.ids[cell.at];
+    const marker = L.marker([data.lat[cell.at], data.lon[cell.at]], {
+      icon: L.divIcon({
+        className: 'bubble',
+        html: `<img src="${thumbUrl(id, 160)}" loading="lazy" alt="">`
+          + (cell.ids.length > 1 ? `<span class="n">${fmtNum(cell.ids.length)}</span>` : ''),
+        iconSize: [48, 48],
+        iconAnchor: [24, 58],
+      }),
+      riseOnHover: true,
+    });
+    // Newest first, so the photo on the bubble is the one that opens.
+    marker.on('click', () => emit('openPhoto', { id, ids: [...cell.ids].reverse() }));
+    return marker;
+  })).addTo(map);
+}
+
 // ---------------------------------------------------------------- day notes
 
 // Journal days sit outside the photo filters on purpose: a note is not a photo,
@@ -397,38 +451,81 @@ function daySuffix(limit) {
   return ` · ${fmtNum(days.size)} day${days.size === 1 ? '' : 's'}`;
 }
 
-// The three sliders live in the settings table rather than localStorage: the
-// database is what follows you to the phone, and unlike the theme there is no
-// first-paint flash to beat, so there is nothing for a local copy to buy. The
-// value attributes in the HTML stay the defaults - one place, not two.
-const HEAT_KEYS = {
-  'heat-radius': 'heat_radius',
-  'heat-blur': 'heat_blur',
-  'heat-intensity': 'heat_intensity',
-};
+// Radius, blur and intensity live in the settings table rather than
+// localStorage: the database is what follows you to the phone. They are set in
+// the settings dialog. Keys are new as of the zoom-relative intensity below,
+// since a value saved for the old meaning would be wrong under the new one.
+export const HEAT_DEFAULTS = { heat_r: 10, heat_b: 8, heat_i: 24 };
+export const HEAT_RANGES = { heat_r: [3, 40], heat_b: [1, 30], heat_i: [1, 30] };
+const heat = { ...HEAT_DEFAULTS };
 let heatSaveTimer = null;
 
 function restoreHeatControls() {
   const saved = state.config?.settings || {};
-  Object.entries(HEAT_KEYS).forEach(([id, key]) => {
-    if (saved[key] != null && saved[key] !== '') el(id).value = saved[key];
+  Object.keys(HEAT_DEFAULTS).forEach((key) => {
+    if (saved[key] != null && saved[key] !== '') heat[key] = Number(saved[key]);
   });
 }
 
-function saveHeatControls() {
-  const body = {};
-  Object.entries(HEAT_KEYS).forEach(([id, key]) => { body[key] = el(id).value; });
-  // A slider position is not worth interrupting anyone over if it fails to save.
-  api.post('/api/config/settings', body).catch(() => {});
+export const heatSettings = () => ({ ...heat });
+
+/** Change one or more of the three, redraw now, save once the hand stops. */
+export function setHeat(patch) {
+  Object.assign(heat, patch);
+  if (heatLayer) heatLayer.setOptions(heatOptions());
+  clearTimeout(heatSaveTimer);
+  heatSaveTimer = setTimeout(() => {
+    // A slider position is not worth interrupting anyone over if it fails to save.
+    api.post('/api/config/settings', { ...heat }).catch(() => {});
+  }, 600);
+}
+
+/** The most photos that fall in one cell of leaflet.heat's own grid, among
+ *  those on screen at this zoom.
+ *
+ *  The heat layer scales every photo by a fixed zoom curve and clips at a fixed
+ *  maximum, so a whole country reads as one red blob and a street reads as a
+ *  few faint dots. Measuring the busiest spot in view and scaling to it instead
+ *  means the hottest place on screen is red at every zoom. */
+function visiblePeak() {
+  const cell = (heat.heat_r + heat.heat_b) / 2;
+  const view = map.getBounds().pad(0.1);
+  const s = view.getSouth(); const n = view.getNorth();
+  const w = view.getWest(); const e = view.getEast();
+  const wraps = e - w >= 360;
+  const counts = new Map();
+  let peak = 0;
+  for (let i = 0; i < data.n; i += 1) {
+    const lat = data.lat[i];
+    if (lat < s || lat > n) continue;
+    let lon = data.lon[i];
+    if (!wraps) {
+      // The view can sit across the antimeridian or on a world copy.
+      while (lon < w) lon += 360;
+      while (lon > e) lon -= 360;
+      if (lon < w) continue;
+    }
+    const p = map.latLngToContainerPoint([lat, lon]);
+    const key = Math.floor(p.x / cell) * 65536 + Math.floor(p.y / cell);
+    const c = (counts.get(key) || 0) + 1;
+    counts.set(key, c);
+    if (c > peak) peak = c;
+  }
+  return peak;
 }
 
 function heatOptions() {
+  // Intensity 1 keeps red for the single busiest spot; 30 turns red anything
+  // with a tenth of its photos.
+  const share = Math.max(0.06, 1.03 - heat.heat_i / 30);
   return {
-    radius: Number(el('heat-radius').value),
-    blur: Number(el('heat-blur').value),
-    max: Math.max(0.1, (31 - Number(el('heat-intensity').value)) / 10),
-    minOpacity: 0.25,
-    maxZoom: 12,
+    radius: heat.heat_r,
+    blur: heat.heat_b,
+    max: Math.max(1, visiblePeak() * share),
+    minOpacity: 0.3,
+    // At the current zoom, so the layer's own zoom curve does nothing: every
+    // photo counts as one and the scale comes from max.
+    maxZoom: map.getZoom(),
   };
 }
 
@@ -438,23 +535,49 @@ function setStatus(text) {
 
 // ------------------------------------------------------------------ controls
 
+/** Disarmed on the surface that armed it, before the mode moves and the other
+ *  one is asked to put a cursor back it never changed. */
+function disarm() {
+  if (!armed) return;
+  armed = false;
+  el('map-select').classList.remove('active');
+  surface().aim(false);
+}
+
+function syncModeControls(view) {
+  el('layer-mode').classList.toggle('hidden', view !== '2d');
+  el('base-mode').classList.toggle('hidden', mode === 'globe');
+  // Only the two per-photo renderings can carry a colour per photo.
+  el('map-days').classList.toggle('hidden', mode !== 'points' && mode !== 'globe');
+  el('map-bubbles').classList.toggle('hidden', mode !== 'points');
+  // A replay draws its own route.
+  el('map-path').classList.toggle('hidden', view === 'replay');
+}
+
 function wireControls() {
+  // 2D is the flat map in whichever of its renderings was last chosen; 3D and
+  // Replay both run on the globe surface, which is Mapbox Standard when Mapbox
+  // is on and the MapLibre globe otherwise.
+  let flatMode = mode;
+  el('view-mode').addEventListener('click', (e) => {
+    const button = e.target.closest('button');
+    if (!button) return;
+    disarm();
+    const view = button.dataset.view;
+    mode = view === '2d' ? flatMode : 'globe';
+    globe.setReplay(view === 'replay');
+    [...e.currentTarget.children].forEach((b) => b.classList.toggle('active', b === button));
+    syncModeControls(view);
+    render();
+  });
+
   el('layer-mode').addEventListener('click', (e) => {
     const button = e.target.closest('button');
     if (!button) return;
-    // Disarmed on the surface that armed it, before the mode moves and the
-    // other one is asked to put a cursor back it never changed.
-    if (armed) {
-      armed = false;
-      el('map-select').classList.remove('active');
-      surface().aim(false);
-    }
-    mode = button.dataset.mode;
+    disarm();
+    mode = flatMode = button.dataset.mode;
     [...e.currentTarget.children].forEach((b) => b.classList.toggle('active', b === button));
-    el('heat-controls').classList.toggle('hidden', mode !== 'heat');
-    el('base-mode').classList.toggle('hidden', mode === 'globe');
-    // Only the two per-photo renderings can carry a colour per photo.
-    el('map-days').classList.toggle('hidden', mode !== 'points' && mode !== 'globe');
+    syncModeControls('2d');
     render();
   });
 
@@ -465,32 +588,23 @@ function wireControls() {
     render();
   });
 
+  el('map-bubbles').classList.toggle('active', showBubbles);
+  el('map-bubbles').addEventListener('click', (e) => {
+    showBubbles = !showBubbles;
+    e.currentTarget.classList.toggle('active', showBubbles);
+    try { localStorage.setItem('pm-bubbles', showBubbles ? '1' : '0'); } catch { /* private window */ }
+    drawBubbles();
+  });
+
   el('map-notes').addEventListener('click', (e) => {
     showNotes = !showNotes;
     e.currentTarget.classList.toggle('active', showNotes);
     drawNotes();
   });
 
-  el('globe-skin').addEventListener('click', (e) => {
-    const button = e.target.closest('button');
-    if (!button) return;
-    globe.setSkin(button.dataset.skin);
-    [...e.currentTarget.children].forEach((b) => b.classList.toggle('active', b === button));
-  });
-
   el('base-mode').addEventListener('click', (e) => {
     const button = e.target.closest('button');
     if (button) setBase(button.dataset.base);
-  });
-
-  Object.keys(HEAT_KEYS).forEach((id) => {
-    el(id).addEventListener('input', () => {
-      if (heatLayer) heatLayer.setOptions(heatOptions());
-      // Dragging a slider fires this on every pixel it passes; the write waits
-      // for the hand to stop.
-      clearTimeout(heatSaveTimer);
-      heatSaveTimer = setTimeout(saveHeatControls, 600);
-    });
   });
 
   el('map-fit').addEventListener('click', fitToData);
