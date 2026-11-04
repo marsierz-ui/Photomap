@@ -1,6 +1,8 @@
 import { api, guard } from './api.js';
 import { state, emit, on, fmtNum } from './state.js';
 import { tracksBlock, wireTracks } from './tracklog.js';
+import { activitiesBlock, wireActivities } from './fitness.js';
+import { musicBlock, wireMusic } from './music.js';
 import { el, modal, toast, escapeHtml, confirmModal } from './ui.js';
 import { cloudBlock, refreshPanel } from './cloud.js';
 import { themeChoice, setTheme } from './theme.js';
@@ -65,6 +67,7 @@ async function poll() {
       chip.dataset.seen = String(status.finished);
       emit('dataChanged');
       emit('filters');
+      if (status.added && status.phase !== 'error') emit('scanFinished', status);
     }
   } else {
     chip.classList.add('hidden');
@@ -132,6 +135,15 @@ export async function openSettings() {
     <div class="row"><label>Names in</label>
       <select id="s-place-lang" style="flex:1"></select></div>
     <div class="row"><label></label><span id="s-place-lang-status" class="muted small"></span></div>
+    <div class="row"><label>Town borders</label>
+      <select id="s-borders" style="flex:1">
+        <option value="0">Off - name photos by the nearest town in range</option>
+        <option value="1">OpenStreetMap - name photos by the town whose border they are in</option>
+      </select></div>
+    <div class="row"><label></label><span class="muted small">Asks the Overpass API (overpass-api.de) once for every
+      500 m area with photos, sending one photo position from it (to about 10 m). Where no town border is mapped,
+      the nearest town in range is used.</span></div>
+    <div class="row"><label></label><span id="s-borders-status" class="muted small"></span></div>
     <div class="row"><label>Weather</label>
       <select id="s-weather">
         <option value="0">Off</option>
@@ -141,9 +153,13 @@ export async function openSettings() {
     <div class="row"><label>Open-Meteo key</label>
       <input type="password" id="s-meteo" placeholder="Only for commercial use - leave empty for personal use" autocomplete="off" spellcheck="false">
     </div>
+    <div class="row"><label></label><span class="muted small">A key comes with a paid API plan:
+      <a href="https://open-meteo.com/en/pricing" target="_blank" rel="noopener">open-meteo.com/en/pricing</a></span></div>
     <div class="row"><label></label><span id="s-weather-status" class="muted small"></span></div>
 
     ${tracksBlock()}
+    ${activitiesBlock()}
+    ${musicBlock()}
 
     <div class="muted small" style="margin:14px 0 6px">Your data <span style="opacity:.8">- everything stays on this computer.
       Take the locations with you in open formats, for any other map or app.</span></div>
@@ -231,6 +247,12 @@ export async function openSettings() {
       box.querySelectorAll('input[data-heat]').forEach((input) => { input.value = HEAT_DEFAULTS[input.dataset.heat]; });
     };
     placesStatus(box);
+    bordersStatus(box);
+    box.querySelector('#s-borders').onchange = async (e) => {
+      await guard(api.post('/api/borders', { enabled: e.target.value === '1' }), 'Could not change town borders');
+      bordersStatus(box);
+      placesStatus(box);
+    };
     box.querySelector('#s-weather').value = c.settings.weather_enabled === '1' ? '1' : '0';
     box.querySelector('#s-weather').onchange = async (e) => {
       const patch = { weather_enabled: e.target.value };
@@ -246,6 +268,8 @@ export async function openSettings() {
     };
     weatherStatus(box);
     wireTracks(box);
+    wireActivities(box);
+    wireMusic(box);
     box.querySelector('[data-act=close]').onclick = close;
     wireShare(box);
     refreshPanel();
@@ -269,6 +293,22 @@ function heatRow(key, label) {
   const [min, max] = HEAT_RANGES[key];
   return `<div class="row"><label>${label}</label>
     <input type="range" data-heat="${key}" min="${min}" max="${max}" value="${heatSettings()[key]}" style="flex:1"></div>`;
+}
+
+/** Town borders: whether they are on, and how many photo spots are still to be asked about. */
+async function bordersStatus(box) {
+  const slot = box.querySelector('#s-borders-status');
+  if (!slot) return;
+  const st = await api.get('/api/borders');
+  if (!slot.isConnected) return;
+  box.querySelector('#s-borders').value = st.enabled ? '1' : '0';
+  if (!st.enabled) { slot.textContent = ''; return; }
+  const done = st.cells - st.pending;
+  slot.textContent = st.error && !st.running
+    ? `Stopped at ${fmtNum(done)} of ${fmtNum(st.cells)} spots: ${st.error}. It carries on with the next scan or restart.`
+    : st.pending ? `Looking up borders: ${fmtNum(done)} of ${fmtNum(st.cells)} spots…`
+      : `Borders known for all ${fmtNum(st.cells)} spots with photos`;
+  if (st.running || st.pending) setTimeout(() => bordersStatus(box), 3000);
 }
 
 /** Whether coordinates can be turned into places, and the button that makes it so. */

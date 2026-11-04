@@ -4,6 +4,7 @@ import { el, modal, toast, confirmModal, escapeHtml } from './ui.js';
 import { flyToBounds } from './mapview.js';
 import { fixLocationsDialog } from './actions.js';
 import { geotagDialog } from './tracklog.js';
+import { openLocationQueue } from './locqueue.js';
 
 export function initSidebar() {
   wireFilters();
@@ -12,6 +13,7 @@ export function initSidebar() {
 
   on('filters', () => { syncInputs(); renderAlbums(); summarize(); renderQueue(); });
   el('nogeo-review').addEventListener('click', reviewQueue);
+  el('nogeo-one').addEventListener('click', openLocationQueue);
   on('dataChanged', refreshAll);
 }
 
@@ -309,12 +311,14 @@ async function reviewQueue() {
     <h3>${fmtNum(ids.length)} photos without a location</h3>
     <p class="small">For photos from a camera without GPS, the best source is where your phone was at the time.</p>
     <div class="queue-opts">
+      <button class="btn" data-act="one">One by one…<span class="muted small">each photo in turn: search a place or click the map, confirm, next</span></button>
       <button class="btn" data-act="tracks">From GPS tracks…<span class="muted small">GPX or Google Timeline, matched by time</span></button>
       <button class="btn" data-act="near">From the nearest photo…<span class="muted small">copy a phone photo's position from within 2 hours</span></button>
       <button class="btn" data-act="pick">Select them all<span class="muted small">then Set location… puts them on one spot</span></button>
     </div>
     <div class="actions"><button class="btn" data-act="cancel">Close</button></div>`, (box, close) => {
     box.querySelector('[data-act=cancel]').onclick = close;
+    box.querySelector('[data-act=one]').onclick = () => { close(); openLocationQueue(); };
     box.querySelector('[data-act=tracks]').onclick = () => { close(); geotagDialog(ids); };
     box.querySelector('[data-act=near]').onclick = () => { close(); fixLocationsDialog(ids, { unlocated: true }); };
     box.querySelector('[data-act=pick]').onclick = () => { close(); emit('selectMany', ids); };

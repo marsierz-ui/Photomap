@@ -68,6 +68,7 @@
       <div id="filter-summary" class="muted small"></div>
       <div id="nogeo-queue" class="queue hidden">
         <span id="nogeo-text"></span>
+        <button id="nogeo-one" class="btn tiny" title="Show them one at a time: search a place or click the map, confirm, and the next one comes up">One by one</button>
         <button id="nogeo-review" class="btn tiny">Review</button>
       </div>
     </section>
@@ -198,10 +199,10 @@
 
 <footer class="timeline-wrap">
   <div class="timeline-head">
-    <button id="tl-play" class="btn tiny" title="Animate a moving time window">▶</button>
+    <button id="tl-play" class="btn tiny" title="Play: the range grows from its start, adding photos to the map as time passes">▶</button>
     <span id="tl-label" class="muted small">Timeline</span>
     <div class="spacer"></div>
-    <label class="inline small">Window
+    <label class="inline small" title="How much time each step of the animation adds">Step
       <select id="tl-window">
         <option value="7">1 week</option>
         <option value="30" selected>1 month</option>

@@ -5,7 +5,9 @@
 // in both), which globe.js owns. It hands over the map and two drawing hooks,
 // and this module owns only the camera, the timing and its own controls.
 import { thumbUrl } from './api.js';
+import { toast } from './ui.js';
 import { emit, fmtNum, fmtDateTime } from './state.js';
+import { musicFor, pick, play as playMusic, pause as pauseMusic, label as trackLabel } from './music.js';
 
 // Past this many stops a replay is a slideshow nobody sits through, so nearby
 // stops are merged until it fits.
@@ -25,6 +27,11 @@ let at = 0;
 let speed = 1;
 let playing = false;
 let runToken = 0;
+// Play the song from each stop's moment (or that day's favourite) as the replay
+// reaches it. Remembered in the browser, like the rest of the replay's look.
+let withMusic = (() => {
+  try { return localStorage.getItem('pm-replay-music') === '1'; } catch { return false; }
+})();
 
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
@@ -103,6 +110,15 @@ function showCard(stop) {
     stop.ids.length > 1 ? `${fmtNum(stop.ids.length)} photos` : '1 photo';
   const wx = card.querySelector('.wx');
   wx.textContent = '';
+  const tune = card.querySelector('.tune');
+  tune.textContent = '';
+  musicFor(stop.ids[0]).then((m) => {
+    if (stops[at] !== stop) return;
+    const t = pick(m);
+    const shown = m && (m.now || m.day[0]);
+    if (shown) tune.textContent = `♪ ${trackLabel(shown)}`;
+    if (withMusic && t) playMusic(t);
+  });
   card.classList.remove('hidden');
   hooks.highlight(stop.ids[0]);
   // The light and the weather follow the stop; the card says what it was.
@@ -119,6 +135,7 @@ function syncBar() {
     ? `Stop ${fmtNum(Math.min(at + 1, stops.length))} of ${fmtNum(stops.length)}`
     : 'No located photos to replay';
   bar.querySelectorAll('[data-speed]').forEach((b) => b.classList.toggle('active', Number(b.dataset.speed) === speed));
+  bar.querySelector('[data-act=music]').classList.toggle('active', withMusic);
 }
 
 // ------------------------------------------------------------------- playback
@@ -207,10 +224,22 @@ function build(box) {
     <span class="where small muted"></span>
     <div class="seg">
       <button data-speed="1">1x</button><button data-speed="2">2x</button><button data-speed="4">4x</button>
-    </div>`;
+    </div>
+    <button class="btn tiny" data-act="music" title="Play what you listened to on Spotify at each stop (import your listening history in Settings)">♪ Music</button>`;
   bar.querySelector('[data-act=play]').onclick = () => (playing ? pause() : play());
   bar.querySelector('[data-act=restart]').onclick = () => { jump(0); play(); };
   bar.querySelector('input').oninput = (e) => jump(Number(e.target.value));
+  bar.querySelector('[data-act=music]').onclick = async () => {
+    withMusic = !withMusic;
+    try { localStorage.setItem('pm-replay-music', withMusic ? '1' : '0'); } catch { /* private window */ }
+    syncBar();
+    if (!withMusic) { pauseMusic(); return; }
+    const stop = stops[at];
+    const m = stop ? await musicFor(stop.ids[0]) : null;
+    if (m === null) toast('No listening history yet: import it in Settings, under Music');
+    const t = pick(m);
+    if (t) playMusic(t);
+  };
   bar.querySelectorAll('[data-speed]').forEach((b) => {
     b.onclick = () => { speed = Number(b.dataset.speed); syncBar(); };
   });
@@ -218,7 +247,7 @@ function build(box) {
   card = document.createElement('div');
   card.className = 'replay-card hidden';
   card.title = 'Open these photos';
-  card.innerHTML = '<img alt=""><div><div class="when"></div><div class="count small muted"></div><div class="wx small"></div></div>';
+  card.innerHTML = '<img alt=""><div><div class="when"></div><div class="count small muted"></div><div class="wx small"></div><div class="tune small muted"></div></div>';
   card.onclick = () => {
     const stop = stops[at];
     if (stop) emit('openPhoto', { id: stop.ids[0], ids: stop.ids });
@@ -259,6 +288,7 @@ export function setData(data, autoplay = false) {
 export function exit() {
   if (!map) return;
   pause();
+  pauseMusic();
   hooks.route([]);
   hooks.highlight(-1);
   bar?.classList.add('hidden');

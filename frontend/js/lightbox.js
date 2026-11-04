@@ -6,6 +6,7 @@ import { isVideo, isApprox, clock } from './gallery.js';
 import { flyToPhoto, pickLocation } from './mapview.js';
 import { pickAlbumDialog, refreshAll } from './sidebar.js';
 import { describe, lightFor } from './sky.js';
+import { musicLine } from './music.js';
 
 const box = el('lightbox');
 const img = el('lb-img');
@@ -254,6 +255,7 @@ async function show() {
     <span><span class="k">Taken</span> ${fmtDateTime(data.taken_ts)}${data.taken_src === 'mtime' ? ' <span class="k">(file date)</span>' : ''}</span>
     <span><span class="k">Where</span> ${data.lat == null ? 'no GPS' : `${place ? `${escapeHtml(place)}${data.place && data.country ? `, ${escapeHtml(countryName(data.country))}` : ''} <span class="k">·</span> ` : ''}${data.lat.toFixed(5)}, ${data.lon.toFixed(5)}`}${isApprox(data) ? ' <span class="k">(approximate, from the network)</span>' : ''}${data.gps_method === 'MANUAL' ? ' <span class="k">(set by hand)</span>' : ''}${data.gps_method === 'NEIGHBOUR' ? ' <span class="k">(copied from a neighbouring photo)</span>' : ''}</span>
     <span id="lb-weather" class="hidden"></span>
+    <span id="lb-music" class="hidden"></span>
     <span id="lb-suggest">${isApprox(data) ? '<button data-act="fixloc">Fix location</button>' : ''}</span>
     <span><span class="k">Camera</span> ${escapeHtml([data.camera_make, data.camera_model].filter(Boolean).join(' ') || '—')}</span>
     <span><span class="k">Size</span> ${data.width || '?'}×${data.height || '?'} · ${fmtBytes(data.filesize)}${video ? ` · ▶ ${data.duration ? clock(data.duration) : 'video'}` : ''}</span>
@@ -269,6 +271,7 @@ async function show() {
     <button data-act="delete">Delete</button>
     <span class="muted small">${fmtNum(index + 1)} / ${fmtNum(ids.length)}</span>`;
   showWeather(data);
+  musicLine(data.id, document.getElementById('lb-music'));
 }
 
 /** Fetched after the rest, so a slow or offline Open-Meteo never holds up the

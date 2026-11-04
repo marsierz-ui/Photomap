@@ -16,8 +16,8 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 
 from . import (
-    auth, days, db, dupes, geocode, nametime, netinfo, photometa, places, r2, scanner, snapshot, sync,
-    thumbs, tracks, trips, weather,
+    activities, auth, borders, days, db, dupes, geocode, home, music, nametime, netinfo, photometa, places, r2,
+    scanner, snapshot, sync, thumbs, tracks, trips, weather,
 )
 from .photometa import HEIF_ERROR, HEIF_OK, IMAGE_EXTS
 
@@ -32,6 +32,10 @@ FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
 
 db.init()
 weather.init_schema()
+home.init_schema()
+activities.init_schema()
+music.init_schema()
+borders.init_schema()
 app = FastAPI(title="Photo Map", docs_url=None, redoc_url=None)
 
 # Photos added on a phone reach the bucket immediately and the library only on a
@@ -558,10 +562,10 @@ def _photo_page(where: str, params: list, limit: int, offset: int, sort: str) ->
 
 
 @app.get("/api/photos/ids")
-def photo_ids(request: Request, limit: int = 200000):
+def photo_ids(request: Request, limit: int = 200000, sort: str = "date_desc"):
     where, params = _filters(request)
     rows = db.connect().execute(
-        f"SELECT p.id FROM photos p WHERE {where} ORDER BY p.taken_ts DESC LIMIT ?",
+        f"SELECT p.id FROM photos p WHERE {where} ORDER BY {SORTS.get(sort, SORTS['date_desc'])} LIMIT ?",
         params + [limit],
     ).fetchall()
     return {"ids": [r["id"] for r in rows]}
@@ -1369,6 +1373,22 @@ def delete_place(place_id: int):
     return {"ok": True}
 
 
+@app.get("/api/borders")
+def borders_status():
+    return borders.status()
+
+
+@app.post("/api/borders")
+def borders_enable(body: dict = Body(...)):
+    return borders.set_enabled(bool(body.get("enabled")))
+
+
+@app.get("/api/geocode/reverse")
+def geocode_reverse(lat: float, lon: float):
+    place, cc = geocode.lookup(lat, lon) if geocode.available() else ("", "")
+    return {"place": place, "country": cc}
+
+
 @app.get("/api/geocode/search")
 def geocode_search(q: str = "", limit: int = 10):
     """Places by name, from the offline GeoNames list, for jumping the map."""
@@ -1381,6 +1401,38 @@ def geocode_search(q: str = "", limit: int = 10):
 def list_trips(away_km: float = trips.AWAY_KM):
     geocode.kick()
     return trips.compute(away_km=max(5.0, min(away_km, 2000.0)))
+
+
+@app.get("/api/trips/{key}")
+def trip_detail(key: str, away_km: float = trips.AWAY_KM):
+    found = trips.detail(key, away_km=max(5.0, min(away_km, 2000.0)))
+    if not found:
+        raise HTTPException(404, "No such trip")
+    return found
+
+
+@app.put("/api/trips/{key}/modes")
+def trip_modes(key: str, body: dict = Body(...)):
+    if not key.isdigit():
+        raise HTTPException(400, "Not a trip")
+    try:
+        return trips.set_modes(key, body)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/api/home-timeline")
+def home_timeline():
+    items = home.listing()
+    return {"items": items, "configured": bool(items), "suggested": [] if items else home.suggest()}
+
+
+@app.put("/api/home-timeline")
+def save_home_timeline(body: dict = Body(...)):
+    try:
+        return {"items": home.save(list(body.get("items") or [])), "configured": True}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
 @app.put("/api/trips/{key}/title")
@@ -1455,6 +1507,84 @@ def track_geotag(body: dict = Body(default={})):
         ids=ids,
         dry_run=bool(body.get("dry_run", True)),
     )
+
+
+# ----------------------------------------------------------------- activities
+
+@app.get("/api/activities")
+def list_activities():
+    return {"items": activities.list_all(), "daily": activities.daily_status()}
+
+
+@app.post("/api/activities/import")
+async def import_activity(request: Request, name: str = "activity.gpx"):
+    """A GPX, TCX or FIT file, gzipped or not, or a zip such as Strava's export."""
+    data = bytearray()
+    async for chunk in request.stream():
+        data.extend(chunk)
+        if len(data) > TRACK_MAX_BYTES:
+            raise HTTPException(413, "File too large")
+    try:
+        result = activities.import_file(name, bytes(data))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:  # malformed XML, a broken zip or FIT file
+        raise HTTPException(400, f"Could not read {name}: {exc}")
+    if not result["items"] and not result["duplicates"] and not result["days"]:
+        raise HTTPException(400, f"No workouts or daily totals found in {name}")
+    return result
+
+
+@app.get("/api/activities/daily")
+def daily_status():
+    return activities.daily_status()
+
+
+@app.delete("/api/activities/daily")
+def clear_daily():
+    activities.clear_daily()
+    return {"ok": True}
+
+
+@app.delete("/api/activities/{activity_id}")
+def delete_activity(activity_id: int):
+    if not activities.delete(activity_id):
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------- music
+
+@app.get("/api/music")
+def music_status():
+    return music.status()
+
+
+@app.post("/api/music/import")
+async def import_music(request: Request, name: str = "StreamingHistory.json"):
+    """Spotify's streaming history: the .json files or the .zip of the data download."""
+    data = bytearray()
+    async for chunk in request.stream():
+        data.extend(chunk)
+        if len(data) > TRACK_MAX_BYTES:
+            raise HTTPException(413, "File too large")
+    try:
+        return music.import_file(name, bytes(data))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:  # a broken zip
+        raise HTTPException(400, f"Could not read {name}: {exc}")
+
+
+@app.delete("/api/music")
+def clear_music():
+    music.clear()
+    return music.status()
+
+
+@app.get("/api/photos/{photo_id}/music")
+def photo_music(photo_id: int):
+    return music.for_photo(photo_id)
 
 
 # --------------------------------------------------------------------- export

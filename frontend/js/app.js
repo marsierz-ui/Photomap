@@ -130,6 +130,8 @@ async function main() {
     // shortcuts fire while writing, so typing "gjim" in a journal note walked
     // through four tabs instead of putting four letters in the note.
     if (e.target.matches('input, select, textarea') || e.target.isContentEditable) return;
+    // A full-window panel (a trip, the location queue) has keys of its own.
+    if (document.querySelector('.fullpanel')) return;
     if (e.key === 'Escape' && state.selection.size) {
       state.selection.clear();
       emit('selection');

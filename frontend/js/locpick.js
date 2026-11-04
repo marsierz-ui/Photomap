@@ -1,0 +1,126 @@
+// A place chooser for panels and dialogs: a search box with a live dropdown
+// (saved places, GeoNames towns, typed coordinates) over a small map that also
+// takes a click or a dragged pin. Used by the no-location queue and the home
+// timeline, which both need "where was this" answered quickly.
+import { api } from './api.js';
+import { state, countryName, flag } from './state.js';
+import { escapeHtml } from './ui.js';
+import { baseLayer } from './mapview.js';
+import { parseCoordinates } from './actions.js';
+
+export function locationPicker(root, { onChange = () => {}, onEnter = null } = {}) {
+  root.classList.add('lp');
+  root.innerHTML = `
+    <div class="lp-find">
+      <input type="search" placeholder="Search a town, a saved place, or type lat, lon" autocomplete="off">
+      <div class="place-results hidden"></div>
+    </div>
+    <div class="lp-map"></div>
+    <div class="lp-at muted small">Search above, or click the map</div>`;
+  const input = root.querySelector('input');
+  const list = root.querySelector('.place-results');
+  const at = root.querySelector('.lp-at');
+  const map = L.map(root.querySelector('.lp-map'), { center: [30, 10], zoom: 2, maxZoom: 19, worldCopyJump: true });
+  baseLayer(document.documentElement.dataset.theme === 'light' ? 'streets' : 'dark').addTo(map);
+  const sizer = new ResizeObserver(() => { if (map.getContainer().isConnected) map.invalidateSize(); });
+  sizer.observe(map.getContainer());
+
+  let marker = null;
+  let current = null;
+  let results = [];
+  let timer = null;
+  let token = 0;
+
+  async function name(lat, lon, label) {
+    const mine = ++token;
+    at.textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)}${label ? ` · ${label}` : ''}`;
+    if (label) return;
+    try {
+      const r = await api.get('/api/geocode/reverse', new URLSearchParams({ lat, lon }));
+      if (mine !== token || !current) return;
+      current.label = r.place.split(',')[0];
+      const where = r.place || (r.country ? `outside any town, ${countryName(r.country)}` : 'no town nearby');
+      at.textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)} · ${where}`;
+      onChange(current);
+    } catch { /* the coordinates alone are still a position */ }
+  }
+
+  function set(lat, lon, { label = '', zoom = null, method = 'MANUAL', fly = true } = {}) {
+    current = { lat, lon, label, method };
+    if (!marker) {
+      marker = L.marker([lat, lon], { draggable: true }).addTo(map);
+      marker.on('dragend', () => {
+        const p = marker.getLatLng();
+        set(p.lat, p.lng, { fly: false });
+      });
+    } else {
+      marker.setLatLng([lat, lon]);
+    }
+    if (fly) map.setView([lat, lon], zoom ?? Math.max(map.getZoom(), 12));
+    name(lat, lon, label);
+    onChange(current);
+  }
+
+  function clear(view = null) {
+    current = null;
+    token += 1;
+    if (marker) { map.removeLayer(marker); marker = null; }
+    at.textContent = 'Search above, or click the map';
+    input.value = '';
+    if (view) map.setView([view.lat, view.lon], view.zoom ?? 11);
+  }
+
+  map.on('click', (e) => set(e.latlng.lat, e.latlng.lng, { fly: false }));
+
+  const close = () => list.classList.add('hidden');
+  const choose = (r) => {
+    close();
+    input.value = r.label;
+    set(r.lat, r.lon, { label: r.name || r.label, zoom: r.zoom });
+  };
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    const q = input.value.trim();
+    if (q.length < 2) { close(); results = []; return; }
+    timer = setTimeout(async () => {
+      const typed = parseCoordinates(q);
+      const ql = q.toLowerCase();
+      const saved = (state.places || []).filter((p) => p.name.toLowerCase().includes(ql))
+        .map((p) => ({ label: p.name, name: p.name, lat: p.lat, lon: p.lon, zoom: 15, note: 'saved place' }));
+      const res = await api.get('/api/geocode/search', new URLSearchParams({ q, limit: 8 }));
+      if (input.value.trim() !== q) return;
+      results = [
+        ...(typed ? [{ label: q, name: '', lat: typed.lat, lon: typed.lon, zoom: 15, note: 'coordinates' }] : []),
+        ...saved,
+        ...res.items.map((h) => ({
+          label: `${h.name}${h.region ? `, ${h.region}` : ''}`, name: h.name, lat: h.lat, lon: h.lon,
+          zoom: h.population > 500000 ? 11 : 13, note: `${h.local ? `${h.local} · ` : ''}${flag(h.cc)} ${countryName(h.cc)}`,
+        })),
+      ];
+      list.innerHTML = results.map((r, i) => `<button type="button" data-i="${i}" class="${i ? '' : 'first'}">${escapeHtml(r.label)} <span class="muted">${escapeHtml(r.note)}</span></button>`).join('')
+        || `<span class="muted small" style="padding:6px">${res.available ? 'Nothing by that name' : 'Download place names in Settings to search by name'}</span>`;
+      list.classList.remove('hidden');
+    }, 180);
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!list.classList.contains('hidden') && results.length) choose(results[0]);
+      else if (onEnter && current) onEnter();
+    }
+    if (e.key === 'Escape' && !list.classList.contains('hidden')) { e.stopPropagation(); close(); }
+  });
+  list.addEventListener('click', (e) => {
+    const r = results[Number(e.target.closest('[data-i]')?.dataset.i)];
+    if (r) choose(r);
+  });
+  root.addEventListener('focusout', (e) => { if (!root.querySelector('.lp-find').contains(e.relatedTarget)) setTimeout(close, 150); });
+
+  return {
+    set, clear, map,
+    get: () => current,
+    focus: () => input.focus(),
+    destroy: () => { sizer.disconnect(); map.remove(); },
+  };
+}
