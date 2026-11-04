@@ -101,8 +101,12 @@ function showCard(stop) {
   card.querySelector('.when').textContent = when;
   card.querySelector('.count').textContent =
     stop.ids.length > 1 ? `${fmtNum(stop.ids.length)} photos` : '1 photo';
+  const wx = card.querySelector('.wx');
+  wx.textContent = '';
   card.classList.remove('hidden');
   hooks.highlight(stop.ids[0]);
+  // The light and the weather follow the stop; the card says what it was.
+  hooks.stop?.(stop).then((text) => { if (stops[at] === stop) wx.textContent = text || ''; });
 }
 
 function syncBar() {
@@ -214,7 +218,7 @@ function build(box) {
   card = document.createElement('div');
   card.className = 'replay-card hidden';
   card.title = 'Open these photos';
-  card.innerHTML = '<img alt=""><div><div class="when"></div><div class="count small muted"></div></div>';
+  card.innerHTML = '<img alt=""><div><div class="when"></div><div class="count small muted"></div><div class="wx small"></div></div>';
   card.onclick = () => {
     const stop = stops[at];
     if (stop) emit('openPhoto', { id: stop.ids[0], ids: stop.ids });
@@ -225,7 +229,9 @@ function build(box) {
 // ------------------------------------------------------------------ exports
 
 /** Start replaying on `glMap`, inside `box`. `drawHooks.route(coords)` draws the
- *  route line and `drawHooks.highlight(id)` marks the current photo. */
+ *  route line, `drawHooks.highlight(id)` marks the current photo, and
+ *  `drawHooks.stop(stop)`, if given, is told each stop as it is reached and
+ *  resolves to a line of text for its card (the weather). */
 export function enter(glMap, box, data, drawHooks) {
   map = glMap;
   hooks = drawHooks;

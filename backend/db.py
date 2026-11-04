@@ -186,10 +186,13 @@ DEFAULTS = {
     "r2_access_key_id": "",
     "r2_secret_key": "",
     "viewer_url": "",
+    # Weather lookups send a position and a date to Open-Meteo, so they are off
+    # until this machine opts in.
+    "weather_enabled": "0",
 }
 
 # Never leave the machine running the server.
-SECRET_SETTINGS = {"access_token", "r2_secret_key", "r2_access_key_id"}
+SECRET_SETTINGS = {"access_token", "r2_secret_key", "r2_access_key_id", "open_meteo_key"}
 
 
 def connect() -> sqlite3.Connection:

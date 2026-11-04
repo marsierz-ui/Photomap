@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import (
     auth, days, db, dupes, geocode, nametime, netinfo, photometa, places, r2, scanner, snapshot, sync,
-    thumbs, tracks, trips,
+    thumbs, tracks, trips, weather,
 )
 from .photometa import HEIF_ERROR, HEIF_OK, IMAGE_EXTS
 
@@ -31,6 +31,7 @@ except ImportError:
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
 
 db.init()
+weather.init_schema()
 app = FastAPI(title="Photo Map", docs_url=None, redoc_url=None)
 
 # Photos added on a phone reach the bucket immediately and the library only on a
@@ -39,6 +40,8 @@ app = FastAPI(title="Photo Map", docs_url=None, redoc_url=None)
 sync.start_watching()
 # Name whatever was located since the last run, or moved.
 geocode.kick()
+# Same for the weather, when it is turned on.
+weather.kick()
 
 
 @app.middleware("http")
@@ -357,6 +360,24 @@ def mapbox_usage(body: dict = Body(...)):
             usage[kind] = int(usage.get(kind) or 0) + max(0, int(body.get(kind) or 0))
         db.set_setting("mapbox_usage", json.dumps(usage))
     return usage
+
+
+@app.get("/api/weather")
+def weather_status():
+    return weather.status()
+
+
+@app.post("/api/weather/fill")
+def weather_fill():
+    weather.kick()
+    return weather.status()
+
+
+@app.get("/api/photos/{photo_id}/weather")
+def photo_weather(photo_id: int):
+    """The weather when and where the photo was taken. Fetched from Open-Meteo
+    the first time it is asked for, if weather is turned on, then cached."""
+    return weather.for_photo(photo_id)
 
 
 @app.get("/api/geocode")

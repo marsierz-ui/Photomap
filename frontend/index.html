@@ -113,17 +113,9 @@
           <button data-base="streets">Streets</button>
           <button data-base="satellite">Satellite</button>
         </div>
-        <div class="seg hidden" id="globe-skin">
-          <button data-skin="map" class="active">Map</button>
-          <button data-skin="streets">Streets</button>
-          <button data-skin="satellite">Satellite</button>
-        </div>
-        <div class="seg hidden" id="light-mode">
-          <button data-light="dawn">Dawn</button>
-          <button data-light="day">Day</button>
-          <button data-light="dusk">Dusk</button>
-          <button data-light="night">Night</button>
-          <button data-act="satellite" title="Satellite imagery under the 3D buildings">Satellite</button>
+        <div class="style-wrap hidden" id="style-wrap">
+          <button id="style-btn" class="btn tiny" title="Map style, light, weather and 3D options">Style ▾</button>
+          <div id="style-pop" class="style-pop hidden" role="dialog" aria-label="Map style"></div>
         </div>
         <button id="map-fit" class="btn tiny">Fit to photos</button>
         <button id="map-path" class="btn tiny" title="Connect photos in time order">Path</button>

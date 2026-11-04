@@ -129,6 +129,16 @@ export async function openSettings() {
     <div class="actions" style="justify-content:flex-start;margin:4px 0 0"><button class="btn tiny" data-act="heat-reset">Reset heat map</button></div>
 
     <div class="row" style="margin-top:14px"><label>Place names</label><span id="s-places" class="muted small">…</span></div>
+    <div class="row"><label>Weather</label>
+      <select id="s-weather">
+        <option value="0">Off</option>
+        <option value="1">On - look up the weather for each photo (Open-Meteo)</option>
+      </select>
+    </div>
+    <div class="row"><label>Open-Meteo key</label>
+      <input type="password" id="s-meteo" placeholder="Only for commercial use - leave empty for personal use" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="row"><label></label><span id="s-weather-status" class="muted small"></span></div>
 
     ${tracksBlock()}
 
@@ -218,6 +228,20 @@ export async function openSettings() {
       box.querySelectorAll('input[data-heat]').forEach((input) => { input.value = HEAT_DEFAULTS[input.dataset.heat]; });
     };
     placesStatus(box);
+    box.querySelector('#s-weather').value = c.settings.weather_enabled === '1' ? '1' : '0';
+    box.querySelector('#s-weather').onchange = async (e) => {
+      const patch = { weather_enabled: e.target.value };
+      await guard(api.post('/api/config/settings', patch), 'Could not save the weather setting');
+      Object.assign(state.config.settings, patch);
+      if (patch.weather_enabled === '1') await api.post('/api/weather/fill', {});
+      weatherStatus(box);
+    };
+    box.querySelector('#s-meteo').onchange = async (e) => {
+      await guard(api.post('/api/config/settings', { open_meteo_key: e.target.value.trim() }), 'Could not save the key');
+      e.target.value = '';
+      weatherStatus(box);
+    };
+    weatherStatus(box);
     wireTracks(box);
     box.querySelector('[data-act=close]').onclick = close;
     wireShare(box);
@@ -264,6 +288,25 @@ async function placesStatus(box) {
     return;
   }
   if (st.downloading || st.pending) setTimeout(() => placesStatus(box), 3000);
+}
+
+/** How far the weather lookup has got. Sends positions and dates to
+ *  Open-Meteo, so it says so. */
+async function weatherStatus(box) {
+  const slot = box.querySelector('#s-weather-status');
+  if (!slot) return;
+  const st = await api.get('/api/weather');
+  if (!slot.isConnected) return;
+  const key = st.commercial ? 'commercial key set' : 'free, non-commercial';
+  if (!st.enabled) {
+    slot.textContent = `Off. When on, each photo's position and date are sent to open-meteo.com (${key}).`;
+    return;
+  }
+  slot.textContent = st.filling || st.pending
+    ? `Looking up ${fmtNum(st.pending)} photos… (${fmtNum(st.done)} done, ${key})`
+    : `${fmtNum(st.done)} photos have weather (${key})`;
+  if (st.error) slot.textContent += ` · last error: ${st.error}`;
+  if (st.filling) setTimeout(() => weatherStatus(box), 3000);
 }
 
 function shareBlock(share) {

@@ -581,13 +581,6 @@ function wireControls() {
     render();
   });
 
-  el('light-mode').addEventListener('click', (e) => {
-    const button = e.target.closest('button');
-    if (!button) return;
-    if (button.dataset.light) globe.setLight(button.dataset.light);
-    else globe.setSatellite(!button.classList.contains('active'));
-  });
-
   el('map-days').addEventListener('click', (e) => {
     byDay = !byDay;
     e.currentTarget.classList.toggle('active', byDay);
@@ -607,13 +600,6 @@ function wireControls() {
     showNotes = !showNotes;
     e.currentTarget.classList.toggle('active', showNotes);
     drawNotes();
-  });
-
-  el('globe-skin').addEventListener('click', (e) => {
-    const button = e.target.closest('button');
-    if (!button) return;
-    globe.setSkin(button.dataset.skin);
-    [...e.currentTarget.children].forEach((b) => b.classList.toggle('active', b === button));
   });
 
   el('base-mode').addEventListener('click', (e) => {

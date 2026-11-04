@@ -17,6 +17,8 @@ import { state, emit, on, fmtNum, fmtDateTime, dayColor } from './state.js';
 import { el, toast } from './ui.js';
 import { tileSpec, mapboxKind, count as countTile, refused, useMapbox } from './basemaps.js';
 import * as replay from './replay.js';
+import { api } from './api.js';
+import * as sky from './sky.js';
 
 // Vendored rather than fetched from a CDN, so an outage cannot take the globe
 // out. Resolved against this module's own URL: MapLibre finds its worker with
@@ -33,6 +35,14 @@ const MAPBOX_GL = 'https://api.mapbox.com/mapbox-gl-js/v3.33.0/';
 const STANDARD = 'mapbox://styles/mapbox/standard';
 const STANDARD_SATELLITE = 'mapbox://styles/mapbox/standard-satellite';
 export const LIGHTS = ['dawn', 'day', 'dusk', 'night'];
+// Zoomed in past this, the photo nearest the middle of the view sets the light
+// and the weather; zoomed back out past UNFOCUS_ZOOM the globe goes back to its
+// own look. The gap keeps a zoom hovering at the line from flickering.
+const FOCUS_ZOOM = 11;
+const UNFOCUS_ZOOM = 9;
+// Light for the planet seen from orbit when the light follows the photos.
+const ORBIT_LIGHT = 'day';
+const DEM = 'mapbox://mapbox.mapbox-terrain-dem-v1';
 
 // Same cap as the 2D points layer. MapLibre draws the whole set in one GPU call
 // and tiles it on a worker, so the only cost that scales here is building the
@@ -102,8 +112,26 @@ const remembered = (key, fallback) => {
 const remember = (key, value) => {
   try { localStorage.setItem(key, value); } catch { /* private window */ }
 };
-let light = remembered('pm-light', 'dusk');
+// 'auto' follows the capture time of the photo in view; otherwise a preset.
+let lightMode = remembered('pm-light', 'auto');
+if (lightMode !== 'auto' && !LIGHTS.includes(lightMode)) lightMode = 'auto';
+let light = lightMode === 'auto' ? ORBIT_LIGHT : lightMode;
 let satellite = remembered('pm-3d-satellite', '0') === '1';
+// Everything else in the style pop-up.
+const STYLE_DEFAULTS = {
+  theme: 'default', buildings: true, terrain: false, weather: true,
+  places: true, pois: true, roads: true, spin: false,
+};
+let opts = { ...STYLE_DEFAULTS };
+try { opts = { ...STYLE_DEFAULTS, ...JSON.parse(remembered('pm-3d-style', '{}')) }; } catch { /* keep defaults */ }
+const saveOpts = () => remember('pm-3d-style', JSON.stringify(opts));
+
+// The photo the light and weather are taken from, and its weather.
+let focused = null;
+let focusWeather = null;
+let baseFog = undefined;
+const weatherCache = new Map();
+const weatherOn = () => state.config?.settings?.weather_enabled === '1';
 
 const container = () => el('globe');
 const shown = () => !container().classList.contains('hidden');
@@ -124,6 +152,10 @@ on('basemaps', () => {
 function teardown() {
   if (replaying) replay.exit();
   setHovered(null);
+  clearTimeout(spinTimer);
+  focused = null;
+  focusWeather = null;
+  baseFog = undefined;
   map.remove();
   map = null;
   ready = false;
@@ -342,8 +374,12 @@ function createMapbox(box) {
 function onLoaded() {
   map.on('style.load', () => {
     addDataLayers();
-    // A new style starts from its own default lighting.
-    if (engine === 'mapbox') map.setConfigProperty('basemap', 'lightPreset', light);
+    // A new style starts from its own defaults: lighting, fog, terrain.
+    if (engine === 'mapbox') {
+      baseFog = map.getFog ? map.getFog() : null;
+      applyStyleOptions();
+      applyWeather(focusWeather);
+    }
     if (!ready) {
       ready = true;
       booting = false;
@@ -406,6 +442,10 @@ function wire() {
   });
   map.on('mouseleave', 'photos', () => setHovered(null));
   map.on('movestart', () => setHovered(null));
+  map.on('moveend', () => { refocus(); spinLater(); });
+  // Any hand on the map stops the spin until it is let go.
+  ['mousedown', 'touchstart'].forEach((ev) => map.on(ev, () => { interacting = true; }));
+  ['mouseup', 'touchend'].forEach((ev) => map.on(ev, () => { interacting = false; spinLater(); }));
   map.on('click', 'photos', (e) => {
     const id = e.features[0].properties.id;
     emit('openPhoto', { id, ids: [id] });
@@ -509,14 +549,255 @@ function toGeoJSON(data, n) {
 
 // ------------------------------------------------------------------ exports
 
-/** The raster skins only mean something on the MapLibre globe; Mapbox Standard
- *  has its lighting and a satellite switch instead. */
+/** The style pop-up button shows with the 3D pane; what is inside depends on
+ *  the renderer. */
 function syncControls() {
-  const on = shown();
-  el('globe-skin').classList.toggle('hidden', !on || engine === 'mapbox');
-  el('light-mode').classList.toggle('hidden', !on || engine !== 'mapbox');
-  [...el('light-mode').querySelectorAll('[data-light]')].forEach((b) => b.classList.toggle('active', b.dataset.light === light));
-  el('light-mode').querySelector('[data-act=satellite]').classList.toggle('active', satellite);
+  el('style-wrap').classList.toggle('hidden', !shown());
+  if (!shown()) closePop();
+  else if (!el('style-pop').classList.contains('hidden')) renderPop();
+}
+
+// ------------------------------------------------------------ style pop-up
+
+const seg = (name, items, current) => `<div class="seg" data-group="${name}">${items
+  .map(([value, text, title]) => `<button data-value="${value}"${title ? ` title="${title}"` : ''}${String(value) === String(current) ? ' class="active"' : ''}>${text}</button>`)
+  .join('')}</div>`;
+const check = (key, text, disabled = false) =>
+  `<label class="pop-check${disabled ? ' off' : ''}"><input type="checkbox" data-opt="${key}"${opts[key] ? ' checked' : ''}${disabled ? ' disabled' : ''}> ${text}</label>`;
+
+function renderPop() {
+  const pop = el('style-pop');
+  const mb = engine === 'mapbox';
+  const autoHint = focused
+    ? `Now: ${light} - ${fmtDateTime(focused.ts)}`
+    : 'Zoom in on a photo, or replay, and the light follows when it was taken';
+  pop.innerHTML = mb ? `
+    <div class="pop-h">Light</div>
+    ${seg('light', [['auto', 'Auto', 'Follow the time each photo was taken'], ...LIGHTS.map((l) => [l, l[0].toUpperCase() + l.slice(1)])], lightMode)}
+    <div class="pop-hint">${lightMode === 'auto' ? escapeText(autoHint) : 'Fixed light for every photo'}</div>
+    <div class="pop-h">Map</div>
+    ${seg('base', [['standard', 'Standard', '3D buildings and landmarks'], ['satellite', 'Satellite', 'Satellite imagery under the labels']], satellite ? 'satellite' : 'standard')}
+    <div class="pop-h">Colours</div>
+    ${seg('theme', [['default', 'Default'], ['faded', 'Faded'], ['monochrome', 'Mono']], opts.theme)}
+    <div class="pop-h">Show</div>
+    <div class="pop-grid">
+      ${check('weather', 'Weather of the photo', !weatherOn())}
+      ${check('terrain', 'Terrain')}
+      ${check('buildings', '3D buildings', satellite)}
+      ${check('places', 'Place names')}
+      ${check('pois', 'Points of interest')}
+      ${check('roads', 'Road names')}
+      ${check('spin', 'Spin the globe when idle')}
+    </div>
+    ${weatherOn() ? '' : '<div class="pop-hint">Turn weather on in ⚙ Settings to draw rain, snow and fog from the day each photo was taken.</div>'}`
+    : `
+    <div class="pop-h">Map</div>
+    ${seg('skin', [['map', 'Map'], ['streets', 'Streets'], ['satellite', 'Satellite']], skin)}
+    <div class="pop-h">Show</div>
+    <div class="pop-grid">${check('spin', 'Spin the globe when idle')}</div>
+    <div class="pop-hint">Lighting by photo time, weather effects, terrain and 3D buildings need Mapbox
+      (⚙ Settings → Map provider).</div>`;
+}
+
+const escapeText = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+function closePop() {
+  el('style-pop').classList.add('hidden');
+  el('style-btn').classList.remove('active');
+}
+
+function wirePop() {
+  const pop = el('style-pop');
+  el('style-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const open = pop.classList.contains('hidden');
+    if (open) renderPop();
+    pop.classList.toggle('hidden', !open);
+    el('style-btn').classList.toggle('active', open);
+  });
+  // Outside the pop-up closes it; inside does not.
+  document.addEventListener('click', (e) => {
+    if (!pop.classList.contains('hidden') && !el('style-wrap').contains(e.target)) closePop();
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePop(); });
+  pop.addEventListener('click', (e) => {
+    const button = e.target.closest('[data-group] button');
+    if (!button) return;
+    const { group } = button.parentElement.dataset;
+    const value = button.dataset.value;
+    if (group === 'light') setLight(value);
+    else if (group === 'base') setSatellite(value === 'satellite');
+    else if (group === 'skin') setSkin(value);
+    else if (group === 'theme') { opts.theme = value; saveOpts(); applyStyleOptions(); }
+    renderPop();
+  });
+  pop.addEventListener('change', (e) => {
+    const key = e.target.dataset.opt;
+    if (!key) return;
+    opts[key] = e.target.checked;
+    saveOpts();
+    if (key === 'weather') applyWeather(focusWeather);
+    else if (key === 'spin') spinLater();
+    else applyStyleOptions();
+  });
+}
+wirePop();
+
+/** Everything in the pop-up that lives in the Mapbox style. */
+function applyStyleOptions() {
+  if (engine !== 'mapbox' || !map || !(ready || map.isStyleLoaded())) return;
+  const set = (key, value) => { try { map.setConfigProperty('basemap', key, value); } catch { /* not in this style */ } };
+  set('lightPreset', light);
+  set('showPlaceLabels', opts.places);
+  set('showPointOfInterestLabels', opts.pois);
+  set('showRoadLabels', opts.roads);
+  if (!satellite) {
+    // A grey day is shown faded, unless a theme of its own was chosen.
+    const mood = opts.weather && opts.theme === 'default' ? sky.effects(focusWeather).mood : null;
+    set('theme', mood || opts.theme);
+    set('show3dObjects', opts.buildings);
+  }
+  if (opts.terrain) {
+    if (!map.getSource('pm-dem')) map.addSource('pm-dem', { type: 'raster-dem', url: DEM, tileSize: 512, maxzoom: 14 });
+    map.setTerrain({ source: 'pm-dem', exaggeration: 1.4 });
+  } else if (map.getTerrain && map.getTerrain()) {
+    map.setTerrain(null);
+  }
+}
+
+/** Rain, snow and fog for a photo's weather, or the style's own sky for none.
+ *  Rain and snow are Mapbox GL JS 3.9+; anything older just skips them. */
+function applyWeather(w) {
+  if (engine !== 'mapbox' || !map) return;
+  const fx = sky.effects(opts.weather ? w : null);
+  try { if (map.setRain) map.setRain(fx.rain); } catch (err) { console.warn('rain:', err.message); }
+  try { if (map.setSnow) map.setSnow(fx.snow); } catch (err) { console.warn('snow:', err.message); }
+  try {
+    if (fx.fog) map.setFog({ ...(baseFog || {}), ...fx.fog });
+    else if (baseFog !== undefined) map.setFog(baseFog);
+  } catch (err) { console.warn('fog:', err.message); }
+  if (!satellite && opts.theme === 'default') {
+    try { map.setConfigProperty('basemap', 'theme', fx.mood || 'default'); } catch { /* older style */ }
+  }
+}
+
+// ------------------------------------------------------ photo time and weather
+
+function weatherChip() {
+  let chip = container().querySelector('.globe-weather');
+  if (!chip) {
+    chip = document.createElement('div');
+    chip.className = 'globe-weather hidden';
+    chip.title = 'Open this photo';
+    chip.onclick = () => { if (focused) emit('openPhoto', { id: focused.id, ids: [focused.id] }); };
+    container().appendChild(chip);
+  }
+  return chip;
+}
+
+function showChip() {
+  const chip = weatherChip();
+  if (!focused) { chip.classList.add('hidden'); return; }
+  const night = light === 'night';
+  const parts = [fmtDateTime(focused.ts)];
+  if (focusWeather) parts.push(sky.describe(focusWeather, { night }));
+  else if (weatherOn() && focused.loading) parts.push('Looking up the weather…');
+  chip.textContent = parts.join('  ·  ');
+  chip.classList.remove('hidden');
+}
+
+async function weatherFor(id) {
+  if (!weatherOn() || id == null) return null;
+  if (weatherCache.has(id)) return weatherCache.get(id);
+  try {
+    const res = await api.get(`/api/photos/${id}/weather`);
+    // Only answers worth keeping are kept; an offline blip is asked again.
+    if (res.weather || res.reason !== 'unavailable') weatherCache.set(id, res.weather || null);
+    return res.weather || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Make `photo` ({id, ts, lat, lon}) the one the sky follows. Resolves to its
+ *  weather. */
+async function focusOn(photo) {
+  if (focused?.id === photo?.id) return focusWeather;
+  focused = photo ? { ...photo, loading: true } : null;
+  focusWeather = null;
+  if (!photo) {
+    if (lightMode === 'auto') applyLight(ORBIT_LIGHT);
+    applyWeather(null);
+    showChip();
+    return null;
+  }
+  // The light first, from the sun's position: it needs no network.
+  if (lightMode === 'auto') applyLight(sky.lightFor(photo.ts, photo.lat, photo.lon) || ORBIT_LIGHT);
+  showChip();
+  const w = await weatherFor(photo.id);
+  if (focused?.id !== photo.id) return w;
+  focused.loading = false;
+  focusWeather = w;
+  // With the real time zone, sunrise and sunset are exact.
+  if (w && lightMode === 'auto') applyLight(sky.lightFor(photo.ts, photo.lat, photo.lon, w) || ORBIT_LIGHT);
+  applyWeather(w);
+  showChip();
+  if (!el('style-pop').classList.contains('hidden')) renderPop();
+  return w;
+}
+
+function applyLight(name) {
+  light = name;
+  if (ready && engine === 'mapbox') map.setConfigProperty('basemap', 'lightPreset', name);
+}
+
+/** The photo nearest the middle of the view, if it is in view at all. */
+function nearestToCentre() {
+  if (!lastData || !lastData.n) return null;
+  const c = map.getCenter();
+  const bounds = map.getBounds();
+  const shrink = Math.cos(c.lat * Math.PI / 180) ** 2;
+  let best = -1;
+  let bestD = Infinity;
+  const n = Math.min(lastData.n, MAX_POINTS);
+  for (let i = 0; i < n; i += 1) {
+    const dy = lastData.lat[i] - c.lat;
+    const dx = lastData.lon[i] - c.lng;
+    const d = dy * dy + dx * dx * shrink;
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  if (best < 0 || !bounds.contains([lastData.lon[best], lastData.lat[best]])) return null;
+  return { id: lastData.ids[best], ts: lastData.ts[best], lat: lastData.lat[best], lon: lastData.lon[best] };
+}
+
+/** After every move: zoomed in, the sky follows the photo in the middle;
+ *  zoomed out, it lets go. A replay sets it per stop instead. */
+function refocus() {
+  if (!ready || replay.active()) return;
+  const z = map.getZoom();
+  if (z >= FOCUS_ZOOM) {
+    const photo = nearestToCentre();
+    if (photo) focusOn(photo);
+  } else if (z < UNFOCUS_ZOOM && focused) {
+    focusOn(null);
+  }
+}
+
+// ------------------------------------------------------------------- spin
+
+let interacting = false;
+let spinTimer = null;
+
+/** A slow turn of the planet while nobody is touching it. One degree a second
+ *  at the equator, eased so it never stops with a jolt. */
+function spinLater() {
+  clearTimeout(spinTimer);
+  if (!opts.spin || !ready || !shown() || replay.active()) return;
+  spinTimer = setTimeout(() => {
+    if (!opts.spin || interacting || replay.active() || !shown() || map.getZoom() > 5) return;
+    const c = map.getCenter();
+    map.easeTo({ center: [c.lng - 2, c.lat], duration: 2000, easing: (t) => t });
+  }, interacting ? 2000 : 30);
 }
 
 // While a replay runs it owns the trip line: solid, thicker, drawn as it flies.
@@ -528,6 +809,13 @@ const replayHooks = {
       : EMPTY);
   },
   highlight: (id) => { if (ready) map.setFilter('photo-hover', ['==', ['get', 'id'], id]); },
+  // Each stop sets the light and the weather; resolves to the weather's text
+  // for the stop's card.
+  stop: async (stop) => {
+    if (!stop) return '';
+    const w = await focusOn({ id: stop.ids[0], ts: stop.first, lat: stop.lat, lon: stop.lon });
+    return w ? sky.describe(w, { short: true, night: light === 'night' }) : '';
+  },
 };
 
 function lineStyle(forReplay) {
@@ -544,6 +832,7 @@ export function show(data) {
   resize();
   update(data);
   lastData = data;
+  spinLater();
   if (replaying) {
     if (replay.active()) replay.setData(data);
     else { lineStyle(true); replay.enter(map, container(), data, replayHooks); }
@@ -555,6 +844,7 @@ export function hide() {
   container().classList.add('hidden');
   syncControls();
   setHovered(null);
+  clearTimeout(spinTimer);
   if (replay.active()) replay.exit();
 }
 
@@ -569,16 +859,22 @@ export function setReplay(on) {
   } else {
     replay.exit();
     lineStyle(false);
+    focusOn(null);
     map.easeTo({ pitch: 0, bearing: 0, duration: 800 });
   }
 }
 
+/** 'auto' or one of LIGHTS. */
 export function setLight(name) {
-  if (!LIGHTS.includes(name)) return;
-  light = name;
+  if (name !== 'auto' && !LIGHTS.includes(name)) return;
+  lightMode = name;
   remember('pm-light', name);
-  if (ready && engine === 'mapbox') map.setConfigProperty('basemap', 'lightPreset', name);
-  syncControls();
+  if (name === 'auto') {
+    applyLight(focused ? sky.lightFor(focused.ts, focused.lat, focused.lon, focusWeather) || ORBIT_LIGHT : ORBIT_LIGHT);
+  } else {
+    applyLight(name);
+  }
+  showChip();
 }
 
 /** Standard Satellite is a different style, so the switch reloads it; the
@@ -590,7 +886,6 @@ export function setSatellite(on) {
     if (replay.active()) replay.exit();
     map.setStyle(on ? STANDARD_SATELLITE : STANDARD);
   }
-  syncControls();
 }
 
 export function update(data) {

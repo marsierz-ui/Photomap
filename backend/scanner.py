@@ -5,7 +5,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from . import db, geocode, photometa, sync
+from . import db, geocode, photometa, sync, weather
 
 SKIP_DIRS = {".git", "node_modules", "$RECYCLE.BIN", "System Volume Information", "data"}
 
@@ -329,6 +329,7 @@ def _run(force: bool) -> None:
     finally:
         _set(running=False, finished=time.time(), current="")
         geocode.kick()
+        weather.kick()
         if not _cancel.is_set():
             sync.maybe_sync_after_scan()
 

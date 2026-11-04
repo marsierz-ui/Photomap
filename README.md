@@ -3,7 +3,8 @@
 A local photo heat map. Points your photo folders at an index, reads GPS and capture
 time out of EXIF - and out of the container, for videos - and gives you a world map, a
 browsable gallery, a journal and time-series tools on top. Nothing leaves the machine
-except map tile requests.
+except map tile requests - and, if you turn weather on, positions and dates sent to
+Open-Meteo.
 
 ## Run
 
@@ -351,6 +352,40 @@ MapLibre only fetches tiles a visible layer uses, so a hidden skin costs nothing
 visible one keeps what it had cached when you switch back, and the attribution line
 follows on its own. CARTO's `@2x` tiles are asked for only where the display can show
 them; raw OpenStreetMap tiles, behind *Streets*, do not offer a retina set to ask for.
+
+**Style ▾** - every look option for the 3D view and Replay sits in one pop-up, closed
+until clicked, so the map controls stay compact. With Mapbox:
+
+- *Light* - **Auto**, or a fixed Dawn, Day, Dusk or Night. Auto follows the photo you are
+  looking at: zoom in past level 11 and the photo nearest the middle of the view sets the
+  light from where the sun was when it was taken (worked out from its time and position,
+  and exact once the weather lookup has given the real time zone). Zoom back out past 9 and
+  the planet goes back to daylight. A replay sets it per stop.
+- *Map* - Standard (3D buildings and landmarks) or Standard Satellite.
+- *Colours* - Default, Faded or Monochrome themes.
+- *Show* - weather of the photo, terrain (Mapbox's elevation model, slightly
+  exaggerated), 3D buildings, place / point-of-interest / road labels, and a slow spin of
+  the globe when nobody is touching it.
+
+On the free maps the pop-up holds the three skins and the spin, and says what Mapbox adds.
+The choices are remembered in the browser.
+
+**Weather** - off until turned on in **⚙ → Weather**, since it sends each photo's position
+and date to [Open-Meteo](https://open-meteo.com). It looks up the hour the photo was
+taken: conditions, temperature, rain or snow, cloud, wind and humidity, plus sunrise,
+sunset and the time zone. Requests are cached by 0.25° grid cell and day, and stretches of
+days go in one request, so a week in one city costs one lookup. Photos are filled in the
+background after turning it on and after each scan, and a photo opened before then is
+looked up on the spot. The lightbox shows it under *Where*.
+
+In 3D the weather is drawn when you zoom in on a photo or a replay reaches a stop: rain and
+snow particles (Mapbox GL JS 3.9+), fog that closes in for fog and thickens under cloud,
+and a faded map on grey days unless you chose a theme yourself. A chip at the top shows the
+photo's time and weather; click it to open the photo. The replay card shows it too.
+
+Open-Meteo is free for non-commercial use without a key. A commercial product needs one
+of its API plans: put the key in **⚙ → Open-Meteo key** and requests go to the customer
+endpoints. The key stays on the server, like the R2 secrets.
 
 `Path` works here too: its own line layer, drawn under the points rather than over them,
 so the dots it connects stay legible instead of getting a dashed line drawn across them.

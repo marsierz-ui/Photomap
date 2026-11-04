@@ -5,6 +5,7 @@ import { setFavorite, deleteDialog } from './actions.js';
 import { isVideo, isApprox, clock } from './gallery.js';
 import { flyToPhoto, pickLocation } from './mapview.js';
 import { pickAlbumDialog, refreshAll } from './sidebar.js';
+import { describe, lightFor } from './sky.js';
 
 const box = el('lightbox');
 const img = el('lb-img');
@@ -252,6 +253,7 @@ async function show() {
     <span><strong>${escapeHtml(data.filename)}</strong></span>
     <span><span class="k">Taken</span> ${fmtDateTime(data.taken_ts)}${data.taken_src === 'mtime' ? ' <span class="k">(file date)</span>' : ''}</span>
     <span><span class="k">Where</span> ${data.lat == null ? 'no GPS' : `${place ? `${escapeHtml(place)}${data.place && data.country ? `, ${escapeHtml(countryName(data.country))}` : ''} <span class="k">·</span> ` : ''}${data.lat.toFixed(5)}, ${data.lon.toFixed(5)}`}${isApprox(data) ? ' <span class="k">(approximate, from the network)</span>' : ''}${data.gps_method === 'MANUAL' ? ' <span class="k">(set by hand)</span>' : ''}${data.gps_method === 'NEIGHBOUR' ? ' <span class="k">(copied from a neighbouring photo)</span>' : ''}</span>
+    <span id="lb-weather" class="hidden"></span>
     <span id="lb-suggest">${isApprox(data) ? '<button data-act="fixloc">Fix location</button>' : ''}</span>
     <span><span class="k">Camera</span> ${escapeHtml([data.camera_make, data.camera_model].filter(Boolean).join(' ') || '—')}</span>
     <span><span class="k">Size</span> ${data.width || '?'}×${data.height || '?'} · ${fmtBytes(data.filesize)}${video ? ` · ▶ ${data.duration ? clock(data.duration) : 'video'}` : ''}</span>
@@ -266,4 +268,19 @@ async function show() {
     <a class="btn" href="/api/photos/${id}/original" download>Download</a>
     <button data-act="delete">Delete</button>
     <span class="muted small">${fmtNum(index + 1)} / ${fmtNum(ids.length)}</span>`;
+  showWeather(data);
+}
+
+/** Fetched after the rest, so a slow or offline Open-Meteo never holds up the
+ *  photo's details. */
+async function showWeather(data) {
+  if (state.config?.settings?.weather_enabled !== '1' || data.lat == null || data.taken_ts == null) return;
+  let res;
+  try { res = await api.get(`/api/photos/${data.id}/weather`); } catch { return; }
+  const slot = document.getElementById('lb-weather');
+  if (!slot || current?.id !== data.id || !res.weather) return;
+  const night = lightFor(data.taken_ts, data.lat, data.lon, res.weather) === 'night';
+  slot.innerHTML = `<span class="k">Weather</span> ${escapeHtml(describe(res.weather, { night }))}`;
+  slot.title = 'Open-Meteo, for the hour the photo was taken';
+  slot.classList.remove('hidden');
 }

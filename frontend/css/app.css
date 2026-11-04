@@ -682,6 +682,39 @@ button, input, select { font: inherit; color: inherit; }
 ::-webkit-scrollbar-thumb { background: var(--scroll); border-radius: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
 
+/* 3D style pop-up, built by globe.js. Opens below its button, right-aligned
+   with the other map controls. */
+.style-wrap { position: relative; }
+#style-btn.active { background: var(--accent); color: var(--on-accent); }
+.style-pop {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 700;
+  width: 290px; max-width: calc(100vw - 32px); max-height: 70vh; overflow: auto;
+  padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 6px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: 0 10px 28px var(--shadow);
+}
+.style-pop .pop-h { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-top: 4px; }
+.style-pop .seg { flex-wrap: wrap; }
+.style-pop .seg button { flex: 1; }
+.style-pop .pop-hint { font-size: 11px; color: var(--muted); line-height: 1.35; }
+.style-pop .pop-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; }
+.style-pop .pop-check { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
+.style-pop .pop-check.off { opacity: .5; cursor: default; }
+
+/* The photo the 3D sky follows: its time and weather, top-centre. */
+.globe-weather {
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 600;
+  padding: 5px 12px; font-size: 12px; white-space: nowrap; cursor: pointer;
+  background: var(--overlay); border: 1px solid var(--line); border-radius: 999px;
+  max-width: calc(100% - 260px); overflow: hidden; text-overflow: ellipsis;
+  animation: replay-pop .35s ease-out;
+}
+.replay-card .wx { margin-top: 2px; }
+@media (max-width: 700px) {
+  .globe-weather { left: 54px; transform: none; max-width: calc(100% - 190px); font-size: 11px; }
+  .style-pop .pop-grid { grid-template-columns: 1fr; }
+}
+
 /* ------------------------------------------------------------------ trips */
 #trips { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
 .trips-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
