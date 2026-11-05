@@ -38,7 +38,13 @@ export function locationPicker(root, { onChange = () => {}, onEnter = null, ente
   const at = root.querySelector('.lp-at');
   const map = L.map(root.querySelector('.lp-map'), { center: [30, 10], zoom: 2, maxZoom: 19, worldCopyJump: true });
   baseLayer(document.documentElement.dataset.theme === 'light' ? 'streets' : 'dark').addTo(map);
-  const sizer = new ResizeObserver(() => { if (map.getContainer().isConnected) map.invalidateSize(); });
+  // A dialog grows to its width after the map is made; keep the chosen place in
+  // the middle rather than where the narrower first layout put it.
+  const sizer = new ResizeObserver(() => {
+    if (!map.getContainer().isConnected) return;
+    map.invalidateSize({ pan: false });
+    if (current) map.setView([current.lat, current.lon], map.getZoom(), { animate: false });
+  });
   sizer.observe(map.getContainer());
 
   let marker = null;

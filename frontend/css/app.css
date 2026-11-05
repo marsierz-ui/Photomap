@@ -837,7 +837,8 @@ label.btn { cursor: pointer; }
 .lp-find .place-results button.hi { background: var(--active); }
 .lp-map { flex: 1; min-height: 220px; border-radius: var(--radius); border: 1px solid var(--line); isolation: isolate; }
 
-.modal-box:has(.home-tl) { max-width: 760px; width: min(760px, calc(100vw - 24px)); }
+.modal-box:has(.home-tl), .modal-box:has(.setloc) { max-width: 760px; width: min(760px, calc(100vw - 24px)); }
+.setloc-picker { height: 360px; }
 .htl-picker { height: 300px; }
 .htl-rows { display: flex; flex-direction: column; gap: 4px; margin-bottom: 6px; }
 .htl-row {

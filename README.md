@@ -661,9 +661,10 @@ row, because a rescan reads the file again and the file still holds the wrong on
   cannot be carried further each time. To fix everything at once, filter by
   *Approximate*, **Select all**, then **Fix locations...**.
 - **Set location...** gives every selected photo the same position, whatever it had -
-  none, a tower guess, or a real fix that was wrong. Type it as latitude then longitude
-  (`53.1234, -9.5678`, which is how a map copies it) or pick it on the map. These are
-  tagged `MANUAL`.
+  none, a tower guess, or a real fix that was wrong. Type a town or a saved place (↑ ↓ and
+  Enter pick it, with its border drawn), paste latitude then longitude (`53.1234, -9.5678`,
+  which is how a map copies it), or click the map in the dialog; **Set to …** names the
+  place before anything moves. These are tagged `MANUAL`.
 
 Both survive a rescan, and neither writes to the photo files.
 
