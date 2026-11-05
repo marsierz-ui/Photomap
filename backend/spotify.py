@@ -170,8 +170,20 @@ def sync() -> int:
         _state.update(error=None, last_sync=int(time.time()), last_added=added)
         return added
     except urllib.error.HTTPError as exc:
-        _state["error"] = ("Spotify refused the saved sign-in: connect again" if exc.code in (400, 401)
-                           else f"Spotify answered {exc.code}")
+        # Spotify says why in the body: {"error": {"status": 403, "message": ...}}.
+        try:
+            reason = json.loads(exc.read().decode("utf-8")).get("error") or {}
+            reason = reason.get("message", "") if isinstance(reason, dict) else str(reason)
+        except Exception:  # an empty or non-JSON body
+            reason = ""
+        if exc.code in (400, 401):
+            _state["error"] = "Spotify refused the saved sign-in: connect again"
+        elif exc.code == 403:
+            _state["error"] = (f"Spotify answered 403{f' ({reason})' if reason else ''}. In development mode the "
+                               "app's owner needs Spotify Premium, and the account you connected must be listed "
+                               "under User Management in the app's dashboard")
+        else:
+            _state["error"] = f"Spotify answered {exc.code}{f': {reason}' if reason else ''}"
         if exc.code in (400, 401):
             _access.update(token=None, expires=0.0)
         return 0

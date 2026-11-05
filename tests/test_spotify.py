@@ -118,6 +118,22 @@ spotify_sync._state["last_sync"] = None
 spotify_sync.sync()
 check("a revoked sign-in says to connect again", "connect again" in (spotify_sync.status()["error"] or ""),
       spotify_sync.status())
+import io  # noqa: E402
+
+db.set_setting("spotify_refresh_token", "refresh-1")
+spotify_sync._state["error"] = None
+
+
+def forbidden(url, token):
+    raise urllib.error.HTTPError(url, 403, "Forbidden", {}, io.BytesIO(
+        b'{"error": {"status": 403, "message": "User not registered in the Developer Dashboard"}}'))
+
+
+spotify_sync._http = forbidden
+spotify_sync.sync()
+err = spotify_sync.status()["error"] or ""
+check("a 403 shows Spotify's own reason and what to check",
+      "User not registered" in err and "Premium" in err and "User Management" in err, err)
 check("disconnect forgets the account", not spotify_sync.disconnect()["connected"])
 
 print()
