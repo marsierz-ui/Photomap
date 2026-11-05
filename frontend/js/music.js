@@ -106,7 +106,8 @@ export function musicBlock() {
       <span style="opacity:.8">- saves new plays by itself from now on, every half hour while Photo Map runs (Spotify only
       shows an app the last 50 plays, so it cannot fetch the past; that is what the download above is for). Once:
       at <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">developer.spotify.com/dashboard</a>
-      create an app, tick Web API, add the redirect URI below, save, and paste the app's Client ID here.</span></div>
+      create an app, tick Web API, add the redirect URI below, save, and paste the app's Client ID here. Since February
+      2026 Spotify only serves apps like this to an owner with Spotify Premium; without it, use the data download above.</span></div>
     <div class="row"><label>Client ID</label><input type="text" id="s-sp-client" autocomplete="off" spellcheck="false"
       placeholder="From your app in the Spotify dashboard" style="flex:1"></div>
     <div class="row"><label>Redirect URI</label><code id="s-sp-redirect" class="small" style="flex:1;user-select:all"></code>

@@ -248,7 +248,8 @@ off can fall through; the data download fills those gaps. Spotify allows plain h
 for a loopback IP, never `localhost`, so connecting has to happen in a browser on this
 computer. Spotify does not say whether a play's `played_at` is when the song started or
 ended; it is taken as the end, like the download's `ts`, so a play can be placed one song
-out. Each person uses their own app, which keeps every installation within the user limit
+out. Since February 2026 Spotify serves such apps only when their owner has Spotify
+Premium; without Premium the data download is the only way in. Each person uses their own app, which keeps every installation within the user limit
 Spotify sets on apps that have not been granted its extended quota. A photo's time is a wall
 clock and Spotify's is UTC, so the photo's time zone comes from the weather lookup when there
 is one, else from its longitude. Playback is Spotify's own embedded player, whose script is
@@ -539,8 +540,10 @@ another, are one place, and the camera stays put while that place's photos go by
 says 2 / 5). **Places only** shows one photo per place instead, for a quick look at where
 a long stretch went. The trip list in the bar replays one trip from its first photo;
 *All photos in the current filters* replays whatever the filters select. **← →** step
-photo by photo, **Space** pauses and resumes, **↑ ↓** change the speed (½x to 8x); the
-map's own arrow keys are off while it runs. The card is the photo itself, and under it
+photo by photo, **Space** pauses and resumes, **↑ ↓** change the speed (½x to 4x); the
+map's own arrow keys are off while it runs. The bar has two rows: the scrubber and where
+you are on top, the buttons underneath. The card hangs from the top left and shrinks to
+stay clear of the bar. It is the photo itself, and under it
 that day's journal entry, if there is one, in a box that scrolls. During a replay the
 light and the weather always follow the photo on screen - its hour and its sky - even
 when a fixed light or no effects were chosen in **Style ▾** for looking around.

@@ -16,7 +16,7 @@ import { musicFor, pick, play as playMusic, pause as pauseMusic, label as trackL
 
 const STOP_KM = 0.5;
 const DWELL = 2200;
-const SPEEDS = [0.5, 1, 2, 4, 8];
+const SPEEDS = [0.5, 1, 2, 4];
 // Close enough for Mapbox Standard's 3D buildings, which start at about 15.
 const STOP_ZOOM = 15.5;
 const PITCH = 60;
@@ -312,17 +312,22 @@ function build(box) {
   bar = document.createElement('div');
   bar.className = 'replay-bar';
   bar.title = '← → photo by photo · Space pause or play · ↑ ↓ faster or slower';
+  // Two rows: where you are on top, what you can do underneath.
   bar.innerHTML = `
-    <button class="btn tiny" data-act="restart" title="Back to the first photo">⏮</button>
-    <button class="btn tiny" data-act="play" title="Play or pause (Space)">▶</button>
-    <input type="range" min="0" max="0" value="0" title="Jump to a photo (← →)">
-    <span class="where small muted"></span>
-    <div class="seg" title="Speed (↑ ↓)">${SPEEDS.map((s) => `<button data-speed="${s}">${s === 0.5 ? '½' : s}x</button>`).join('')}</div>
-    <div class="seg" title="Every photo, or one per place">
-      <button data-mode="all">Every photo</button><button data-mode="stops">Places only</button>
+    <div class="rb-track">
+      <input type="range" min="0" max="0" value="0" title="Jump to a photo (← →)">
+      <span class="where small muted"></span>
     </div>
-    <select class="replay-trip" title="Replay one trip, or everything in the current filters"></select>
-    <button class="btn tiny" data-act="music" title="Play what you listened to on Spotify at each photo (import your listening history in Settings)">♪ Music</button>`;
+    <div class="rb-buttons">
+      <button class="btn tiny" data-act="restart" title="Back to the first photo">⏮</button>
+      <button class="btn tiny" data-act="play" title="Play or pause (Space)">▶</button>
+      <div class="seg" title="Speed (↑ ↓)">${SPEEDS.map((s) => `<button data-speed="${s}">${s === 0.5 ? '½' : s}x</button>`).join('')}</div>
+      <div class="seg" title="Every photo, or one per place">
+        <button data-mode="all">Every photo</button><button data-mode="stops">Places only</button>
+      </div>
+      <select class="replay-trip" title="Replay one trip, or everything in the current filters"></select>
+      <button class="btn tiny" data-act="music" title="Play what you listened to on Spotify at each photo (import your listening history in Settings)">♪ Music</button>
+    </div>`;
   bar.querySelector('[data-act=play]').onclick = () => (playing ? pause() : play());
   bar.querySelector('[data-act=restart]').onclick = () => { shownStop = -1; jump(0); play(); };
   bar.querySelector('input').oninput = (e) => jump(Number(e.target.value));

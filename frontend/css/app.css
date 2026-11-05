@@ -272,20 +272,22 @@ button, input, select { font: inherit; color: inherit; }
   /* Clear of the status line bottom-left, and of the Mapbox logo and credits
      bottom-right, which Mapbox's terms want left visible. */
   position: absolute; left: 50%; bottom: 84px; transform: translateX(-50%); z-index: 600;
-  display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 6px 8px; padding: 6px 10px;
+  display: flex; flex-direction: column; gap: 6px; padding: 6px 10px;
   background: var(--overlay); border: 1px solid var(--line); border-radius: var(--radius);
-  max-width: calc(100% - 32px);
+  width: min(720px, calc(100% - 32px));
 }
-.replay-bar input[type=range] { width: 220px; min-width: 80px; flex: 1; }
+.replay-bar .rb-track { display: flex; align-items: center; gap: 10px; }
+.replay-bar .rb-track input[type=range] { flex: 1; min-width: 0; }
+.replay-bar .rb-buttons { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 6px 8px; }
 .replay-bar .where { white-space: nowrap; }
 .replay-card {
-  position: absolute; left: 12px; bottom: 156px; z-index: 600;
+  position: absolute; left: 12px; top: 52px; z-index: 600; max-height: calc(100% - 52px - 190px); overflow: hidden;
   display: flex; flex-direction: column; gap: 6px; padding: 6px; width: 432px; max-width: calc(100% - 24px);
   background: var(--overlay); border: 1px solid var(--line); border-radius: var(--radius);
   animation: replay-pop .35s ease-out;
 }
 .replay-card .shot { position: relative; cursor: pointer; }
-.replay-card img { width: 100%; aspect-ratio: 4 / 3; max-height: 46vh; object-fit: cover; border-radius: 4px; display: block; }
+.replay-card img { width: 100%; aspect-ratio: 4 / 3; max-height: max(140px, calc(100vh - 560px)); object-fit: cover; border-radius: 4px; display: block; }
 .replay-card .count {
   position: absolute; right: 6px; bottom: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
   background: rgba(0, 0, 0, .6); color: #fff;
@@ -298,9 +300,9 @@ button, input, select { font: inherit; color: inherit; }
 .replay-bar select { background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 2px 4px; max-width: 220px; color: inherit; font: inherit; font-size: 11px; }
 @keyframes replay-pop { from { opacity: 0; transform: translateY(8px) scale(.96); } to { opacity: 1; transform: none; } }
 @media (max-width: 700px) {
-  .replay-bar { bottom: 80px; left: 8px; right: 8px; transform: none; max-width: none; }
+  .replay-bar { bottom: 80px; left: 8px; right: 8px; transform: none; max-width: none; width: auto; }
   .replay-bar .where { display: none; }
-  .replay-card { bottom: 132px; left: 8px; width: 220px; }
+  .replay-card { top: 48px; left: 8px; width: 220px; }
   .replay-card .note { max-height: 80px; }
 }
 
