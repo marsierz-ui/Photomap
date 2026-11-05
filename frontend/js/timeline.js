@@ -327,17 +327,21 @@ function clearRange() {
 
 // ---------------------------------------------------------------------- play
 
+// The range grows from a fixed start, so the map fills up with photos as time
+// passes rather than showing a slice that slides along. It starts at the
+// beginning of the selected range (or of the library), carries on from the end
+// of a range that stops short, and stops once it reaches the last photo.
 function togglePlay() {
   if (playTimer) { stopPlay(); return; }
   if (!buckets.length) return;
-  const windowSec = Number(el('tl-window').value) * 86400;
-  const step = windowSec / 6;
-  let cursor = state.filters.from ?? domain[0];
+  const step = Number(el('tl-window').value) * 86400;
+  const start = state.filters.from ?? domain[0];
+  let end = state.filters.to != null && state.filters.to < domain[1] ? state.filters.to : start;
   el('tl-play').textContent = '⏸';
   playTimer = setInterval(() => {
-    if (cursor > domain[1]) { cursor = domain[0]; }
-    setFilters({ from: Math.floor(cursor), to: Math.floor(cursor + windowSec) });
-    cursor += step;
+    end = Math.min(end + step, domain[1]);
+    setFilters({ from: Math.floor(start), to: Math.ceil(end) });
+    if (end >= domain[1]) stopPlay();
   }, 450);
 }
 

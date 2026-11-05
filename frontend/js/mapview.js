@@ -733,6 +733,8 @@ function wireBoxOn(surf) {
 /** The flat map, for layers that live in their own modules (saved places,
  *  tracks). They draw on it directly; the photo layers stay in here. */
 export const leafletMap = () => map;
+/** A basemap layer of its own, for the smaller maps in panels and dialogs. */
+export const baseLayer = (name) => makeBase(name);
 
 /** Centre the flat map on a spot, at street level or the given zoom. */
 export function flyTo(lat, lon, zoom = 13) {

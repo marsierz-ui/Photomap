@@ -30,6 +30,11 @@ Fresh checkout instead of the bundled `.venv`:
 python -m venv .venv && .venv\Scripts\pip install -r requirements.txt
 ```
 
+**After updating the code**, restart the app: Python does not reload it, and the pages
+are read fresh on every request, so a server left running serves new pages from old code.
+The app notices - it compares its code on disk with what it started with - and says so in
+a red bar at the top until it is restarted.
+
 ## Using it from your phone and laptop
 
 `--lan` binds every interface and prints the addresses other devices can use, plus a
@@ -116,9 +121,38 @@ the lightbox. **Photos** turns the bubbles off when they get in the way.
 
 **Places** - coordinates are turned into a place name and country on this machine, from
 the GeoNames list of places with 1,000+ people (CC BY 4.0, about 11 MB, downloaded once
-from **⚙ → Place names** or the Insights tab). Each photo gets the nearest place, so a
-photo taken right at a border can be filed under the neighbour. Positions changed later
-are named again on their own. The lightbox shows the place, gallery tiles show the town
+from **⚙ → Place names** or the Insights tab). Each photo gets the nearest town whose
+range covers it, and the range grows with the town: about 3 km for a village of 1,000,
+13 km for a city of a million, a little over 50 km for the largest. A photo outside every
+range (a mountain top, open sea near a coast) keeps its country and no town, and
+**Find a place** or the lightbox's coordinates still say where it was. Nearest-in-range is
+not a border test, so a photo taken right at a border can be filed under the neighbour.
+Positions changed later are named again on their own, and every photo was named again
+once when the range rule replaced the old flat 40 km. Ranges need the populations in the
+list; one downloaded by an older version has none, so every town keeps the flat 40 km
+until **⚙ → Place names → Download again** fetches the current list (which also brings the
+ids that names in other languages need, and ranks the biggest Paris first in search).
+
+**Town borders** - a range is a guess at where a town ends; OpenStreetMap has the borders
+themselves, the same ones a map draws. **⚙ → Town borders → OpenStreetMap** names each photo
+after the town whose border it is inside, and files a photo just over a national border
+under the right country. The borders are not downloaded (the planet's are tens of
+gigabytes): the Overpass API is asked which areas contain each spot, 40 spots a request.
+Photos are grouped in cells of about 500 m, and each cell is asked about once, at the photo
+nearest the middle of its photos, rounded to about 10 m - so one position per cell leaves
+the machine, which is why it is off until turned on. A cell's own centre would be simpler,
+but it can sit in a bay or across a border the photos are not: Galway's fell in the water.
+Answers are stored with every name OSM has for the area, so changing language needs no new
+request.
+
+The town is, most specific first: an area tagged as a city, town, village or hamlet; else
+the municipality (admin level 8, then 7). The region is the admin level 4 area, or
+GeoNames' when OSM has none (Ireland's provinces). Countries draw municipalities
+differently - a German Gemeinde takes in villages and fields around it, an English district
+or an Irish municipal district is large - and wherever no such border contains a spot, the
+range rule names it as before. The public Overpass server is often at capacity; each batch
+is retried with growing waits, and what is left is picked up on the next scan or start.
+Settings shows how many spots are done. The lightbox shows the place, gallery tiles show the town
 next to the date, and the search box finds photos by place ("Kilronan") or by country,
 typed in the browser's own language ("Irland" works in German). Insights lists countries
 with a flag each - click one to narrow everything to it - and a scratch-map card: how many
@@ -139,13 +173,90 @@ that day was taken more than 50 km from home (15-200 km, chosen on the Trips tab
 days in a row are one trip, and so are away days a day or two apart with no photos in
 between, because nobody photographs every day of a holiday. A day with photos only at
 home ends it. Each trip card has a cover (a favourite if there is one), dates, the
-countries with their flags, the towns, how far it went and how far you travelled between
-photos. **Map** and **Photos** narrow the other views to its dates, **Replay** flies the
-route, **Rename** replaces the generated name, and **Book** makes it a printable photo book
-(below).
+countries with their flags, every place it reached in order (Paris → Lyon → Annecy), how
+far it went and how far you travelled between photos. **Open** (or the cover) opens the trip in a window of its own (below), **Map** and
+**Photos** narrow the other views to its dates, **Replay** flies the route, **Rename**
+replaces the generated name, and **Book** makes it a printable photo book (below).
 
-Home is the saved place marked as home. Without one it is guessed - the spot with photos
-on the most different days - and the Trips tab says so and offers to save it. Trips are
+**Home timeline** - people move, and one home measured against years of photos turns every
+week at the old address into a trip. **Home timeline…** on the Trips tab lists where you
+lived: the first home covers everything up to the first move, and each row after it starts
+on its date. Each row is set by searching a town or saved place, or by clicking the map.
+When none has been set, the rows are suggested from the photos - the spot photographed on
+the most days in each quarter, starting the day it first appears - and the dialog opens by
+itself after a scan brings new photos in, once per session, until a timeline is saved.
+Without one, home is the saved place marked as home, or else guessed (the spot with photos
+on the most different days), and the Trips tab says so.
+
+**A trip, opened** - a full-window panel: the route on a map, totals, and a day-by-day
+chart. The trip is split into legs wherever consecutive photos are more than 2 km apart,
+plus the journey from home and back when the first or last photo is already away. Each
+leg's travel mode (on foot, bike, car, bus, train, plane, boat) comes from, in order: a
+mode chosen for that leg, a workout recorded at the time (a ride makes it a bike leg), the
+mode chosen for the whole trip. **Travelled by** sets the whole trip, a day's **All of this
+day** sets its legs, and each leg has its own. Legs are drawn in their mode's colour,
+flights and assumed legs dashed. The chart shows distance (stacked by mode), photos,
+workout distance, moving time or climb per day; clicking a day zooms the map to it, dims
+the rest, and lists its places, photos, legs and workouts. **Places visited** lists every
+named place the trip reached, in order, with when and how many photos; going back somewhere
+counts as a second visit, and a click centres the map on it. Modes are kept per trip, keyed
+by its first day, like its name.
+
+What the panel measures follows how the trip was travelled. Moving time, climb, speed and
+heart rate describe a ride or a hike, so they appear only when the trip's mode is bike or on
+foot, or, with no mode chosen, when any leg is (a workout that day makes it one). A trip by
+car, train or plane shows distance by mode, photos and, from a watch, steps and walking
+distance - which matter on any trip.
+
+**Fitness activities** - rides, runs and walks from Strava, Garmin, Komoot, Wahoo or any
+app that exports GPX, TCX or FIT, gzipped or not, or Strava's whole bulk export as a .zip
+(its `activities.csv` supplies each workout's name and type). Import them in **⚙ →
+Fitness activities** or from an open trip. Totals a file states (a FIT session, TCX laps)
+are used as given; the rest - distance, moving time, climb, speed, heart rate, cadence,
+power - are worked out from the points. Each workout is also stored as a GPS track, so it
+draws on the map and places photos from a camera without GPS. Files keep UTC and rarely
+say where they were, so a workout is put on its day by the time zone of its longitude. The
+same workout imported twice is kept once.
+
+**Watches** - Apple Health's export (Health app, your picture, *Export All Health Data*)
+imported as the whole `export.zip` brings Apple Watch workouts, with their routes where
+recorded and their own local time, plus steps and walking distance for every day. Google
+Fit's `Daily activity metrics.csv` (Takeout) and Garmin's daily summary files bring steps
+and distance per day too; other CSV or JSON summaries work when their columns are called
+Date and Steps / Distance (m). A phone and a watch counting the same day are not added up:
+the larger count wins. A watch records a route only during a workout; the all-day log of
+where you were is the phone's, imported under **GPS tracks** (Google Timeline).
+
+**Music** - Spotify listening history beside the photos. Spotify's API only reaches back 50
+plays, so the past comes from the account's data download (Account, Privacy settings, *Download
+your data*): *Extended streaming history* covers the whole account with playable tracks
+(Spotify takes up to 30 days to send it); *Account data* comes sooner but covers a year and
+names songs without ids, so they cannot be played. Import the .zip or the .json files in **⚙
+→ Music**. The lightbox then shows the song playing when the photo was taken, or failing that
+the day's most played, with a ▶ that plays it. Replay plays each stop's song as it reaches
+the stop, and the card names it under the photo; it is on until turned off with **♪ Music**
+in the Replay bar or by closing the player, and that choice is remembered.
+
+From now on, plays can also be saved by themselves: **⚙ → Music → Spotify account**. Once,
+create an app at [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard)
+(tick Web API), add the redirect URI Settings shows (`http://127.0.0.1:8712/api/spotify/callback`),
+and paste the app's Client ID; then **Connect Spotify**. Sign-in uses PKCE, so there is no
+client secret to keep, and the refresh token stays on this computer with the other secrets.
+Every half hour while the app runs it saves the recently played list (the last 50 plays,
+about two and a half hours of music), so a long stretch of listening while the computer is
+off can fall through; the data download fills those gaps. Spotify allows plain http only
+for a loopback IP, never `localhost`, so connecting has to happen in a browser on this
+computer. Spotify does not say whether a play's `played_at` is when the song started or
+ended; it is taken as the end, like the download's `ts`, so a play can be placed one song
+out. Since February 2026 Spotify serves such apps only when their owner has Spotify
+Premium; without Premium the data download is the only way in. Each person uses their own app, which keeps every installation within the user limit
+Spotify sets on apps that have not been granted its extended quota. A photo's time is a wall
+clock and Spotify's is UTC, so the photo's time zone comes from the weather lookup when there
+is one, else from its longitude. Playback is Spotify's own embedded player, whose script is
+loaded from open.spotify.com only once something is played: whole songs when signed in to
+Spotify in the browser, short previews otherwise.
+
+Home on any day comes from the timeline above. Trips are
 recomputed every time the tab opens (0.4 s for 100,000 photos), so a fixed location or a
 GPX import shows up straight away, and nothing can go stale.
 
@@ -160,8 +271,19 @@ browser's own print dialog - nothing is uploaded, and the PDF is yours to print 
 **Saved places** - give a spot a name ("Home", "Grandma's", "the cottage") and a size,
 from a building to a city. Right-click the map, or **+ New** in the sidebar, where a town
 name, coordinates or a click on the map all work. Clicking a place narrows every view to
-the photos inside it; ⌂ makes it home. They are drawn on the map, and the map's **Find a
-place…** box searches them along with every GeoNames town, offline.
+the photos inside it; ⌂ makes it home. They are drawn on the map.
+
+**One search box** at the top does two jobs. What you type narrows the photos, live, by
+file name, note and place. Under it, the places whose name matches - saved places, every
+GeoNames town (offline), typed coordinates - are listed as *Go to a place on the map*:
+click one, or **↓** and **Enter**, and the map goes there, clears the text (it was typed to
+find the place, not to filter), and draws the town's border from OpenStreetMap. Enter with
+nothing highlighted only closes the list, so a photo search never turns into a jump across
+the map. They were two boxes, one of them over the map; one box keeps the map clear, and
+the list says plainly which kind of result it is. The border comes from Nominatim
+(OpenStreetMap), asked once per place you pick - the town's position, not any photo's - and
+kept; offline, the place is shown without it. The location picker in the no-location queue
+and the home timeline draws borders the same way.
 
 **GPS tracks** - GPX files from a watch or logger app, and Google location exports:
 Takeout's `Records.json`, the monthly Semantic Location History files, the newer
@@ -182,9 +304,28 @@ changes** puts them back.
 
 **No-location queue** - photos without a position never reach the map, which is how they
 get forgotten. The sidebar counts them; **Review** opens them in the gallery, and then
-offers the ways to place them: from GPS tracks, from the nearest phone photo within two
-hours, or all of them on one spot. The timeline marks the days that have any with an
-amber tick under the bars.
+offers the ways to place them: one by one, from GPS tracks, from the nearest phone photo
+within two hours, or all of them on one spot.
+
+**One by one** shows them in a window of their own, oldest first, within the current
+filters: the photo on the left, a search box (towns, saved places, typed coordinates) and
+a map on the right. Type a place, **↑ ↓** to move through the results, and **Enter** saves
+the highlighted one as a hand-set position and brings up the next photo - one key from a
+typed name to the next photo. Enter pressed before the results arrive takes the first one
+when they do. Clicking the map (the pin can be dragged) or a suggestion sets the place
+too, and then Enter saves it. Suggestions above the map offer the last position used and
+the nearest photos in time that have a real fix. **← →** move between photos whenever the
+search box is empty, which it is after every save, and the photos either side are loaded
+ahead so stepping is instant; **Esc** closes. The timeline marks the days that have any with
+an amber tick under the bars.
+
+**Source** - where a photo came from, read off its folder: **Camera** for a camera roll
+(a folder called Camera or DCIM), **Whatsapp** for anything in a WhatsApp folder (Syncthing's
+`Whatsapp` and `Whatsapp video`, Android's "WhatsApp Images"). Gallery tiles and the
+lightbox show it, and the **Source** filter narrows every view to one - which with
+*Without GPS* and **One by one** is a quick way through WhatsApp photos, which carry no
+location. It is worked out from the folder on every query rather than stored, so it needs
+no rescan.
 
 **Your data** - **⚙ → Your data** downloads every located photo as GeoJSON or CSV
 (path, time, coordinates, place, country, camera, note) and every track as GPX. The index
@@ -307,8 +448,9 @@ with it - a black map under a white UI reads as a bug.
 
 **Timeline** - histogram across the bottom, always live. Bright bars are photos with
 GPS, dim bars are the rest. Drag on empty space to select a date range and everything
-else filters to it; `▶` sweeps a moving window across the whole library and animates the
-map.
+else filters to it; `▶` animates the map by growing the range from a fixed start - the
+start of the selected range, or the first photo - one **Step** at a time, so photos
+accumulate on the map as time passes. It stops at the last photo.
 
 **The selected window is a thing you can take hold of.** Grab the middle and slide it and
 the same span of time moves somewhere else, keeping its width and stopping at the ends
@@ -369,7 +511,7 @@ until clicked, so the map controls stay compact. With Mapbox:
   looking at: zoom in past level 11 and the photo nearest the middle of the view sets the
   light from where the sun was when it was taken (worked out from its time and position,
   and exact once the weather lookup has given the real time zone). Zoom back out past 9 and
-  the planet goes back to daylight. A replay sets it per stop.
+  the planet goes back to daylight. A replay sets it per photo, whatever is chosen here.
 - *Map* - Standard (3D buildings and landmarks) or Standard Satellite.
 - *Colours* - Default, Faded or Monochrome themes.
 - *Show* - weather of the photo, terrain (Mapbox's elevation model, slightly
@@ -387,14 +529,30 @@ days go in one request, so a week in one city costs one lookup. Photos are fille
 background after turning it on and after each scan, and a photo opened before then is
 looked up on the spot. The lightbox shows it under *Where*.
 
-In 3D the weather is drawn when you zoom in on a photo or a replay reaches a stop: rain and
+In 3D the weather is drawn when you zoom in on a photo or a replay reaches it: rain and
 snow particles (Mapbox GL JS 3.9+), fog that closes in for fog and thickens under cloud,
-and a faded map on grey days unless you chose a theme yourself. A chip at the top shows the
-photo's time and weather; click it to open the photo. The replay card shows it too.
+and a faded map on grey days unless you chose a theme yourself. A strip at the top shows the
+photo's time and weather (and, in Replay, the song); click it to open the photo.
+
+**Replay** flies from place to place in the order the photos were taken and shows every
+photo, first to last: photos taken within half a kilometre of each other, one after
+another, are one place, and the camera stays put while that place's photos go by (a badge
+says 2 / 5). **Places only** shows one photo per place instead, for a quick look at where
+a long stretch went. The trip list in the bar replays one trip from its first photo;
+*All photos in the current filters* replays whatever the filters select. **← →** step
+photo by photo, **Space** pauses and resumes, **↑ ↓** change the speed (½x to 4x); the
+map's own arrow keys are off while it runs. The bar has two rows: the scrubber and where
+you are on top, the buttons underneath. The card hangs from the top left and shrinks to
+stay clear of the bar. It is the photo itself, and under it
+that day's journal entry, if there is one, in a box that scrolls. During a replay the
+light and the weather always follow the photo on screen - its hour and its sky - even
+when a fixed light or no effects were chosen in **Style ▾** for looking around.
 
 Open-Meteo is free for non-commercial use without a key. A commercial product needs one
-of its API plans: put the key in **⚙ → Open-Meteo key** and requests go to the customer
-endpoints. The key stays on the server, like the R2 secrets.
+of its API plans (Standard, Professional or Enterprise, at
+[open-meteo.com/en/pricing](https://open-meteo.com/en/pricing)); the key is issued on
+checkout and managed at dashboard.open-meteo.com. Put it in **⚙ → Open-Meteo key** and
+requests go to the customer endpoints. The key stays on the server, like the R2 secrets.
 
 `Path` works here too: its own line layer, drawn under the points rather than over them,
 so the dots it connects stay legible instead of getting a dashed line drawn across them.
@@ -506,9 +664,10 @@ row, because a rescan reads the file again and the file still holds the wrong on
   cannot be carried further each time. To fix everything at once, filter by
   *Approximate*, **Select all**, then **Fix locations...**.
 - **Set location...** gives every selected photo the same position, whatever it had -
-  none, a tower guess, or a real fix that was wrong. Type it as latitude then longitude
-  (`53.1234, -9.5678`, which is how a map copies it) or pick it on the map. These are
-  tagged `MANUAL`.
+  none, a tower guess, or a real fix that was wrong. Type a town or a saved place (↑ ↓ and
+  Enter pick it, with its border drawn), paste latitude then longitude (`53.1234, -9.5678`,
+  which is how a map copies it), or click the map in the dialog; **Set to …** names the
+  place before anything moves. These are tagged `MANUAL`.
 
 Both survive a rescan, and neither writes to the photo files.
 
@@ -1162,7 +1321,13 @@ backend/
   thumbs.py      on-demand thumbnail/preview cache, video frames via ffmpeg
   geocode.py     offline place names and place search from GeoNames
   places.py      saved places: named circles, one of them home
-  trips.py       trips worked out from distance to home, day by day
+  trips.py       trips worked out from distance to home, day by day; legs and modes
+  home.py        the home timeline, and suggesting one from the photos
+  activities.py  workouts (GPX / TCX / FIT / Strava zip / Apple Health) and daily steps
+  music.py       Spotify listening history, matched to photo times
+  spotify.py     Spotify account sign-in (PKCE) and saving recent plays every half hour
+  borders.py     town borders from OpenStreetMap (Overpass), cached per 500 m cell
+  outlines.py    a picked place's border from Nominatim, for drawing it
   tracks.py      GPX / Google Timeline import, clock-offset matching, geotagging
 frontend/
   index.html     single page, no build step
@@ -1186,7 +1351,7 @@ data/            photomap.db + thumbs/ (created on first run, safe to delete)
 
 Run the tests with `.venv\Scripts\python.exe tests\test_sync.py`,
 `tests\test_writeback.py`, `tests\test_nametime.py`, `tests\test_dupes.py`,
-`tests\test_videometa.py`, `tests\test_fixes.py`, `tests\test_places.py`, `tests\test_placenames.py`, `tests\test_trips.py`, `node tests\test_worker.mjs`, `node tests\test_exif.mjs`,
+`tests\test_videometa.py`, `tests\test_fixes.py`, `tests\test_places.py`, `tests\test_placenames.py`, `tests\test_trips.py`, `tests\test_homeline.py`, `tests\test_spotify.py`, `node tests\test_worker.mjs`, `node tests\test_exif.mjs`,
 `node tests\test_uploadq.mjs`, `node tests\test_sw.mjs`, and (after
 `pip install botocore`) `tests\test_sigv4.py`.
 
@@ -1210,13 +1375,25 @@ because it is not part of the library any more.
 Everything the UI uses is a plain HTTP endpoint on `127.0.0.1:8712`, so the index is
 scriptable: `/api/points`, `/api/photos`, `/api/timeline`, `/api/dist`, `/api/stats`,
 `/api/albums`. All of them accept the same filter query params
-(`from`, `to`, `bbox`, `album`, `camera`, `gps`, `fav`, `q`, `near`, `country`), where
+(`from`, `to`, `bbox`, `album`, `camera`, `gps`, `fav`, `q`, `near`, `country`, `label`), where
 `q` matches the path, the note or the place name (add `cc=IE,FR` to match those countries
-too), `near` is a saved place id and `country` a two-letter code.
+too), `near` is a saved place id, `country` a two-letter code and `label` `Camera`, `Whatsapp` or
+`other`.
 
 Saved places are `GET/POST /api/places` and `PATCH/DELETE /api/places/<id>`; place
-search is `GET /api/geocode/search?q=`. Trips are `GET /api/trips?away_km=50`, and
-`PUT /api/trips/<key>/title` names one. Tracks: `POST /api/tracks/import?name=<file>` with
+search is `GET /api/geocode/search?q=`, `GET /api/geocode/reverse?lat=&lon=` names a
+position, and `GET /api/geocode/outline?lat=&lon=&population=` is a place's border as GeoJSON. Trips are `GET /api/trips?away_km=50`; `GET /api/trips/<key>` is one trip with
+its legs, days and workouts, `PUT /api/trips/<key>/title` names it and
+`PUT /api/trips/<key>/modes` (`trip`, and `legs` as `{leg id: mode}`) sets how it was
+travelled. The home timeline is `GET/PUT /api/home-timeline` (`items`: `since`, `name`,
+`lat`, `lon`). Workouts: `POST /api/activities/import?name=<file>` with the file as the
+body (workouts and daily summaries alike), `GET /api/activities`, `DELETE /api/activities/<id>`,
+`GET/DELETE /api/activities/daily`. Music: `POST /api/music/import?name=<file>`,
+`GET/DELETE /api/music`, `GET /api/photos/<id>/music`; the Spotify account is `GET /api/spotify`,
+`POST /api/spotify/config` (`client_id`), `GET /api/spotify/login` (starts sign-in),
+`POST /api/spotify/sync` and `DELETE /api/spotify`. Town borders: `GET /api/borders`
+(on or off, spots done and pending) and `POST /api/borders` with `{"enabled": true}`. `GET /api/photos/ids` takes
+`sort` like `/api/photos`. Tracks: `POST /api/tracks/import?name=<file>` with
 the file as the body, `GET /api/tracks`, `DELETE /api/tracks/<id>`,
 `GET /api/tracks/points`, `GET /api/tracks/offset` (the estimated camera clock offset)
 and `POST /api/tracks/geotag` (`offset_s`, `gap_min`, `include_approx`, `ids`,

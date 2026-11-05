@@ -16,8 +16,9 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 
 from . import (
-    auth, days, db, dupes, geocode, nametime, netinfo, photometa, places, r2, scanner, snapshot, sync,
-    thumbs, tracks, trips, weather,
+    activities, auth, borders, days, db, dupes, geocode, home, music, nametime, netinfo, outlines, photometa,
+    places, r2,
+    scanner, snapshot, spotify, sync, thumbs, tracks, trips, weather,
 )
 from .photometa import HEIF_ERROR, HEIF_OK, IMAGE_EXTS
 
@@ -29,9 +30,27 @@ except ImportError:
     RECYCLE_OK = False
 
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
+BACKEND = Path(__file__).resolve().parent
+
+
+def _code_stamp() -> float:
+    """The newest change to the server's own code. Python does not reload it,
+    while the pages are read from disk on every request - so after an update a
+    server left running serves new pages from old code, and they fail in ways
+    that look like bugs. The pages compare this against the stamp taken at
+    start and ask for a restart."""
+    return max(p.stat().st_mtime for p in BACKEND.glob("*.py"))
+
+
+STARTED_STAMP = _code_stamp()
 
 db.init()
 weather.init_schema()
+home.init_schema()
+activities.init_schema()
+music.init_schema()
+borders.init_schema()
+outlines.init_schema()
 app = FastAPI(title="Photo Map", docs_url=None, redoc_url=None)
 
 # Photos added on a phone reach the bucket immediately and the library only on a
@@ -42,6 +61,8 @@ sync.start_watching()
 geocode.kick()
 # Same for the weather, when it is turned on.
 weather.kick()
+# New Spotify plays, every half hour, once an account is connected.
+spotify.start_polling()
 
 
 @app.middleware("http")
@@ -84,6 +105,18 @@ def _bbox(value: str | None) -> tuple[str, list] | None:
         return "p.lat BETWEEN ? AND ? AND p.lon BETWEEN ? AND ?", [south, north, west, east]
     # viewport crosses the antimeridian
     return "p.lat BETWEEN ? AND ? AND (p.lon >= ? OR p.lon <= ?)", [south, north, west, east]
+
+
+# Where a photo came from, read off its folder: a phone's camera roll or
+# WhatsApp, which is how Syncthing lays a phone out (Camera, Whatsapp,
+# Whatsapp video) and how Android and iOS name the folders themselves (DCIM,
+# "WhatsApp Images"). Worked out in the query rather than stored, so it needs
+# no rescan and cannot go stale when files move.
+LABEL_SQL = (
+    "CASE WHEN lower(p.folder) LIKE '%whatsapp%' THEN 'Whatsapp'"
+    " WHEN lower(p.folder) LIKE '%camera%' OR lower(p.folder) LIKE '%dcim%' THEN 'Camera' END"
+)
+LABELS = ("Camera", "Whatsapp")
 
 
 def _filters(request: Request) -> tuple[str, list]:
@@ -160,6 +193,11 @@ def _filters(request: Request) -> tuple[str, list]:
         params.append(q["country"].upper())
     if q.get("fav") == "1":
         where.append("p.favorite=1")
+    if q.get("label") in LABELS:
+        where.append(f"({LABEL_SQL}) = ?")
+        params.append(q["label"])
+    elif q.get("label") == "other":
+        where.append(f"({LABEL_SQL}) IS NULL")
     if q.get("ids"):
         ids = [int(x) for x in q["ids"].split(",") if x.strip().isdigit()]
         where.append(f"p.id IN ({','.join('?' * len(ids))})" if ids else "0")
@@ -205,6 +243,7 @@ def get_config(request: Request):
         "ffmpeg": bool(thumbs.FFMPEG),
         "recycle_bin": RECYCLE_OK,
         "data_dir": str(db.DATA_DIR),
+        "stale": _code_stamp() > STARTED_STAMP,
     }
 
 
@@ -538,7 +577,7 @@ def _photo_page(where: str, params: list, limit: int, offset: int, sort: str) ->
     rows = conn.execute(
         f"SELECT p.id, p.filename, p.path, p.ext, p.taken_ts, p.taken_src, p.lat, p.lon,"
         f" p.width, p.height, p.favorite, p.filesize, p.camera_make, p.camera_model,"
-        f" p.note, p.duration, p.gps_method, p.place, p.country, p.orientation"
+        f" p.note, p.duration, p.gps_method, p.place, p.country, p.orientation, ({LABEL_SQL}) AS label"
         f" FROM photos p WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
         params + [min(limit, 1000), offset],
     ).fetchall()
@@ -558,10 +597,10 @@ def _photo_page(where: str, params: list, limit: int, offset: int, sort: str) ->
 
 
 @app.get("/api/photos/ids")
-def photo_ids(request: Request, limit: int = 200000):
+def photo_ids(request: Request, limit: int = 200000, sort: str = "date_desc"):
     where, params = _filters(request)
     rows = db.connect().execute(
-        f"SELECT p.id FROM photos p WHERE {where} ORDER BY p.taken_ts DESC LIMIT ?",
+        f"SELECT p.id FROM photos p WHERE {where} ORDER BY {SORTS.get(sort, SORTS['date_desc'])} LIMIT ?",
         params + [limit],
     ).fetchall()
     return {"ids": [r["id"] for r in rows]}
@@ -570,7 +609,7 @@ def photo_ids(request: Request, limit: int = 200000):
 @app.get("/api/photos/{photo_id}")
 def photo_detail(photo_id: int):
     conn = db.connect()
-    row = conn.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone()
+    row = conn.execute(f"SELECT p.*, ({LABEL_SQL}) AS label FROM photos p WHERE p.id=?", (photo_id,)).fetchone()
     if not row:
         raise HTTPException(404, "Not found")
     data = dict(row)
@@ -1328,11 +1367,16 @@ def stats(request: Request):
         f" COUNT(*) c FROM photos p WHERE {where} GROUP BY name ORDER BY c DESC LIMIT 12",
         params,
     ).fetchall()
+    labels = conn.execute(
+        f"SELECT ({LABEL_SQL}) AS label, COUNT(*) c FROM photos p WHERE {where} GROUP BY label ORDER BY c DESC",
+        params,
+    ).fetchall()
     missing = conn.execute("SELECT COUNT(*) c FROM photos WHERE missing=1").fetchone()["c"]
     return {
         **dict(base),
         "missing": missing,
         "cameras": [dict(r) for r in cameras if r["name"]],
+        "labels": [{"label": r["label"] or "other", "c": r["c"]} for r in labels],
     }
 
 
@@ -1369,6 +1413,31 @@ def delete_place(place_id: int):
     return {"ok": True}
 
 
+@app.get("/api/borders")
+def borders_status():
+    return borders.status()
+
+
+@app.post("/api/borders")
+def borders_enable(body: dict = Body(...)):
+    return borders.set_enabled(bool(body.get("enabled")))
+
+
+@app.get("/api/geocode/reverse")
+def geocode_reverse(lat: float, lon: float):
+    place, cc = geocode.lookup(lat, lon) if geocode.available() else ("", "")
+    return {"place": place, "country": cc}
+
+
+@app.get("/api/geocode/outline")
+def geocode_outline(lat: float, lon: float, population: int = 0):
+    """A picked place's border, from OpenStreetMap, for drawing it."""
+    try:
+        return outlines.outline(lat, lon, population)
+    except Exception as exc:  # offline, or Nominatim busy: the place is still shown, without its border
+        raise HTTPException(502, f"Could not fetch the outline: {exc}")
+
+
 @app.get("/api/geocode/search")
 def geocode_search(q: str = "", limit: int = 10):
     """Places by name, from the offline GeoNames list, for jumping the map."""
@@ -1381,6 +1450,38 @@ def geocode_search(q: str = "", limit: int = 10):
 def list_trips(away_km: float = trips.AWAY_KM):
     geocode.kick()
     return trips.compute(away_km=max(5.0, min(away_km, 2000.0)))
+
+
+@app.get("/api/trips/{key}")
+def trip_detail(key: str, away_km: float = trips.AWAY_KM):
+    found = trips.detail(key, away_km=max(5.0, min(away_km, 2000.0)))
+    if not found:
+        raise HTTPException(404, "No such trip")
+    return found
+
+
+@app.put("/api/trips/{key}/modes")
+def trip_modes(key: str, body: dict = Body(...)):
+    if not key.isdigit():
+        raise HTTPException(400, "Not a trip")
+    try:
+        return trips.set_modes(key, body)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/api/home-timeline")
+def home_timeline():
+    items = home.listing()
+    return {"items": items, "configured": bool(items), "suggested": [] if items else home.suggest()}
+
+
+@app.put("/api/home-timeline")
+def save_home_timeline(body: dict = Body(...)):
+    try:
+        return {"items": home.save(list(body.get("items") or [])), "configured": True}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
 @app.put("/api/trips/{key}/title")
@@ -1455,6 +1556,134 @@ def track_geotag(body: dict = Body(default={})):
         ids=ids,
         dry_run=bool(body.get("dry_run", True)),
     )
+
+
+# ----------------------------------------------------------------- activities
+
+@app.get("/api/activities")
+def list_activities():
+    return {"items": activities.list_all(), "daily": activities.daily_status()}
+
+
+@app.post("/api/activities/import")
+async def import_activity(request: Request, name: str = "activity.gpx"):
+    """A GPX, TCX or FIT file, gzipped or not, or a zip such as Strava's export."""
+    data = bytearray()
+    async for chunk in request.stream():
+        data.extend(chunk)
+        if len(data) > TRACK_MAX_BYTES:
+            raise HTTPException(413, "File too large")
+    try:
+        result = activities.import_file(name, bytes(data))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:  # malformed XML, a broken zip or FIT file
+        raise HTTPException(400, f"Could not read {name}: {exc}")
+    if not result["items"] and not result["duplicates"] and not result["days"]:
+        raise HTTPException(400, f"No workouts or daily totals found in {name}")
+    return result
+
+
+@app.get("/api/activities/daily")
+def daily_status():
+    return activities.daily_status()
+
+
+@app.delete("/api/activities/daily")
+def clear_daily():
+    activities.clear_daily()
+    return {"ok": True}
+
+
+@app.delete("/api/activities/{activity_id}")
+def delete_activity(activity_id: int):
+    if not activities.delete(activity_id):
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------- music
+
+@app.get("/api/music")
+def music_status():
+    return music.status()
+
+
+@app.post("/api/music/import")
+async def import_music(request: Request, name: str = "StreamingHistory.json"):
+    """Spotify's streaming history: the .json files or the .zip of the data download."""
+    data = bytearray()
+    async for chunk in request.stream():
+        data.extend(chunk)
+        if len(data) > TRACK_MAX_BYTES:
+            raise HTTPException(413, "File too large")
+    try:
+        return music.import_file(name, bytes(data))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:  # a broken zip
+        raise HTTPException(400, f"Could not read {name}: {exc}")
+
+
+@app.delete("/api/music")
+def clear_music():
+    music.clear()
+    return music.status()
+
+
+@app.get("/api/spotify")
+def spotify_status():
+    return {**spotify.status(), **music.status()}
+
+
+@app.post("/api/spotify/config")
+def spotify_config(body: dict = Body(...)):
+    try:
+        return spotify.set_client_id(str(body.get("client_id") or ""))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/api/spotify/login")
+def spotify_login():
+    try:
+        return RedirectResponse(spotify.login_url(), status_code=303)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/api/spotify/callback")
+def spotify_callback(code: str = "", state: str = "", error: str = ""):
+    """Where Spotify sends the browser back after sign-in."""
+    if error or not code:
+        message = f"Spotify did not connect: {error or 'no code returned'}."
+    else:
+        try:
+            spotify.finish_login(code, state)
+            message = "Spotify is connected. New plays are saved every half hour while Photo Map runs."
+        except Exception as exc:  # an expired sign-in, a refused code, no network
+            message = f"Spotify did not connect: {exc}"
+    return HTMLResponse(
+        "<!doctype html><meta charset=utf-8><title>Photo Map</title>"
+        "<body style='font:15px system-ui;padding:40px;max-width:520px'>"
+        f"<p>{message}</p><p>You can close this tab and go back to Photo Map.</p>"
+        "<script>setTimeout(() => window.close(), 2500)</script></body>")
+
+
+@app.post("/api/spotify/sync")
+def spotify_sync():
+    added = spotify.sync()
+    return {**spotify.status(), **music.status(), "added": added}
+
+
+@app.delete("/api/spotify")
+def spotify_disconnect():
+    return spotify.disconnect()
+
+
+@app.get("/api/photos/{photo_id}/music")
+def photo_music(photo_id: int):
+    return music.for_photo(photo_id)
 
 
 # --------------------------------------------------------------------- export

@@ -11,6 +11,10 @@ Positions change after the fact (fixes, undo, a rescan), so each photo records
 the coordinates it was named for in `place_at` and anything that no longer
 matches is looked up again. No write site has to remember to clear it.
 
+With town borders turned on (borders.py), a photo inside a town's border in
+OpenStreetMap is named after that town, and the range rule only covers what
+the borders do not.
+
 Names come as GeoNames spells them, which is mostly the local form ("Wien",
 "Gaillimh"). A language can be chosen instead: GeoNames' alternate names file
 is streamed once for it and reduced to that language's name for each place on
@@ -26,18 +30,33 @@ import unicodedata
 import urllib.request
 import zipfile
 
-from . import db
+from . import borders, db
 
 SOURCE = "https://download.geonames.org/export/dump/"
 DIR = db.DATA_DIR / "geonames"
 PLACES = DIR / "places.tsv"
 
-# Past this the nearest place is not where the photo was, just the closest
-# thing on the list. Country holds out further, for coast and lake shots.
-PLACE_KM = 40
+# A photo is filed under a town only when it is within that town's range, which
+# grows with its population: a village of 1,000 reaches about 3 km, a city of a
+# million about 13 km, a megacity a little over 50. Outside every range the
+# photo keeps its country and no town. Country holds out further, for coast and
+# lake shots.
+RANGE_BASE_KM = 3.0
+RANGE_PER_SQRT_POP = 0.0103
+RANGE_MAX_KM = 60.0
+# A place list downloaded before populations were kept cannot size a town, so
+# every town reaches this far, as all of them used to.
+LEGACY_KM = 40.0
 COUNTRY_KM = 150
+# Bumped when the naming rule changes, so every photo is named again once.
+RULE = "range-2"
+
+
+def range_km(population: int) -> float:
+    return min(RANGE_MAX_KM, RANGE_BASE_KM + RANGE_PER_SQRT_POP * math.sqrt(max(population, 1000)))
 
 _index = None
+_has_pop = True
 _pops: list = []
 _ids: list = []
 _region_ids: list = []
@@ -68,6 +87,15 @@ def language() -> str:
     return (db.get_setting("place_lang") or "").strip().lower()
 
 
+def has_population() -> bool:
+    """Whether places.tsv carries populations, which town ranges are sized by.
+    Lists downloaded before ranges existed have five columns and do not."""
+    if not available():
+        return False
+    with PLACES.open(encoding="utf-8") as f:
+        return len(f.readline().rstrip("\r\n").split("\t")) >= 6
+
+
 def has_ids() -> bool:
     """Whether places.tsv carries GeoNames ids, which translations are keyed by.
     Lists downloaded before translations existed do not."""
@@ -84,7 +112,7 @@ def status() -> dict:
     lang = language()
     return {"available": available(), "downloading": _download["running"],
             "error": _download["error"], "pending": pending, "filling": _fill_lock.locked(),
-            "language": lang, "ids": has_ids(),
+            "language": lang, "ids": has_ids(), "populations": has_population(),
             "translated": bool(lang) and names_file(lang).exists(),
             "names": {k: _names[k] for k in ("running", "error", "lang", "done", "total")}}
 
@@ -256,22 +284,27 @@ def _load():
                 region_ids.append(rest[2] if len(rest) > 2 else "")
                 grid.setdefault((math.floor(lat), math.floor(lon)), []).append(i)
             _index = (names, lats, lons, ccs, regions, grid)
-            global _pops, _folded, _ids, _region_ids
+            global _pops, _folded, _ids, _region_ids, _has_pop
             _pops, _ids, _region_ids = pops, ids, region_ids
+            _has_pop = any(pops)
             _folded = None
     return _index
 
 
 def lookup(lat: float, lon: float) -> tuple[str, str]:
-    """(place, country code) for a position, either empty when nothing is near."""
+    """(place, country code) for a position. The place is the nearest town whose
+    range covers the position, empty when none does; the country is the nearest
+    town's, empty when nothing is within COUNTRY_KM."""
     names, lats, lons, ccs, regions, grid = _load()
     cy, cx = math.floor(lat), math.floor(lon)
     shrink = max(math.cos(math.radians(lat)), 0.05)
     best, best_km = None, float("inf")
+    town, town_km = None, float("inf")
     # Rings of one-degree cells outwards, until no unsearched cell could hold
-    # anything nearer than what has been found.
+    # anything nearer than the nearest place, or a town whose range reaches here.
     for ring in range(0, 30):
-        if best is not None and (ring - 1) * 111 * shrink > best_km:
+        reach = (ring - 1) * 111 * shrink
+        if best is not None and reach > best_km and (reach > town_km or reach > RANGE_MAX_KM):
             break
         for dy in range(-ring, ring + 1):
             for dx in range(-ring, ring + 1):
@@ -284,12 +317,23 @@ def lookup(lat: float, lon: float) -> tuple[str, str]:
                     km = 6371 * math.hypot(x, y)
                     if km < best_km:
                         best, best_km = i, km
-    if best is None or best_km > COUNTRY_KM:
+                    if km < town_km and km <= (range_km(_pops[i]) if _has_pop else LEGACY_KM):
+                        town, town_km = i, km
+    near = best is not None and best_km <= COUNTRY_KM
+    # A town border from OpenStreetMap, where one is known, beats any range.
+    border = borders.lookup(lat, lon, language())
+    if border:
+        name, region, cc = border
+        cc = cc or (ccs[best] if near else "")
+        if not region and near and ccs[best] == cc:
+            region = _local(best)[1]
+        return ", ".join(p for p in (name, region) if p), cc
+    if not near:
         return "", ""
-    if best_km > PLACE_KM:
+    if town is None:
         return "", ccs[best]
-    name, region = _local(best)
-    return ", ".join(p for p in (name, region) if p), ccs[best]
+    name, region = _local(town)
+    return ", ".join(p for p in (name, region) if p), ccs[town]
 
 
 def _local(i: int) -> tuple[str, str]:
@@ -339,8 +383,12 @@ def fill() -> None:
 
 def kick() -> None:
     """fill() in the background, if there is anything to do it with."""
+    if available() and db.get_setting("place_rule") != RULE:
+        rename()
+        db.set_setting("place_rule", RULE)
     if available() and not _fill_lock.locked():
         threading.Thread(target=fill, daemon=True).start()
+    borders.kick()
 
 
 # ----------------------------------------------------------------- search

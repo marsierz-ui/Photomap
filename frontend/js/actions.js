@@ -1,7 +1,7 @@
 import { api, guard } from './api.js';
 import { state, emit, fmtNum } from './state.js';
 import { modal, toast } from './ui.js';
-import { pickLocation } from './mapview.js';
+import { locationPicker } from './locpick.js';
 
 export async function setFavorite(ids, value) {
   await guard(api.post('/api/photos/favorite', { ids, value }), 'Failed');
@@ -27,42 +27,41 @@ async function applyLocation(ids, lat, lon) {
 
 /** Give every selected photo one location, typed in or picked on the map. */
 export function setLocationDialog(ids) {
-  modal(`
+  let picker = null;
+  modal(`<div class="setloc">
     <h3>Set the location of ${fmtNum(ids.length)} selected photo${ids.length === 1 ? '' : 's'}</h3>
-    <p>Every selected photo gets the same position, whatever it had before.</p>
-    <div class="row"><label>Coordinates</label>
-      <input type="text" id="loc-text" placeholder="53.1234, -9.5678" style="flex:1"></div>
-    <p class="muted small" id="loc-err" style="min-height:1.2em"></p>
+    <p class="small">Every selected photo gets the same position, whatever it had before. Type a town or a saved
+      place (↑ ↓ to choose, Enter to take it), paste coordinates such as 53.1234, -9.5678, or click the map.</p>
+    <div class="setloc-picker"></div>
+    <p class="small err-text" id="loc-err"></p>
     <div class="actions">
       <button class="btn" data-act="cancel">Cancel</button>
-      <button class="btn" data-act="pick">Pick on the map</button>
-      <button class="btn primary" data-act="ok">Set location</button>
-    </div>`, (box, close) => {
-    const field = box.querySelector('#loc-text');
-    field.focus();
-    box.querySelector('[data-act=cancel]').onclick = close;
-    box.querySelector('[data-act=ok]').onclick = () => {
-      const at = parseCoordinates(field.value);
+      <button class="btn primary" data-act="ok" disabled>Set location</button>
+    </div>
+  </div>`, (box, close) => {
+    const ok = box.querySelector('[data-act=ok]');
+    const done = () => { picker?.destroy(); close(); };
+    const apply = () => {
+      const at = picker.get();
       if (!at) {
-        box.querySelector('#loc-err').textContent =
-          'Latitude then longitude, e.g. 53.1234, -9.5678';
+        box.querySelector('#loc-err').textContent = 'Choose a place first: search for it, or click the map.';
         return;
       }
-      close();
+      done();
       applyLocation(ids, at.lat, at.lon);
     };
-    field.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') box.querySelector('[data-act=ok]').click();
+    picker = locationPicker(box.querySelector('.setloc-picker'), {
+      onChange: (at) => {
+        ok.disabled = !at;
+        ok.textContent = at?.label ? `Set to ${at.label}` : 'Set location';
+      },
+      // Enter takes the highlighted place; a second Enter sets it, so a batch is
+      // never moved by one keystroke.
+      onEnter: apply,
     });
-    // The selection is kept while the map is up, so the photos are still the ones
-    // that were chosen when the click lands.
-    box.querySelector('[data-act=pick]').onclick = async () => {
-      close();
-      emit('showMap');
-      const at = await pickLocation();
-      if (at) applyLocation(ids, at.lat, at.lng);
-      else toast('Cancelled - the location was not changed');
-    };
+    picker.focus();
+    box.querySelector('[data-act=cancel]').onclick = done;
+    ok.onclick = apply;
   });
 }
 

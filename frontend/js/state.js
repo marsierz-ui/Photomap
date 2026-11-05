@@ -3,7 +3,7 @@
 // every date read/write here uses UTC accessors on purpose.
 
 export const state = {
-  filters: { from: null, to: null, gps: 'any', album: null, camera: '', q: '', fav: false, near: null, country: '' },
+  filters: { from: null, to: null, gps: 'any', album: null, camera: '', q: '', fav: false, near: null, country: '', label: '' },
   bounds: null,
   followMap: false,
   sort: 'date_desc',
@@ -50,6 +50,7 @@ export function params(opts = {}) {
   if (f.near) p.set('near', f.near);
   if (f.country) p.set('country', f.country);
   if (f.fav) p.set('fav', '1');
+  if (f.label) p.set('label', f.label);
   if (bbox && state.followMap && state.bounds) p.set('bbox', state.bounds);
   Object.entries(opts.extra || {}).forEach(([k, v]) => p.set(k, v));
   return p;

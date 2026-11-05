@@ -110,8 +110,8 @@ button, input, select { font: inherit; color: inherit; }
 .tab:hover { color: var(--text); }
 .tab.active { background: var(--panel-2); border-color: var(--line); color: var(--text); }
 
-#search, #place-search {
-  width: 240px;
+#search {
+  width: 300px;
   min-width: 0;
   flex-shrink: 1;
   background: var(--panel-2);
@@ -119,7 +119,11 @@ button, input, select { font: inherit; color: inherit; }
   border-radius: var(--radius);
   padding: 5px 9px;
 }
-#search:focus, #place-search:focus { outline: 1px solid var(--accent); }
+#search:focus { outline: 1px solid var(--accent); }
+.place-results.top-results { position: fixed; z-index: 3000; right: auto; }
+.top-results .results-head, .top-results .results-foot { padding: 6px 10px; }
+.top-results .results-foot { border-top: 1px solid var(--line); }
+.place-results button.hi { background: var(--active); }
 
 .chip {
   background: var(--panel-2);
@@ -268,25 +272,38 @@ button, input, select { font: inherit; color: inherit; }
   /* Clear of the status line bottom-left, and of the Mapbox logo and credits
      bottom-right, which Mapbox's terms want left visible. */
   position: absolute; left: 50%; bottom: 84px; transform: translateX(-50%); z-index: 600;
-  display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+  display: flex; flex-direction: column; gap: 6px; padding: 6px 10px;
   background: var(--overlay); border: 1px solid var(--line); border-radius: var(--radius);
-  max-width: calc(100% - 32px);
+  width: min(720px, calc(100% - 32px));
 }
-.replay-bar input[type=range] { width: 220px; min-width: 80px; flex: 1; }
+.replay-bar .rb-track { display: flex; align-items: center; gap: 10px; }
+.replay-bar .rb-track input[type=range] { flex: 1; min-width: 0; }
+.replay-bar .rb-buttons { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 6px 8px; }
 .replay-bar .where { white-space: nowrap; }
 .replay-card {
-  position: absolute; left: 12px; bottom: 140px; z-index: 600; cursor: pointer;
-  display: flex; gap: 10px; align-items: center; padding: 8px;
+  position: absolute; left: 12px; top: 52px; z-index: 600; max-height: calc(100% - 52px - 190px); overflow: hidden;
+  display: flex; flex-direction: column; gap: 6px; padding: 6px; width: 432px; max-width: calc(100% - 24px);
   background: var(--overlay); border: 1px solid var(--line); border-radius: var(--radius);
   animation: replay-pop .35s ease-out;
 }
-.replay-card img { width: 120px; height: 90px; object-fit: cover; border-radius: 4px; display: block; }
+.replay-card .shot { position: relative; cursor: pointer; }
+.replay-card img { width: 100%; aspect-ratio: 4 / 3; max-height: max(140px, calc(100vh - 560px)); object-fit: cover; border-radius: 4px; display: block; }
+.replay-card .count {
+  position: absolute; right: 6px; bottom: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
+  background: rgba(0, 0, 0, .6); color: #fff;
+}
+.replay-card .note {
+  max-height: 120px; overflow-y: auto; white-space: pre-line; font-size: 12px; line-height: 1.45;
+  padding: 6px 8px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px;
+}
+.replay-card .note-day { white-space: normal; margin-bottom: 2px; }
+.replay-bar select { background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 2px 4px; max-width: 220px; color: inherit; font: inherit; font-size: 11px; }
 @keyframes replay-pop { from { opacity: 0; transform: translateY(8px) scale(.96); } to { opacity: 1; transform: none; } }
 @media (max-width: 700px) {
-  .replay-bar { bottom: 80px; left: 8px; right: 8px; transform: none; max-width: none; }
+  .replay-bar { bottom: 80px; left: 8px; right: 8px; transform: none; max-width: none; width: auto; }
   .replay-bar .where { display: none; }
-  .replay-card { bottom: 132px; left: 8px; }
-  .replay-card img { width: 80px; height: 60px; }
+  .replay-card { top: 48px; left: 8px; width: 220px; }
+  .replay-card .note { max-height: 80px; }
 }
 
 .note-pin i {
@@ -709,7 +726,6 @@ button, input, select { font: inherit; color: inherit; }
   max-width: calc(100% - 260px); overflow: hidden; text-overflow: ellipsis;
   animation: replay-pop .35s ease-out;
 }
-.replay-card .wx { margin-top: 2px; }
 @media (max-width: 700px) {
   .globe-weather { left: 54px; transform: none; max-width: calc(100% - 190px); font-size: 11px; }
   .style-pop .pop-grid { grid-template-columns: 1fr; }
@@ -728,13 +744,11 @@ button, input, select { font: inherit; color: inherit; }
 .trip-body h4 { margin: 0; font-size: 15px; }
 .trip-body h4 [data-act=rename] { cursor: text; }
 .trip-body .flags { letter-spacing: 2px; }
-.trip-towns { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trip-towns { overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; }
 .trip-acts { display: flex; flex-wrap: wrap; gap: 4px; margin-top: auto; padding-top: 6px; }
 .empty { padding: 30px 10px; text-align: center; }
 
 /* ----------------------------------------------------------------- places */
-.place-find { position: relative; }
-.place-find input { width: 210px; margin: 0; box-shadow: 0 1px 4px var(--shadow); }
 .place-results {
   position: absolute; right: 0; top: calc(100% + 4px); width: 300px; max-height: 320px; overflow-y: auto;
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
@@ -780,7 +794,125 @@ label.btn { cursor: pointer; }
 .tile .meta .where { opacity: .85; }
 
 @media (max-width: 700px) {
-  .place-find input { width: 150px; }
   .place-results { width: 240px; }
   .trip-grid { grid-template-columns: 1fr; }
+}
+
+/* ------------------------------------------------------ full-window panels
+   A trip, and the no-location queue: above the app, below the lightbox (so a
+   photo opened from a panel shows over it) and the modal. */
+.queue { flex-wrap: wrap; }
+.banner {
+  padding: 8px 12px; border: 1px solid var(--hover-line); border-radius: var(--radius);
+  background: var(--panel-2); font-size: 12px;
+}
+.banner .btn { margin-left: 6px; }
+.err-text { color: var(--danger-text); min-height: 1em; margin: 6px 0 0; }
+
+.fullpanel {
+  position: fixed; inset: 0; z-index: 1800; background: var(--bg);
+  display: flex; flex-direction: column;
+}
+.fp-head {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 14px; border-bottom: 1px solid var(--line); background: var(--panel);
+}
+.fp-head .spacer, .lq-acts .spacer { flex: 1; }
+.fp-head h2 { margin: 0; font-size: 16px; }
+
+.lq-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(320px, 1fr); }
+.lq-photo { display: flex; flex-direction: column; min-height: 0; background: var(--void); }
+.lq-photo img { flex: 1; min-height: 0; width: 100%; object-fit: contain; }
+.lq-meta { padding: 8px 14px; background: var(--panel); border-top: 1px solid var(--line); }
+.lq-side { display: flex; flex-direction: column; gap: 8px; padding: 12px; min-height: 0; border-left: 1px solid var(--line); }
+.lq-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-height: 24px; }
+.lq-picker { flex: 1; min-height: 0; }
+.lq-acts { display: flex; gap: 8px; }
+
+.lp { display: flex; flex-direction: column; gap: 6px; height: 100%; }
+.lp-find { position: relative; }
+.lp-find input {
+  width: 100%; background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px;
+  padding: 6px 8px; color: inherit; font: inherit;
+}
+.lp-find .place-results { left: 0; right: 0; width: auto; z-index: 1000; }
+.lp-find .place-results button.hi { background: var(--active); }
+.lp-map { flex: 1; min-height: 220px; border-radius: var(--radius); border: 1px solid var(--line); isolation: isolate; }
+
+.modal-box:has(.home-tl), .modal-box:has(.setloc) { max-width: 760px; width: min(760px, calc(100vw - 24px)); }
+.setloc-picker { height: 360px; }
+.htl-picker { height: 300px; }
+.htl-rows { display: flex; flex-direction: column; gap: 4px; margin-bottom: 6px; }
+.htl-row {
+  display: grid; grid-template-columns: 130px 1fr 130px 20px; align-items: center; gap: 8px;
+  padding: 4px 6px; border: 1px solid var(--line); border-radius: var(--radius); cursor: pointer;
+}
+.htl-row.active { border-color: var(--accent); background: var(--active); }
+.htl-row input { margin: 0 !important; background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; color: inherit; font: inherit; }
+
+.tv-title h2 .flags { letter-spacing: 2px; }
+.tv-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(360px, 1fr); }
+.tv-map { min-height: 0; }
+.tv-side { overflow-y: auto; padding: 12px 14px; border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
+.tv-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 6px; }
+.tv-tile { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+.tv-tile strong { font-size: 15px; }
+.tv-modebar { display: flex; height: 10px; border-radius: 5px; overflow: hidden; gap: 1px; }
+.tv-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; color: var(--muted); }
+.tv-legend i, .tv-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 4px; flex: none; }
+.tv-chart-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.tv-chart-head .seg button { padding: 3px 8px; font-size: 11px; }
+.tv-chart { min-height: 150px; }
+.tv-chart svg { display: block; }
+.tv-axis { stroke: var(--line); }
+.tv-tick { fill: var(--muted); font-size: 10px; }
+.tv-fill { fill: var(--accent); }
+.tv-hit { fill: transparent; }
+.tv-bar { cursor: pointer; }
+.tv-bar:hover .tv-hit { fill: var(--hover); }
+.tv-bar.dim rect:not(.tv-hit) { opacity: .3; }
+.tv-bar.sel .tv-hit { fill: var(--active); }
+.tv-day h4 { margin: 10px 0 6px; font-size: 13px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tv-daylabel { margin: 8px 0 2px; }
+.tv-leg { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+.tv-leg-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tv-leg select, .tv-day select, .fp-head select {
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 2px 4px; color: inherit; font: inherit; font-size: 11px;
+}
+.tv-act { padding: 6px 8px; margin-bottom: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+.tv-thumbs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; align-items: center; }
+.tv-thumbs img { width: 64px; height: 64px; object-fit: cover; border-radius: 4px; cursor: pointer; }
+
+@media (max-width: 860px) {
+  .lq-body, .tv-body { grid-template-columns: 1fr; grid-template-rows: minmax(200px, 40%) 1fr; overflow-y: auto; }
+  .lq-side, .tv-side { border-left: none; border-top: 1px solid var(--line); }
+  .lq-picker { min-height: 280px; }
+  .htl-row { grid-template-columns: 1fr 1fr; }
+}
+
+/* Spotify's embed, for music beside the photos and during Replay. Above the
+   lightbox and the panels, so it stays reachable wherever it was started. */
+.music-player {
+  position: fixed; right: 12px; bottom: 150px; z-index: 2600; width: min(340px, calc(100vw - 24px));
+  display: flex; align-items: flex-start; gap: 4px; padding: 4px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 6px 18px var(--shadow);
+}
+.music-player.hidden { display: none; }
+.music-embed { flex: 1; min-width: 0; }
+.music-player iframe { display: block; border: 0; border-radius: 8px; }
+.tv-place { display: flex; align-items: center; gap: 8px; padding: 3px 4px; border-radius: 4px; cursor: pointer; }
+.tv-place:hover { background: var(--hover); }
+
+/* Where a photo came from (Camera, Whatsapp), read off its folder. */
+.src-tag {
+  display: inline-block; padding: 0 5px; border-radius: 3px; font-size: 10px; line-height: 15px;
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--muted); white-space: nowrap;
+}
+
+/* Shown when the server is older than its own code; see /api/config "stale". */
+.stale-bar {
+  position: fixed; top: 50px; left: 50%; transform: translateX(-50%); z-index: 3500;
+  padding: 8px 14px; border-radius: var(--radius); font-size: 12px; max-width: calc(100vw - 24px);
+  background: var(--danger-bg); color: var(--danger-text); border: 1px solid var(--danger-line);
+  box-shadow: 0 6px 18px var(--shadow);
 }
